@@ -156,7 +156,18 @@ class ModelMetadata(BaseModel):
     tool_call_count: int
 
 
-class ConclusionOutput(BaseModel):
+class _ConclusionCore(BaseModel):
+    """Fields the model itself decides. Shared by the submit_conclusion tool
+    input (what Claude sends) and ConclusionOutput (what gets stored) so the
+    validation rules live in exactly one place and apply to both.
+
+    sample_coverage and model_metadata are deliberately NOT here -- they're
+    backend-computed (sample_coverage from the last check_sample_coverage
+    call, model_metadata from the loop's own bookkeeping) and appended after
+    validation, not supplied by the model. Asking the model to restate them
+    would just be another thing it could get wrong or fabricate.
+    """
+
     test_step_id: str
     control_objective_ref: str
     conclusion: Literal["satisfied", "not_satisfied", "insufficient_evidence"]
@@ -169,11 +180,9 @@ class ConclusionOutput(BaseModel):
     additional_support_requests: list[str]
     confidence: Literal["high", "medium", "low"]
     confidence_rationale: str
-    sample_coverage: SampleCoverage | None
-    model_metadata: ModelMetadata
 
     @model_validator(mode="after")
-    def _citations_required_unless_insufficient(self) -> "ConclusionOutput":
+    def _citations_required_unless_insufficient(self) -> "_ConclusionCore":
         if self.conclusion != "insufficient_evidence" and not self.evidence_citations:
             raise ValueError(
                 "evidence_citations must be non-empty unless conclusion == 'insufficient_evidence'"
@@ -181,7 +190,7 @@ class ConclusionOutput(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _ipe_evidence_required_if_relied_on(self) -> "ConclusionOutput":
+    def _ipe_evidence_required_if_relied_on(self) -> "_ConclusionCore":
         if self.relies_on_system_generated_report and not self.ipe_completeness_accuracy_evidence:
             raise ValueError(
                 "ipe_completeness_accuracy_evidence must be non-empty when "
@@ -190,8 +199,19 @@ class ConclusionOutput(BaseModel):
         return self
 
 
+class SubmitConclusionInput(_ConclusionCore):
+    """The submit_conclusion tool's input_schema -- what Claude actually sends."""
+
+
+class ConclusionOutput(_ConclusionCore):
+    """The full stored/audited record: model fields + backend-computed fields."""
+
+    sample_coverage: SampleCoverage | None
+    model_metadata: ModelMetadata
+
+
 def validate_citations_against_transcript(
-    conclusion: ConclusionOutput, evidence_ids_returned_by_search: set[str]
+    conclusion: SubmitConclusionInput | ConclusionOutput, evidence_ids_returned_by_search: set[str]
 ) -> None:
     """Reject a conclusion that cites evidence never returned by search_cy_support
     in this conversation -- the mechanical fabrication check from section 3.
