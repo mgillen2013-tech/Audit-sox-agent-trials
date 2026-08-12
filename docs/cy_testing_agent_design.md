@@ -12,7 +12,7 @@ decisions so they don't have to be re-derived later.
 ## 0. Enterprise & control environment context (feeds the system prompt)
 
 This isn't background for developers to skim — it's a fixed block that goes
-into the system prompt, in the cacheable prefix from section 5. The model
+into the system prompt, in the cacheable prefix from section 6. The model
 should have this context on every call so it can correctly read
 company-specific terminology and structure in the evidence, instead of
 guessing at abbreviations or misreading what's normal. Because it's
@@ -56,7 +56,64 @@ number, treat that as normal company vocabulary, not something to flag as
 unusual on its own.
 ```
 
-## 1. Document extraction strategy (PDFs + Excel)
+## 1. Intake requirements
+
+The original sketch of this ("simple form: 2 uploads + your fields") was
+never actually pinned down. It has to be, because the tool loop in section
+4 assumes a sample population already exists to check evidence against —
+and nothing upstream of that said where it comes from.
+
+**Intake is per control**, not per engagement — PY workpapers are organized
+by control, and a control's 2-5 test steps share one PY precedent. Three
+inputs, plus a small metadata form:
+
+1. **PY testing workpaper** (PDF/Excel) — control objective, test step
+   language, PY sample/support, PY conclusion. Parsed once, reused as
+   precedent for every test step under this control (section 2).
+2. **CY sample list** — this is the piece that was missing. See schema
+   below. Keeps sample *selection* a human decision (the auditor already
+   picked "these 25 of 340") — the tool's job is evaluating evidence against
+   a known sample, not deciding what to sample. That's a deliberate scope
+   boundary, not a placeholder for automating selection later.
+3. **CY support evidence** — PDFs/Excels/screenshots/emails covering the
+   sampled items, extracted per section 2.
+4. **Metadata**: `control_id`, `period_under_review`, preparer name, and
+   `control_objective` / test-step text *only if* it can't be reliably
+   pulled from the PY workpaper — extraction should attempt this first
+   rather than making the auditor re-type it, with a confirm/edit step
+   before the control moves into the tool loop.
+
+### CY sample list schema
+
+One file per control, one row per sampled item, tagged to the test step it
+belongs to:
+
+```
+SampleItem = {
+  sample_id: str                    # "S01".."S25", stable within a test step
+  test_step_id: str
+  identifying_details: str          # free text, e.g. "PO #48213, Branch 35210, $12,450, 3/14/2026"
+  key_fields: dict[str, str] | null # optional structured columns if the sample list has real
+                                     # columns (po_number, branch, date, amount, ...) instead of
+                                     # one free-text description — lets search_cy_support query
+                                     # on a specific field rather than a fuzzy description match
+}
+
+SamplePopulationManifest = {
+  test_step_id: str
+  population_description: str       # e.g. "All POs > $5,000 issued Oct 2025-Sep 2026"
+  population_size: int | null
+  sample_size: int
+  selection_method: "random" | "haphazard" | "judgmental" | "all_items"
+  samples: [SampleItem]
+}
+```
+
+`required_sample_ids` in `check_sample_coverage` (section 3) is just the
+`sample_id` list from this manifest for the given test step — this is what
+resolves the open question of where that input comes from.
+
+## 2. Document extraction strategy (PDFs + Excel)
 
 Everything downstream reasons over a normalized `EvidenceItem`, never over raw
 bytes. Claude is never handed a PDF or workbook directly.
@@ -101,7 +158,7 @@ Extraction is a batch step that runs once per upload, before any Claude call.
 The per-test-step agent only ever sees the `EvidenceItem` list (scoped to
 that engagement) through the `search_cy_support` tool below.
 
-## 2. Tool schemas
+## 3. Tool schemas
 
 Four tools, bound per test-step call. Every tool call and result is appended
 to the audit log by the backend automatically — not something the model has
@@ -162,7 +219,7 @@ output: { request_id: str, recorded: true }
 ### `submit_conclusion` (the forced final step)
 
 The model doesn't just stop talking — its final turn must be a tool call
-into `submit_conclusion` with the schema in section 3. The backend validates
+into `submit_conclusion` with the schema in section 4. The backend validates
 it server-side (pydantic or equivalent) before accepting it as a draft.
 Critically: **every `evidence_id` in `evidence_citations` must have actually
 appeared in a `search_cy_support` result earlier in that same conversation.**
@@ -171,7 +228,7 @@ This is the concrete mechanism for the risk you flagged — the agent citing
 evidence it never received — turned into a hard, mechanical check rather
 than a hope.
 
-## 3. Conclusion output schema
+## 4. Conclusion output schema
 
 This is what both the review UI and the audit log are built on.
 
@@ -230,9 +287,9 @@ reads the full set of `submit_conclusion` outputs for the engagement and
 checks for inconsistency across steps (e.g. same evidence cited as both
 supporting and contradicting different steps, or contradictory confidence
 levels on steps that should correlate) — this is a good candidate for the
-Opus call, see section 5.
+Opus call, see section 6.
 
-## 4. Review UI (sketch)
+## 5. Review UI (sketch)
 
 Per test step: narrative up top, then expandable citation cards — each
 showing the extracted snippet/table plus a thumbnail/link to the actual
@@ -251,7 +308,7 @@ human's final workpaper text is a distinct, linked record. That's what makes
 "what did the agent actually say vs. what did the human change" auditable
 after the fact.
 
-## 5. Model choice (Sonnet vs. Opus, via Microsoft Foundry)
+## 6. Model choice (Sonnet vs. Opus, via Microsoft Foundry)
 
 Claude is GA on Microsoft Foundry with prompt caching supported — but only
 through the native `/anthropic/v1/messages` surface, not the
@@ -274,7 +331,7 @@ Recommendation:
   re-run any step that came back `insufficient_evidence` or with a flagged
   exception as a "second opinion" before it goes to the human reviewer.
 
-## 6. Per-test-step prompt template (outline)
+## 7. Per-test-step prompt template (outline)
 
 - **System:** role framing (audit testing agent, drafts only, human
   approves), the non-negotiables (cite only tool-returned evidence, never
