@@ -17,17 +17,25 @@ first-party Anthropic API. To run this:
            export ANTHROPIC_FOUNDRY_RESOURCE=example-resource
     4. python3 -m agent.example_run
 
-Model IDs are unchanged on Foundry (still "claude-sonnet-5", no provider
-prefix -- that's a Bedrock-only quirk). If you're calling the first-party
-API directly instead of Foundry, swap AnthropicFoundry() below for
-anthropic.Anthropic() (reads ANTHROPIC_API_KEY instead).
+Model IDs are unchanged on Foundry (no provider prefix -- that's a
+Bedrock-only quirk) -- but Foundry only answers for whatever model you
+actually deployed on your resource. Check the exact model ID under
+"Models + endpoints" in the Foundry portal and set it via:
+    $env:ANTHROPIC_MODEL="claude-opus-4-8"   # or whatever you deployed
+It defaults to agent.loop.DEFAULT_MODEL (claude-sonnet-5) if unset.
+
+If you're calling the first-party API directly instead of Foundry, swap
+AnthropicFoundry() below for anthropic.Anthropic() (reads ANTHROPIC_API_KEY
+instead).
 """
 
 from __future__ import annotations
 
+import os
+
 from anthropic import AnthropicFoundry
 
-from agent.loop import TestStepRequest, run_test_step
+from agent.loop import DEFAULT_MODEL, TestStepRequest, run_test_step
 from agent.schemas import EvidenceItem, SampleItem, SamplePopulationManifest
 
 
@@ -36,6 +44,7 @@ def main() -> None:
     # the environment -- pass resource="..." / api_key="..." explicitly
     # here instead if you'd rather not use env vars.
     client = AnthropicFoundry()
+    model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
 
     py_support = [
         EvidenceItem(
@@ -102,7 +111,8 @@ def main() -> None:
         py_support_excerpts=py_support,
     )
 
-    conclusion, audit_log = run_test_step(request, cy_evidence, sample_manifest, client)
+    print(f"Using model: {model}\n")
+    conclusion, audit_log = run_test_step(request, cy_evidence, sample_manifest, client, model=model)
 
     print("=== Conclusion ===")
     print(conclusion.model_dump_json(indent=2))
