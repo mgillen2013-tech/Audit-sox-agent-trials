@@ -9,6 +9,53 @@ This doc focuses on the two pieces called out as needing the most work
 (tool schemas, conclusion output schema), and records the surrounding
 decisions so they don't have to be re-derived later.
 
+## 0. Enterprise & control environment context (feeds the system prompt)
+
+This isn't background for developers to skim — it's a fixed block that goes
+into the system prompt, in the cacheable prefix from section 5. The model
+should have this context on every call so it can correctly read
+company-specific terminology and structure in the evidence, instead of
+guessing at abbreviations or misreading what's normal. Because it's
+identical across every test step and every engagement, it caches almost for
+free after the first call — there's no real cost argument for leaving it
+out.
+
+Draft text for that block (tune the specifics against the actual filed
+10-Ks and internal system documentation before finalizing — the company
+scale/segment facts below were pulled from public filings via search, not
+read directly from the source document, and the system names are as
+provided, not independently verified):
+
+```
+COMPANY CONTEXT
+
+BrightView Holdings (NYSE: BV) is the largest provider of commercial
+landscaping services in the United States, operating through two reportable
+segments:
+- Maintenance Services: recurring, largely seasonal/evergreen landscaping
+  work (mowing, irrigation, tree care, snow removal) under ongoing
+  contracts.
+- Development Services: project-based landscape architecture and
+  construction for new facilities and major redesigns.
+
+Operating model: 280+ branches perform the work locally (crews, equipment,
+customer relationships); accounting and financial reporting are centralized
+at corporate. Most SOX controls sit at corporate; a smaller set are
+branch-level/transactional (e.g. purchase approvals, timekeeping, system
+access, asset/vehicle controls) and are tested via samples drawn across
+branches.
+
+Financial systems referenced in evidence:
+- E1 (JD Edwards EnterpriseOne) — the core financial/ERP system.
+- BVE1 — a separate branch-facing instance of E1 used to reconcile branch
+  activity back to corporate E1.
+- OneStream — corporate consolidation and financial reporting.
+
+When evidence references one of these systems, a report name, or a branch
+number, treat that as normal company vocabulary, not something to flag as
+unusual on its own.
+```
+
 ## 1. Document extraction strategy (PDFs + Excel)
 
 Everything downstream reasons over a normalized `EvidenceItem`, never over raw
@@ -144,6 +191,8 @@ This is what both the review UI and the audit log are built on.
     }
   ],
   "procedures_performed": ["recalculation", "reperformance", "inspection"],
+  "relies_on_system_generated_report": true,
+  "ipe_completeness_accuracy_evidence": ["ev_009"],
   "exceptions": [],
   "additional_support_requests": [],
   "confidence": "high",                 // "high" | "medium" | "low"
@@ -166,6 +215,15 @@ Rules baked into validation, not just prompt instructions:
 - `exceptions` / `additional_support_requests` hold ids from the
   corresponding tool calls, not free text restating them, so the UI and any
   downstream report can query them directly.
+- `relies_on_system_generated_report` is a required boolean, not something
+  the model infers silently. Most evidence here comes out of E1, BVE1, or
+  OneStream as a report (aging reports, PO receipt matching, GL exports) —
+  whether that report's completeness/accuracy was itself validated is one of
+  the most common gaps in SOX testing, and it's exactly the kind of check
+  that's easy to skip when it isn't a forced field. If `true`,
+  `ipe_completeness_accuracy_evidence` must cite the evidence that validates
+  the report (e.g. a record-count tie-out, a total agreeing to a source
+  system) — it can't be `true` with an empty list.
 
 A later **cross-check pass** (after all test steps have a draft conclusion)
 reads the full set of `submit_conclusion` outputs for the engagement and
