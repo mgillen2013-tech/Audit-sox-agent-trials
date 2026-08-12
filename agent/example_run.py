@@ -5,25 +5,37 @@ UI yet. It's the minimal script that proves the tool loop in agent/loop.py
 actually works end to end against a live model, using a couple of
 hand-built EvidenceItems instead of running the extraction pipeline first.
 
-To run this:
+Calling through Microsoft Foundry (BrightView's setup) rather than the
+first-party Anthropic API. To run this:
     1. pip install -r requirements.txt
-    2. Set your API key: export ANTHROPIC_API_KEY=sk-ant-...
-       (or your Microsoft Foundry credentials -- swap the client
-       constructor below for AnthropicFoundry(...) if you're calling
-       through Foundry instead of the first-party API)
-    3. python3 -m agent.example_run
+    2. In the Azure AI Foundry portal, open your Foundry resource's "Keys
+       and Endpoint" page and grab the resource name and an API key. The
+       resource name is the subdomain in the endpoint URL, e.g.
+       "example-resource" for https://example-resource.services.ai.azure.com/anthropic/
+    3. Set both as environment variables:
+           export ANTHROPIC_FOUNDRY_API_KEY=...
+           export ANTHROPIC_FOUNDRY_RESOURCE=example-resource
+    4. python3 -m agent.example_run
+
+Model IDs are unchanged on Foundry (still "claude-sonnet-5", no provider
+prefix -- that's a Bedrock-only quirk). If you're calling the first-party
+API directly instead of Foundry, swap AnthropicFoundry() below for
+anthropic.Anthropic() (reads ANTHROPIC_API_KEY instead).
 """
 
 from __future__ import annotations
 
-import anthropic
+from anthropic import AnthropicFoundry
 
 from agent.loop import TestStepRequest, run_test_step
 from agent.schemas import EvidenceItem, SampleItem, SamplePopulationManifest
 
 
 def main() -> None:
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+    # Reads ANTHROPIC_FOUNDRY_API_KEY and ANTHROPIC_FOUNDRY_RESOURCE from
+    # the environment -- pass resource="..." / api_key="..." explicitly
+    # here instead if you'd rather not use env vars.
+    client = AnthropicFoundry()
 
     py_support = [
         EvidenceItem(
