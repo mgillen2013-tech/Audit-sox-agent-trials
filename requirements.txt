@@ -1,1 +1,3 @@
 openpyxl
+pydantic>=2
+pdfplumber
