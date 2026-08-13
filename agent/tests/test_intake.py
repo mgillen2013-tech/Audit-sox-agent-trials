@@ -5,7 +5,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from agent.intake import parse_sample_list
+from agent.intake import build_manifests_from_rows, parse_sample_list
 
 
 def _write_sample_list(path: Path, rows: list[list]) -> Path:
@@ -111,3 +111,37 @@ def test_blank_rows_are_skipped(tmp_path: Path):
 
     manifests = parse_sample_list(path)
     assert manifests["TS-4.2"].sample_size == 1
+
+
+# --------------------------------------------------------------------------
+# build_manifests_from_rows directly -- what the Streamlit app calls
+# --------------------------------------------------------------------------
+
+
+def test_build_manifests_from_rows_matches_excel_path():
+    rows = [
+        {
+            "test_step_id": "TS-1.1",
+            "sample_id": "S01",
+            "identifying_details": "PO 48213",
+            "population_description": "All POs > $5,000",
+            "selection_method": "random",
+            "population_size": 340,
+        },
+        {
+            "test_step_id": "TS-1.1",
+            "sample_id": "S02",
+            "identifying_details": "PO 48214",
+            "population_description": "All POs > $5,000",
+            "selection_method": "random",
+            "population_size": 340,
+        },
+    ]
+    manifests = build_manifests_from_rows(rows)
+    assert manifests["TS-1.1"].sample_size == 2
+    assert manifests["TS-1.1"].samples[0].sample_id == "S01"
+
+
+def test_build_manifests_from_rows_rejects_missing_required_field():
+    with pytest.raises(ValueError, match="is missing"):
+        build_manifests_from_rows([{"test_step_id": "TS-1.1", "sample_id": "S01"}])

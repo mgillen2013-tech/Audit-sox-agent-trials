@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -52,16 +53,19 @@ from agent.loop import DEFAULT_MODEL, TestStepRequest, run_test_step
 from agent.schemas import ConclusionOutput
 
 
-def run_control(spec: dict[str, Any], base_dir: Path, client: Any, model: str) -> dict[str, dict]:
-    """The testable core -- no file writing, no env var reads. Returns
-    {test_step_id: {"conclusion": ConclusionOutput, "audit_log": [...]}}
-    or {"error": str} for a test step that failed to run at all.
+def iter_control_results(spec: dict[str, Any], base_dir: Path, client: Any, model: str) -> Iterator[tuple[str, dict]]:
+    """The testable core -- no file writing, no env var reads. Yields
+    (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
+    or (test_step_id, {"error": str}) as each test step finishes, rather
+    than blocking silently until the whole control is done -- a control
+    with several steps can take minutes, and a caller (the Streamlit app)
+    that wants to show progress per step needs results as they land, not
+    a batch dump at the end.
     """
     py_evidence = extract(base_dir / spec["py_testing_file"])
     cy_evidence = extract_many([base_dir / f for f in spec["cy_support_files"]])
     sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])
 
-    results: dict[str, dict] = {}
     for step in spec["test_steps"]:
         test_step_id = step["test_step_id"]
         manifest = sample_manifests.get(test_step_id)
@@ -84,12 +88,17 @@ def run_control(spec: dict[str, Any], base_dir: Path, client: Any, model: str) -
         try:
             conclusion, audit_log = run_test_step(request, cy_evidence, manifest, client, model=model)
         except Exception as exc:  # noqa: BLE001 -- one step's failure shouldn't kill the run
-            results[test_step_id] = {"error": str(exc)}
+            yield test_step_id, {"error": str(exc)}
             continue
 
-        results[test_step_id] = {"conclusion": conclusion, "audit_log": audit_log}
+        yield test_step_id, {"conclusion": conclusion, "audit_log": audit_log}
 
-    return results
+
+def run_control(spec: dict[str, Any], base_dir: Path, client: Any, model: str) -> dict[str, dict]:
+    """Batch wrapper over iter_control_results() for callers (the CLI, tests)
+    that just want the whole set of results at the end.
+    """
+    return dict(iter_control_results(spec, base_dir, client, model))
 
 
 def main() -> None:

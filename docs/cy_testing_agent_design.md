@@ -318,6 +318,17 @@ showing the extracted snippet/table plus a thumbnail/link to the actual
 source region (`preview_ref`), procedure tags as pills, exceptions in a red
 banner, `insufficient_evidence` in an amber banner. Approve / Edit / Reject.
 
+**Built (partial):** `cy_testing_app.py` is a local Streamlit form covering
+intake + run, not yet review — fill in control/test-step details, upload
+the PY testing file and CY support files, edit the sample list as an
+in-browser table (no more hand-building a control.json or an Excel sample
+list by hand, though you still can upload one), click run, see each
+conclusion as it lands. What it does NOT have yet: citation-card source
+previews, Approve/Edit/Reject, or the immutable-draft-vs-human-edit
+separation from section 4 above — right now results are display-only. It's
+a UI shell over `agent.run_control.iter_control_results`, the same tested
+orchestration the CLI uses, not a second implementation.
+
 The one integrity rule worth enforcing in the UI layer, not just the prompt:
 a citation card that can't resolve its `evidence_id` to a real
 `EvidenceItem` should render as a hard error state, not silently disappear —

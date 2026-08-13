@@ -11,7 +11,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from agent.run_control import run_control
+from agent.run_control import iter_control_results, run_control
 from agent.tests.conftest import FakeClient, fake_response as response, tool_use
 
 
@@ -87,6 +87,39 @@ def _submit_conclusion_input(**overrides) -> dict:
     )
     base.update(overrides)
     return base
+
+
+def test_iter_control_results_yields_incrementally(control_dir: tuple[Path, dict]):
+    # The Streamlit app relies on this being a real generator (results
+    # available one at a time) rather than something that silently buffers
+    # everything before yielding the first item.
+    import inspect
+
+    base_dir, spec = control_dir
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual recalculation GL", "top_k": 5})]),
+            response(
+                [
+                    tool_use(
+                        "t2",
+                        "check_sample_coverage",
+                        {"required_sample_ids": [], "found_evidence_ids": ["S01"]},
+                    )
+                ]
+            ),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+        ]
+    )
+
+    gen = iter_control_results(spec, base_dir, client, model="claude-opus-5")
+    assert inspect.isgenerator(gen)
+
+    test_step_id, result = next(gen)
+    assert test_step_id == "TS-4.2"
+    assert result["conclusion"].conclusion == "satisfied"
+    with pytest.raises(StopIteration):
+        next(gen)
 
 
 def test_run_control_wires_real_files_through_the_loop(control_dir: tuple[Path, dict]):

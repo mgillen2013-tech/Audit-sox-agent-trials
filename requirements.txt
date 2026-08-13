@@ -3,3 +3,5 @@ pydantic>=2
 pdfplumber
 rank_bm25
 anthropic
+streamlit
+pandas
