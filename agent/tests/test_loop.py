@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent.loop import run_test_step, TestStepRequest
+from agent.loop import build_user_turn, run_test_step, TestStepRequest
 from agent.schemas import ConclusionOutput, EvidenceItem, SamplePopulationManifest, SampleItem
 from agent.tests.conftest import FakeClient, fake_response as response, text_block as text, tool_use
 
@@ -60,6 +60,34 @@ def request_() -> TestStepRequest:
         test_step_text="Recalculate the accrual and agree to the GL.",
         py_conclusion_text="Satisfied. No exceptions noted.",
     )
+
+
+def test_py_conclusion_text_is_optional_and_defaults_empty():
+    request = TestStepRequest(
+        test_step_id="TS-4.2",
+        control_id="C-14",
+        control_objective_ref="CO-4",
+        control_objective_text="Accruals are recorded completely and accurately.",
+        test_step_text="Recalculate the accrual and agree to the GL.",
+    )
+    assert request.py_conclusion_text == ""
+
+
+def test_build_user_turn_omits_py_conclusion_line_when_blank():
+    request = TestStepRequest(
+        test_step_id="TS-4.2",
+        control_id="C-14",
+        control_objective_ref="CO-4",
+        control_objective_text="Accruals are recorded completely and accurately.",
+        test_step_text="Recalculate the accrual and agree to the GL.",
+    )
+    turn = build_user_turn(request)
+    assert "PY conclusion: not separately provided" in turn
+
+
+def test_build_user_turn_includes_py_conclusion_when_given(request_: TestStepRequest):
+    turn = build_user_turn(request_)
+    assert "PY conclusion: Satisfied. No exceptions noted." in turn
 
 
 def _submit_conclusion_input(**overrides) -> dict:

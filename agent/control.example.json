@@ -8,8 +8,7 @@
   "test_steps": [
     {
       "test_step_id": "TS-4.2",
-      "test_step_text": "Recalculate the month-end accrual and agree the recalculated amount to the GL.",
-      "py_conclusion_text": "Satisfied. Recalculation agreed to GL with no variance noted."
+      "test_step_text": "Recalculate the month-end accrual and agree the recalculated amount to the GL."
     }
   ]
 }

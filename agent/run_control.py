@@ -29,9 +29,13 @@ a whole control's files can live together in one folder and move as a unit.
   "sample_list_file": "samples_C14.xlsx",
   "cy_support_files": ["Recon_Oct2026.xlsx", "GL_Export_Oct2026.pdf"],
   "test_steps": [
-    {"test_step_id": "TS-4.2", "test_step_text": "...", "py_conclusion_text": "..."}
+    {"test_step_id": "TS-4.2", "test_step_text": "..."}
   ]
 }
+
+test_steps[].py_conclusion_text is optional -- if omitted, the model reads
+the PY conclusion from py_testing_file's extracted content itself instead
+of a human retyping it.
 
 Requires the same environment variables as agent/example_run.py
 (ANTHROPIC_FOUNDRY_API_KEY, ANTHROPIC_FOUNDRY_RESOURCE, optionally
@@ -81,7 +85,7 @@ def iter_control_results(spec: dict[str, Any], base_dir: Path, client: Any, mode
             control_objective_ref=spec["control_objective_ref"],
             control_objective_text=spec["control_objective_text"],
             test_step_text=step["test_step_text"],
-            py_conclusion_text=step["py_conclusion_text"],
+            py_conclusion_text=step.get("py_conclusion_text", ""),
             py_support_excerpts=py_evidence,
         )
 

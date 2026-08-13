@@ -113,8 +113,11 @@ class TestStepRequest:
     control_objective_ref: str
     control_objective_text: str
     test_step_text: str
-    py_conclusion_text: str
     py_support_excerpts: list[EvidenceItem] = field(default_factory=list)
+    # Optional -- if you already have it, it saves the model a search; if
+    # not, the PY conclusion is normally readable from py_support_excerpts
+    # itself, so there's no need to make a human retype it.
+    py_conclusion_text: str = ""
 
 
 def _render_evidence_item(item: EvidenceItem) -> str:
@@ -128,14 +131,17 @@ def build_user_turn(request: TestStepRequest) -> str:
     py_excerpts = "\n\n".join(_render_evidence_item(item) for item in request.py_support_excerpts) or (
         "(no PY support excerpts provided)"
     )
+    py_conclusion_line = (
+        f"PY conclusion: {request.py_conclusion_text}\n\n"
+        if request.py_conclusion_text
+        else "PY conclusion: not separately provided -- read it from the PY support excerpts below if relevant.\n\n"
+    )
     return f"""\
 Control objective ({request.control_objective_ref}): {request.control_objective_text}
 
 Test step ({request.test_step_id}): {request.test_step_text}
 
-PY conclusion: {request.py_conclusion_text}
-
-PY support excerpts (format/approach precedent only -- not evidence for this
+{py_conclusion_line}PY support excerpts (format/approach precedent only -- not evidence for this
 year's conclusion):
 {py_excerpts}
 
