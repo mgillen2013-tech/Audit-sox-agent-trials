@@ -248,7 +248,7 @@ This is what both the review UI and the audit log are built on.
     }
   ],
   "procedures_performed": ["recalculation", "reperformance", "inspection"],
-  "relies_on_system_generated_report": true,
+  "ipe_completeness_accuracy_status": "validated",   // "validated" | "not_validated" | "not_applicable"
   "ipe_completeness_accuracy_evidence": ["ev_009"],
   "exceptions": [],
   "additional_support_requests": [],
@@ -272,15 +272,25 @@ Rules baked into validation, not just prompt instructions:
 - `exceptions` / `additional_support_requests` hold ids from the
   corresponding tool calls, not free text restating them, so the UI and any
   downstream report can query them directly.
-- `relies_on_system_generated_report` is a required boolean, not something
-  the model infers silently. Most evidence here comes out of E1, BVE1, or
-  OneStream as a report (aging reports, PO receipt matching, GL exports) —
-  whether that report's completeness/accuracy was itself validated is one of
-  the most common gaps in SOX testing, and it's exactly the kind of check
-  that's easy to skip when it isn't a forced field. If `true`,
-  `ipe_completeness_accuracy_evidence` must cite the evidence that validates
-  the report (e.g. a record-count tie-out, a total agreeing to a source
-  system) — it can't be `true` with an empty list.
+- `ipe_completeness_accuracy_status` is a required tri-state, not a boolean.
+  Most evidence here comes out of E1, BVE1, or OneStream as a report (aging
+  reports, PO receipt matching, GL exports) — whether that report's
+  completeness/accuracy was itself validated is one of the most common gaps
+  in SOX testing. A first live run surfaced exactly why a boolean isn't
+  enough: the model needed to say "this evidence relies on a system report,
+  and I could **not** obtain completeness/accuracy support for it" — a plain
+  `relies_on_system_generated_report: bool` forces
+  `ipe_completeness_accuracy_evidence` to be non-empty whenever reliance is
+  true, so the model got pushed into citing the report itself just to
+  satisfy the schema, then had to add a narrative disclaimer explaining that
+  citation wasn't real validation. `not_validated` says the gap directly, as
+  a first-class, equally-valid answer — same principle as
+  `insufficient_evidence` not being a second-class conclusion. Only
+  `"validated"` requires `ipe_completeness_accuracy_evidence` to be
+  non-empty (citing e.g. a record-count tie-out, a total agreeing to a
+  source system); `"not_validated"` and `"not_applicable"` both require it
+  to be empty — the field means "the evidence that proves validation
+  happened," never "the report being relied on."
 
 A later **cross-check pass** (after all test steps have a draft conclusion)
 reads the full set of `submit_conclusion` outputs for the engagement and

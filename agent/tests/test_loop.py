@@ -108,7 +108,7 @@ def _submit_conclusion_input(**overrides) -> dict:
             }
         ],
         procedures_performed=["recalculation"],
-        relies_on_system_generated_report=False,
+        ipe_completeness_accuracy_status="not_applicable",
         ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
@@ -233,6 +233,45 @@ def test_fabricated_citation_is_rejected_and_model_can_retry(evidence_items, sam
     assert audit_log[0].is_error is True
     assert "never returned by search_cy_support" in audit_log[0].output["error"]
     assert conclusion.conclusion == "satisfied"
+
+
+def test_tool_call_count_matches_audit_log_even_after_invalid_input(evidence_items, sample_manifest, request_):
+    # A live run caught this: a submit_conclusion attempt that fails pydantic
+    # validation (not just the fabrication check -- e.g. the IPE
+    # status/evidence pairing rule) used to take an early-return path in
+    # _execute_tool that skipped the tool_call_count increment entirely, so
+    # model_metadata.tool_call_count came back lower than len(audit_log).
+    client = FakeClient(
+        responses=[
+            response(
+                [
+                    tool_use(
+                        "t1",
+                        "submit_conclusion",
+                        _submit_conclusion_input(
+                            ipe_completeness_accuracy_status="validated",
+                            ipe_completeness_accuracy_evidence=[],  # invalid: violates the pairing rule
+                        ),
+                    )
+                ]
+            ),
+            response(
+                [
+                    tool_use(
+                        "t2",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+
+    conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
+
+    assert len(audit_log) == 2
+    assert audit_log[0].is_error is True
+    assert conclusion.model_metadata.tool_call_count == 2
 
 
 def test_no_tool_call_is_nudged_not_accepted_as_final(evidence_items, sample_manifest, request_):

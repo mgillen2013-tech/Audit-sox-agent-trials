@@ -232,6 +232,15 @@ def _execute_tool(
     block: Any, ctx: ToolContext, turn: int, audit_log: list[AuditLogEntry]
 ) -> tuple[dict, bool, ConclusionOutput | None]:
     """Returns (content_for_claude, is_error, conclusion_if_this_was_a_successful_submit)."""
+    # Count every call up front, before any early return -- a call that fails
+    # basic input validation (e.g. the IPE status/evidence rule) is still a
+    # real tool call and belongs in the count. This used to increment only at
+    # the bottom of the function, so a rejected submit_conclusion attempt was
+    # logged in the audit trail but silently missing from tool_call_count --
+    # caught live when a real run showed model_metadata.tool_call_count=13
+    # against an audit log of 14 entries.
+    ctx.tool_call_count += 1
+
     model_cls = _INPUT_MODELS.get(block.name)
     if model_cls is None:
         content = {"error": f"unknown tool {block.name!r}"}
@@ -292,7 +301,7 @@ def _execute_tool(
                     model=ctx.model,
                     prompt_version=PROMPT_VERSION,
                     timestamp=_now(),
-                    tool_call_count=ctx.tool_call_count + 1,
+                    tool_call_count=ctx.tool_call_count,
                 ),
             )
             content = {"recorded": True}
@@ -301,7 +310,6 @@ def _execute_tool(
         content = {"error": f"unhandled tool {block.name!r}"}
         is_error = True
 
-    ctx.tool_call_count += 1
     audit_log.append(AuditLogEntry(turn, block.name, block.id, dict(block.input), content, is_error, _now()))
     return content, is_error, conclusion
 

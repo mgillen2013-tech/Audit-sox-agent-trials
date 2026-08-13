@@ -36,7 +36,7 @@ def _base_conclusion(**overrides) -> dict:
             )
         ],
         procedures_performed=["recalculation"],
-        relies_on_system_generated_report=False,
+        ipe_completeness_accuracy_status="not_applicable",
         ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
@@ -70,20 +70,45 @@ def test_insufficient_evidence_allows_empty_citations():
     assert conclusion.evidence_citations == []
 
 
-def test_ipe_reliance_requires_evidence():
+def test_ipe_validated_requires_evidence():
     with pytest.raises(ValidationError, match="ipe_completeness_accuracy_evidence must be non-empty"):
         ConclusionOutput(
-            **_base_conclusion(relies_on_system_generated_report=True, ipe_completeness_accuracy_evidence=[])
+            **_base_conclusion(
+                ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=[]
+            )
         )
 
 
-def test_ipe_reliance_with_evidence_is_valid():
+def test_ipe_validated_with_evidence_is_valid():
     conclusion = ConclusionOutput(
         **_base_conclusion(
-            relies_on_system_generated_report=True, ipe_completeness_accuracy_evidence=["ev_009"]
+            ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=["ev_009"]
         )
     )
     assert conclusion.ipe_completeness_accuracy_evidence == ["ev_009"]
+
+
+def test_ipe_not_validated_needs_no_citation():
+    # The case a bool + maybe-empty-list couldn't express: reliance exists,
+    # but completeness/accuracy was NOT obtained. This must be sayable
+    # without citing anything, and without being forced to cite the report
+    # itself as a workaround.
+    conclusion = ConclusionOutput(
+        **_base_conclusion(
+            ipe_completeness_accuracy_status="not_validated", ipe_completeness_accuracy_evidence=[]
+        )
+    )
+    assert conclusion.ipe_completeness_accuracy_status == "not_validated"
+
+
+def test_ipe_evidence_rejected_unless_validated():
+    with pytest.raises(ValidationError, match="must be empty when"):
+        ConclusionOutput(
+            **_base_conclusion(
+                ipe_completeness_accuracy_status="not_validated",
+                ipe_completeness_accuracy_evidence=["ev_002"],
+            )
+        )
 
 
 def test_fabricated_citation_rejected():
@@ -101,7 +126,7 @@ def test_citation_returned_by_search_passes():
 def test_fabricated_ipe_citation_rejected():
     conclusion = ConclusionOutput(
         **_base_conclusion(
-            relies_on_system_generated_report=True, ipe_completeness_accuracy_evidence=["ev_999"]
+            ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=["ev_999"]
         )
     )
     with pytest.raises(ValueError, match="ev_999"):

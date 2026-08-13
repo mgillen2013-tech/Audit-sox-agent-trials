@@ -174,7 +174,17 @@ class _ConclusionCore(BaseModel):
     narrative: str
     evidence_citations: list[EvidenceCitation]
     procedures_performed: list[str]
-    relies_on_system_generated_report: bool
+    # Tri-state, not a bool + a maybe-empty list. A real run surfaced exactly
+    # the case a bool can't express cleanly: the model relied on a
+    # system-generated report (E1/BVE1/OneStream) but explicitly could NOT
+    # obtain completeness/accuracy support for it. The old boolean forced
+    # ipe_completeness_accuracy_evidence to be non-empty whenever reliance was
+    # true, so the model was pushed into citing the report itself just to
+    # satisfy the schema, then had to write a narrative disclaimer explaining
+    # that citation wasn't real IPE validation. "not_validated" says that
+    # directly, as a first-class, equally-valid answer -- same principle as
+    # insufficient_evidence not being a second-class conclusion.
+    ipe_completeness_accuracy_status: Literal["validated", "not_validated", "not_applicable"]
     ipe_completeness_accuracy_evidence: list[str]
     exceptions: list[str]
     additional_support_requests: list[str]
@@ -190,11 +200,17 @@ class _ConclusionCore(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _ipe_evidence_required_if_relied_on(self) -> "_ConclusionCore":
-        if self.relies_on_system_generated_report and not self.ipe_completeness_accuracy_evidence:
+    def _ipe_evidence_matches_status(self) -> "_ConclusionCore":
+        if self.ipe_completeness_accuracy_status == "validated" and not self.ipe_completeness_accuracy_evidence:
             raise ValueError(
                 "ipe_completeness_accuracy_evidence must be non-empty when "
-                "relies_on_system_generated_report is true"
+                "ipe_completeness_accuracy_status == 'validated'"
+            )
+        if self.ipe_completeness_accuracy_status != "validated" and self.ipe_completeness_accuracy_evidence:
+            raise ValueError(
+                "ipe_completeness_accuracy_evidence must be empty when "
+                "ipe_completeness_accuracy_status != 'validated' -- use 'not_validated' "
+                "to say reliance exists but wasn't validated, not a citation of the report itself"
             )
         return self
 
