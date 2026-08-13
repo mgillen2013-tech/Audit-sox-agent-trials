@@ -34,4 +34,22 @@ def extract(path: str | Path) -> list[EvidenceItem]:
     return handler(path)
 
 
-__all__ = ["extract", "extract_excel", "extract_pdf"]
+def extract_many(paths: list[str | Path]) -> list[EvidenceItem]:
+    """Extract multiple files and merge into one evidence pool.
+
+    A control's CY support is normally more than one file (an Excel recon
+    plus a PDF GL export, say), and each single-file extractor numbers
+    evidence_id starting fresh at ev_0001 -- calling extract() on two files
+    and concatenating the results would silently collide IDs. This
+    renumbers globally across the merged set instead, so every evidence_id
+    handed to the tool loop is actually unique for the run.
+    """
+    items: list[EvidenceItem] = []
+    for path in paths:
+        items.extend(extract(path))
+
+    renumbered = [item.model_copy(update={"evidence_id": f"ev_{i:04d}"}) for i, item in enumerate(items, start=1)]
+    return renumbered
+
+
+__all__ = ["extract", "extract_many", "extract_excel", "extract_pdf"]

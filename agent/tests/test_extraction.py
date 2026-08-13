@@ -17,7 +17,7 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.pdfgen import canvas
 
-from agent.extraction import extract_excel, extract_pdf
+from agent.extraction import extract_excel, extract_many, extract_pdf
 
 
 # --------------------------------------------------------------------------
@@ -153,3 +153,26 @@ def test_scanned_pdf_flagged_not_dropped(scanned_pdf: Path):
     assert item.extracted_text is None
     # The page still shows up with a location -- nothing silently vanished.
     assert "p.1" in item.location
+
+
+# --------------------------------------------------------------------------
+# Multi-file merge
+# --------------------------------------------------------------------------
+
+
+def test_extract_many_renumbers_ids_without_collision(sample_xlsx: Path, native_text_pdf: Path):
+    # Each single-file extractor numbers ev_0001.. independently -- naively
+    # concatenating extract(a) + extract(b) would collide. extract_many must not.
+    solo_excel = extract_excel(sample_xlsx)
+    solo_pdf = extract_pdf(native_text_pdf)
+    assert solo_excel[0].evidence_id == solo_pdf[0].evidence_id == "ev_0001"  # confirms the collision exists
+
+    merged = extract_many([sample_xlsx, native_text_pdf])
+
+    assert len(merged) == len(solo_excel) + len(solo_pdf)
+    ids = [item.evidence_id for item in merged]
+    assert len(ids) == len(set(ids))
+
+    # Original file/location/content is preserved -- only evidence_id changed.
+    assert merged[0].source_file == "po_sample.xlsx"
+    assert merged[len(solo_excel)].source_file == "gl_export.pdf"

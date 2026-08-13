@@ -8,41 +8,11 @@ once a key is configured.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from types import SimpleNamespace
-from typing import Any
-
 import pytest
 
 from agent.loop import run_test_step, TestStepRequest
 from agent.schemas import ConclusionOutput, EvidenceItem, SamplePopulationManifest, SampleItem
-
-
-def tool_use(id_: str, name: str, input_: dict) -> SimpleNamespace:
-    return SimpleNamespace(type="tool_use", id=id_, name=name, input=input_)
-
-
-def text(t: str) -> SimpleNamespace:
-    return SimpleNamespace(type="text", text=t)
-
-
-def response(content: list, stop_reason: str = "tool_use") -> SimpleNamespace:
-    return SimpleNamespace(content=content, stop_reason=stop_reason)
-
-
-@dataclass
-class FakeClient:
-    """Matches agent.loop.AnthropicClientLike: a bare create_message(**kwargs)."""
-
-    responses: list[Any]
-    calls: list[dict] = field(default_factory=list)
-    _index: int = 0
-
-    def create_message(self, **kwargs) -> Any:
-        self.calls.append(kwargs)
-        r = self.responses[self._index]
-        self._index += 1
-        return r
+from agent.tests.conftest import FakeClient, fake_response as response, text_block as text, tool_use
 
 
 @pytest.fixture

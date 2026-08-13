@@ -113,6 +113,18 @@ SamplePopulationManifest = {
 `sample_id` list from this manifest for the given test step — this is what
 resolves the open question of where that input comes from.
 
+**Built:** `agent/intake.py` parses this from a flat Excel sheet — one row
+per sample, columns `test_step_id` / `sample_id` / `identifying_details` /
+`population_description` / `selection_method` (required) and
+`population_size` (optional). Any other column becomes `key_fields`.
+`sample_size` is computed from the row count per `test_step_id`, not read
+from a column — it can't drift out of sync with the actual list that way.
+`agent/run_control.py` wires this together with real PY/CY file extraction
+(`agent/extraction`) into one test-step run per row in a small `control.json`
+spec (see `agent/control.example.json`) — still no upload form, and PY
+excerpts aren't yet sliced per test step (every step sees the whole
+extracted PY file), but real files now drive the whole loop end to end.
+
 ## 2. Document extraction strategy (PDFs + Excel)
 
 Everything downstream reasons over a normalized `EvidenceItem`, never over raw
