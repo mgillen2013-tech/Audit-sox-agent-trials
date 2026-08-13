@@ -46,35 +46,60 @@ def _row_is_empty(row) -> bool:
     return all(cell.value in (None, "") for cell in row)
 
 
+_MAX_DATA_ROWS_PER_TABLE = 200
+# A contiguous non-empty block larger than this becomes several EvidenceItems
+# instead of one. Without this, a real export with thousands of unbroken
+# rows (a full population listing, no blank-row breaks) becomes a single
+# giant table -- and since a human-written PY testing workpaper's excerpts
+# get rendered into every prompt turn with no truncation of their own (see
+# agent/loop.py's PY-excerpt budget), one such item is enough to blow a
+# single test step's token usage up by two orders of magnitude. This caught
+# exactly that on a real run.
+
+
 def _extract_tables(
     ws: Worksheet, filename: str, counter: Iterator[int]
 ) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     block: list[tuple[int, tuple]] = []  # (row_idx, cells) accumulated for current block
 
+    def to_str_row(cells, max_col: int) -> list[str]:
+        return [("" if c.value is None else str(c.value)) for c in cells] + [""] * (max_col - len(cells))
+
     def flush_block():
         if not block:
             return
-        start_row = block[0][0]
-        end_row = block[-1][0]
-        # Column span = widest row in the block.
+        header_row_idx, header_cells = block[0]
+        data = block[1:]
         max_col = max(len(cells) for _, cells in block)
-        table = [
-            [("" if c.value is None else str(c.value)) for c in cells] + [""] * (max_col - len(cells))
-            for _, cells in block
-        ]
-        start_ref = f"A{start_row}"
-        end_ref = f"{get_column_letter(max_col)}{end_row}"
+        header_str = to_str_row(header_cells, max_col)
+        col_letter = get_column_letter(max_col)
+
+        if len(data) <= _MAX_DATA_ROWS_PER_TABLE:
+            end_row = block[-1][0]
+            table = [header_str] + [to_str_row(cells, max_col) for _, cells in data]
+            location = f"{ws.title}!A{header_row_idx}:{col_letter}{end_row}"
+            _emit(table, location)
+            return
+
+        for i in range(0, len(data), _MAX_DATA_ROWS_PER_TABLE):
+            piece = data[i : i + _MAX_DATA_ROWS_PER_TABLE]
+            chunk_start, chunk_end = piece[0][0], piece[-1][0]
+            table = [header_str] + [to_str_row(cells, max_col) for _, cells in piece]
+            location = f"{ws.title}!A{header_row_idx}+A{chunk_start}:{col_letter}{chunk_end}"
+            _emit(table, location)
+
+    def _emit(table: list[list[str]], location: str) -> None:
         items.append(
             EvidenceItem(
                 evidence_id=f"ev_{next(counter):04d}",
                 source_file=filename,
                 source_type="excel_table",
-                location=f"{ws.title}!{start_ref}:{end_ref}",
+                location=location,
                 extracted_text=None,
                 extracted_table=table,
                 extraction_confidence=1.0,
-                preview_ref=f"{filename}!{ws.title}!{start_ref}:{end_ref}",
+                preview_ref=f"{filename}!{location}",
             )
         )
 

@@ -127,10 +127,40 @@ def _render_evidence_item(item: EvidenceItem) -> str:
     return f"[{item.evidence_id}] {item.location}\n{body}"
 
 
+# Every PY excerpt gets rendered into every turn of the conversation with no
+# per-item cap of its own -- a real run showed exactly how bad that gets: one
+# large PY testing file (or, before extraction chunked large tables, one
+# huge extracted table) pushed a single test step to ~400K input tokens per
+# API call. This is a blunt safety net, not a design target -- the real fix
+# is still the doc's flagged "confirm/edit step" that would show a human
+# only the PY excerpts relevant to this specific test step.
+_MAX_PY_EXCERPT_CHARS = 20_000
+
+
+def _render_py_excerpts(items: list[EvidenceItem]) -> str:
+    if not items:
+        return "(no PY support excerpts provided)"
+
+    parts: list[str] = []
+    total = 0
+    for item in items:
+        rendered = _render_evidence_item(item)
+        if parts and total + len(rendered) > _MAX_PY_EXCERPT_CHARS:
+            break
+        parts.append(rendered)
+        total += len(rendered)
+
+    text = "\n\n".join(parts)
+    if len(parts) < len(items):
+        text += (
+            f"\n\n...({len(items) - len(parts)} more PY excerpt(s) omitted for length -- "
+            f"showing {len(parts)} of {len(items)})"
+        )
+    return text
+
+
 def build_user_turn(request: TestStepRequest) -> str:
-    py_excerpts = "\n\n".join(_render_evidence_item(item) for item in request.py_support_excerpts) or (
-        "(no PY support excerpts provided)"
-    )
+    py_excerpts = _render_py_excerpts(request.py_support_excerpts)
     py_conclusion_line = (
         f"PY conclusion: {request.py_conclusion_text}\n\n"
         if request.py_conclusion_text
@@ -221,6 +251,37 @@ def _call_model(client: "AnthropicClientLike", **kwargs) -> Any:
     if hasattr(client, "messages"):
         return client.messages.create(**kwargs)
     return client.create_message(**kwargs)
+
+
+def _mark_cache_breakpoint(messages: list[dict]) -> None:
+    """Marks the last content block of the last message as a cache
+    breakpoint, converting a bare string into block form if needed. By the
+    time this runs, messages[-1] is always either the initial user turn
+    (str) or a tool_results/nudge turn we appended ourselves (list[dict]) --
+    never the assistant's raw SDK response blocks, since we always append a
+    user turn after those before looping back to call the model again.
+
+    Strips any breakpoint from earlier messages first. Caching still works
+    via prefix-hash matching against what the server already cached from a
+    previous turn's marker -- a marker doesn't need to still be physically
+    present at that position in a later request for the server to find the
+    match. Without stripping, markers would keep accumulating turn over
+    turn and blow through the API's 4-breakpoint-per-request limit on any
+    conversation longer than a few turns, which is the common case here.
+    """
+    for m in messages[:-1]:
+        content = m.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+
+    last = messages[-1]
+    content = last["content"]
+    if isinstance(content, str):
+        last["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
 
 
 @dataclass
@@ -343,6 +404,15 @@ def run_test_step(
     messages: list[dict] = [{"role": "user", "content": build_user_turn(request)}]
 
     for turn in range(1, max_iterations + 1):
+        # Without this, every turn re-sends (and re-bills at full price) the
+        # ENTIRE growing conversation -- the API is stateless, so nothing
+        # about system's cache_control above covers messages[]. This marks
+        # only the newest last block each turn (not every prior one, which
+        # would exceed the 4-breakpoint-per-request limit on a long-running
+        # step) -- a fresh breakpoint still finds the server-side cache
+        # written by the previous turn's marker, since matching is by prefix
+        # content, not by which positions carry a literal marker right now.
+        _mark_cache_breakpoint(messages)
         response = _call_model(
             client,
             model=model,

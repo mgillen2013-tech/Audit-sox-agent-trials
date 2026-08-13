@@ -5,6 +5,7 @@ test_run_control.py.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -31,7 +32,15 @@ class FakeClient:
     _index: int = 0
 
     def create_message(self, **kwargs) -> Any:
-        self.calls.append(kwargs)
+        # Deep-copy messages[] -- agent/loop.py mutates the SAME list AND
+        # the same nested block dicts across turns (appending messages, and
+        # both adding and later stripping cache_control markers in place as
+        # the conversation grows), so storing kwargs as-is -- or even a
+        # shallow list-copy -- would make every entry in self.calls
+        # silently reflect the FINAL state instead of what was actually
+        # sent at call time.
+        snapshot = {**kwargs, "messages": copy.deepcopy(kwargs["messages"])}
+        self.calls.append(snapshot)
         r = self.responses[self._index]
         self._index += 1
         return r

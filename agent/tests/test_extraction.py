@@ -122,6 +122,31 @@ def test_excel_all_ids_unique(sample_xlsx: Path):
     assert len(ids) == len(set(ids))
 
 
+def test_excel_large_table_is_chunked_not_one_giant_blob(tmp_path: Path):
+    # A real population export can be thousands of unbroken rows -- this is
+    # what would otherwise become a single EvidenceItem that then gets
+    # rendered in full into every prompt turn with no size cap of its own.
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Invoice", "Amount"])
+    for i in range(450):
+        ws.append([f"INV-{i}", i])
+    path = tmp_path / "big_population.xlsx"
+    wb.save(path)
+
+    items = extract_excel(path)
+    tables = [i for i in items if i.source_type == "excel_table"]
+
+    assert len(tables) == 3  # 450 data rows / 200 per chunk -> 3 chunks
+    for t in tables:
+        assert len(t.extracted_table) <= 201  # header + up to 200 data rows
+        assert t.extracted_table[0] == ["Invoice", "Amount"]  # header repeated in every chunk
+
+    # No row lost or duplicated across chunks.
+    all_invoices = [row[0] for t in tables for row in t.extracted_table[1:]]
+    assert all_invoices == [f"INV-{i}" for i in range(450)]
+
+
 # --------------------------------------------------------------------------
 # PDF
 # --------------------------------------------------------------------------

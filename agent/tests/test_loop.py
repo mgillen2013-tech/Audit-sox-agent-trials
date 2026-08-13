@@ -15,6 +15,17 @@ from agent.schemas import ConclusionOutput, EvidenceItem, SamplePopulationManife
 from agent.tests.conftest import FakeClient, fake_response as response, text_block as text, tool_use
 
 
+def _message_text(content) -> str:
+    """content is a bare string, or (after the cache-breakpoint pass) a list
+    of blocks -- normalize to a searchable string either way.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return ""
+
+
 @pytest.fixture
 def evidence_items() -> list[EvidenceItem]:
     return [
@@ -90,6 +101,51 @@ def test_build_user_turn_includes_py_conclusion_when_given(request_: TestStepReq
     assert "PY conclusion: Satisfied. No exceptions noted." in turn
 
 
+def test_py_excerpts_are_capped_not_dumped_in_full(request_: TestStepRequest):
+    # A real run showed a large PY testing file (or, before extraction
+    # chunked large tables, one huge extracted table) pushing a single test
+    # step to ~400K input tokens per API call -- this caps it.
+    huge_items = [
+        EvidenceItem(
+            evidence_id=f"py_ev_{i:03d}",
+            source_file="PY_Testing_Big.pdf",
+            source_type="pdf_text",
+            location=f"PY_Testing_Big.pdf p.{i}",
+            extracted_text="x" * 5_000,
+            extraction_confidence=1.0,
+            preview_ref=f"PY_Testing_Big.pdf p.{i}",
+        )
+        for i in range(1, 20)
+    ]
+    request_.py_support_excerpts = huge_items
+
+    turn = build_user_turn(request_)
+
+    assert len(turn) < 30_000  # nowhere near 19 * 5,000+ chars if it dumped everything
+    assert "more PY excerpt(s) omitted for length" in turn
+    assert "py_ev_001" in turn  # at least the first excerpt is still there, not dropped entirely
+
+
+def test_small_py_excerpts_are_not_truncated(request_: TestStepRequest):
+    small_items = [
+        EvidenceItem(
+            evidence_id="py_ev_001",
+            source_file="PY_Testing.pdf",
+            source_type="pdf_text",
+            location="PY_Testing.pdf p.1",
+            extracted_text="Recalculated, agreed to GL, no variance.",
+            extraction_confidence=1.0,
+            preview_ref="PY_Testing.pdf p.1",
+        )
+    ]
+    request_.py_support_excerpts = small_items
+
+    turn = build_user_turn(request_)
+
+    assert "more PY excerpt(s) omitted" not in turn
+    assert "Recalculated, agreed to GL, no variance." in turn
+
+
 def _submit_conclusion_input(**overrides) -> dict:
     base = dict(
         test_step_id="TS-4.2",
@@ -115,6 +171,38 @@ def _submit_conclusion_input(**overrides) -> dict:
     )
     base.update(overrides)
     return base
+
+
+def test_cache_breakpoint_on_newest_message_never_accumulates(evidence_items, sample_manifest, request_):
+    # A real run showed input tokens per request ballooning -- traced back to
+    # no cache_control anywhere on the growing messages[] (only on the
+    # system prompt), so every turn re-billed the entire history at full
+    # price. This locks in the fix: a breakpoint always lands on the very
+    # last message before each call, and never piles up beyond one.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([tool_use("t2", "search_cy_support", {"query": "accrual again", "top_k": 5})]),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+        ]
+    )
+
+    run_test_step(request_, evidence_items, sample_manifest, client)
+
+    assert len(client.calls) == 3
+    for call in client.calls:
+        last_content = call["messages"][-1]["content"]
+        assert isinstance(last_content, list), "last message should be in block form, not a bare string"
+        assert last_content[-1].get("cache_control") == {"type": "ephemeral"}
+
+        total_markers = sum(
+            1
+            for m in call["messages"]
+            if isinstance(m["content"], list)
+            for block in m["content"]
+            if isinstance(block, dict) and "cache_control" in block
+        )
+        assert total_markers == 1, "messages[] should never carry more than one active breakpoint"
 
 
 def test_happy_path_search_then_coverage_then_submit(evidence_items, sample_manifest, request_):
@@ -292,12 +380,11 @@ def test_no_tool_call_is_nudged_not_accepted_as_final(evidence_items, sample_man
 
     assert conclusion.conclusion == "insufficient_evidence"
     # First call produced no tool_use -- a nudge message should have been
-    # inserted before the model's second attempt.
+    # inserted before the model's second attempt. Content may be a bare
+    # string or (after the cache-breakpoint pass converts the last message)
+    # a list of text blocks -- check both shapes.
     second_call_messages = client.calls[1]["messages"]
-    assert any(
-        isinstance(m["content"], str) and "Every turn must end in a tool call" in m["content"]
-        for m in second_call_messages
-    )
+    assert any("Every turn must end in a tool call" in _message_text(m["content"]) for m in second_call_messages)
 
 
 def test_max_iterations_exhausted_raises(evidence_items, sample_manifest, request_):
