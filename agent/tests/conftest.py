@@ -19,8 +19,25 @@ def text_block(t: str) -> SimpleNamespace:
     return SimpleNamespace(type="text", text=t)
 
 
-def fake_response(content: list, stop_reason: str = "tool_use") -> SimpleNamespace:
-    return SimpleNamespace(content=content, stop_reason=stop_reason)
+def fake_usage(
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+    )
+
+
+def fake_response(content: list, stop_reason: str = "tool_use", usage: SimpleNamespace | None = None) -> SimpleNamespace:
+    # usage defaults to all-zero -- existing tests that don't care about the
+    # token-budget circuit breaker (agent.loop.MAX_TOTAL_TOKENS) never
+    # accidentally trip it just by running a few turns.
+    return SimpleNamespace(content=content, stop_reason=stop_reason, usage=usage or fake_usage())
 
 
 @dataclass

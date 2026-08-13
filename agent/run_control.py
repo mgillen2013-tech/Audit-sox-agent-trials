@@ -47,13 +47,13 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 from agent.extraction import extract, extract_many
 from agent.intake import parse_sample_list
-from agent.loop import DEFAULT_MODEL, TestStepRequest, run_test_step
+from agent.loop import DEFAULT_MODEL, MAX_TOTAL_TOKENS, IncompleteRunError, TestStepRequest, run_test_step
 from agent.schemas import ConclusionOutput, SamplePopulationManifest
 
 
@@ -63,14 +63,25 @@ def iter_control_results(
     client: Any,
     model: str,
     sample_manifests: dict[str, SamplePopulationManifest] | None = None,
+    max_total_tokens: int = MAX_TOTAL_TOKENS,
+    on_turn: "Callable[[str, int, int, list], None] | None" = None,
 ) -> Iterator[tuple[str, dict]]:
     """The testable core -- no file writing, no env var reads. Yields
     (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
-    or (test_step_id, {"error": str}) as each test step finishes, rather
-    than blocking silently until the whole control is done -- a control
-    with several steps can take minutes, and a caller (the Streamlit app)
-    that wants to show progress per step needs results as they land, not
-    a batch dump at the end.
+    on success, or (test_step_id, {"error": str, ...}) on failure, as each
+    test step finishes, rather than blocking silently until the whole
+    control is done -- a control with several steps can take minutes, and a
+    caller (the Streamlit app) that wants to show progress per step needs
+    results as they land, not a batch dump at the end.
+
+    A failure that aborted via run_test_step's token-budget or
+    max-iterations circuit breaker (agent.loop.IncompleteRunError) still
+    yields everything already paid for: the error dict also carries
+    "audit_log" (every tool call made before the abort), "reason"
+    ("token_budget_exceeded" or "max_iterations"), "tokens_used", and
+    "turns_used". A run that already spent real money on API calls before
+    failing should never come back as a bare error string with nothing to
+    show for it -- see the design doc's note on this circuit breaker.
 
     sample_manifests: pass already-built manifests to skip
     spec["sample_list_file"] / parse_sample_list() entirely -- used by the
@@ -79,6 +90,12 @@ def iter_control_results(
     agent.intake.build_manifest_from_any_columns) rather than requiring one
     combined file in the clean fixed-column format. Falls back to the
     file-based path when omitted, for the CLI's control.json workflow.
+
+    on_turn: forwarded to run_test_step for each test step, called with
+    (test_step_id, turn_number, cumulative_tokens_used, audit_log_so_far) so
+    a caller can show live progress -- a step can run for a couple of
+    minutes with several tool calls, and iter_control_results only yields
+    once a step is fully done or aborted.
     """
     py_evidence = extract(base_dir / spec["py_testing_file"])
     cy_evidence = extract_many([base_dir / f for f in spec["cy_support_files"]])
@@ -104,8 +121,30 @@ def iter_control_results(
             py_support_excerpts=py_evidence,
         )
 
+        step_on_turn = (
+            (lambda turn, tokens, log, _id=test_step_id: on_turn(_id, turn, tokens, log))
+            if on_turn is not None
+            else None
+        )
         try:
-            conclusion, audit_log = run_test_step(request, cy_evidence, manifest, client, model=model)
+            conclusion, audit_log = run_test_step(
+                request,
+                cy_evidence,
+                manifest,
+                client,
+                model=model,
+                max_total_tokens=max_total_tokens,
+                on_turn=step_on_turn,
+            )
+        except IncompleteRunError as exc:
+            yield test_step_id, {
+                "error": str(exc),
+                "audit_log": exc.audit_log,
+                "reason": exc.reason,
+                "tokens_used": exc.tokens_used,
+                "turns_used": exc.turns_used,
+            }
+            continue
         except Exception as exc:  # noqa: BLE001 -- one step's failure shouldn't kill the run
             yield test_step_id, {"error": str(exc)}
             continue
@@ -119,11 +158,16 @@ def run_control(
     client: Any,
     model: str,
     sample_manifests: dict[str, SamplePopulationManifest] | None = None,
+    max_total_tokens: int = MAX_TOTAL_TOKENS,
 ) -> dict[str, dict]:
     """Batch wrapper over iter_control_results() for callers (the CLI, tests)
     that just want the whole set of results at the end.
     """
-    return dict(iter_control_results(spec, base_dir, client, model, sample_manifests=sample_manifests))
+    return dict(
+        iter_control_results(
+            spec, base_dir, client, model, sample_manifests=sample_manifests, max_total_tokens=max_total_tokens
+        )
+    )
 
 
 def main() -> None:
@@ -150,7 +194,17 @@ def main() -> None:
         out_path = output_dir / f"{test_step_id}.json"
         if "error" in result:
             print(f"[{test_step_id}] FAILED: {result['error']}")
-            out_path.write_text(json.dumps({"error": result["error"]}, indent=2))
+            error_payload: dict[str, Any] = {"error": result["error"]}
+            if "audit_log" in result:
+                error_payload["reason"] = result["reason"]
+                error_payload["tokens_used"] = result["tokens_used"]
+                error_payload["turns_used"] = result["turns_used"]
+                error_payload["audit_log"] = [entry.__dict__ for entry in result["audit_log"]]
+                print(
+                    f"  ({result['reason']}, {result['tokens_used']:,} tokens used, "
+                    f"{len(result['audit_log'])} tool call(s) preserved)"
+                )
+            out_path.write_text(json.dumps(error_payload, indent=2))
             continue
 
         conclusion: ConclusionOutput = result["conclusion"]

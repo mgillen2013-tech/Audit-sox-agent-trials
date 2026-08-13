@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent.loop import build_user_turn, run_test_step, TestStepRequest
+from agent.loop import IncompleteRunError, build_user_turn, run_test_step, TestStepRequest
 from agent.schemas import ConclusionOutput, EvidenceItem, SamplePopulationManifest, SampleItem
-from agent.tests.conftest import FakeClient, fake_response as response, text_block as text, tool_use
+from agent.tests.conftest import FakeClient, fake_response as response, fake_usage, text_block as text, tool_use
 
 
 def _message_text(content) -> str:
@@ -391,5 +391,112 @@ def test_max_iterations_exhausted_raises(evidence_items, sample_manifest, reques
     client = FakeClient(
         responses=[response([text("stalling")], stop_reason="end_turn") for _ in range(5)]
     )
-    with pytest.raises(RuntimeError, match="did not reach submit_conclusion"):
+    with pytest.raises(IncompleteRunError, match="did not reach submit_conclusion") as exc_info:
         run_test_step(request_, evidence_items, sample_manifest, client, max_iterations=3)
+
+    err = exc_info.value
+    assert err.reason == "max_iterations"
+    assert err.turns_used == 3
+    # Every stalling turn still nudged the model and got logged -- nothing
+    # from those (paid-for) turns should be discarded just because the step
+    # never reached submit_conclusion.
+    assert len(err.audit_log) == 0  # no tool calls were ever made, just nudges -- audit_log is legitimately empty here
+
+
+def test_on_turn_callback_fires_every_turn(evidence_items, sample_manifest, request_):
+    # This is what the Streamlit app hooks to show live progress -- it must
+    # fire during the run, not just be inferable after the fact from the
+    # returned audit_log.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([tool_use("t2", "submit_conclusion", {
+                "test_step_id": "TS-4.2",
+                "control_objective_ref": "CO-4",
+                "conclusion": "insufficient_evidence",
+                "narrative": "No evidence was found.",
+                "evidence_citations": [],
+                "procedures_performed": ["Searched CY support."],
+                "ipe_completeness_accuracy_status": "not_applicable",
+                "ipe_completeness_accuracy_evidence": [],
+                "exceptions": [],
+                "additional_support_requests": [],
+                "confidence": "low",
+                "confidence_rationale": "Nothing relevant was found.",
+            })]),
+        ]
+    )
+    calls = []
+    run_test_step(
+        request_,
+        evidence_items,
+        sample_manifest,
+        client,
+        on_turn=lambda turn, tokens, log: calls.append((turn, tokens, len(log))),
+    )
+    assert calls == [(1, 0, 1), (2, 0, 2)]
+
+
+def test_token_budget_exceeded_raises_before_max_iterations(evidence_items, sample_manifest, request_):
+    # Each turn "spends" 200K tokens -- with a 300K budget, the circuit
+    # breaker should trip after the 2nd turn, well before max_iterations=15
+    # would ever be reached. This is the direct fix for the real run that
+    # burned $65 grinding through all 15 iterations with zero output.
+    client = FakeClient(
+        responses=[
+            response([text("stalling")], stop_reason="end_turn", usage=fake_usage(input_tokens=200_000))
+            for _ in range(15)
+        ]
+    )
+    with pytest.raises(IncompleteRunError, match="token") as exc_info:
+        run_test_step(request_, evidence_items, sample_manifest, client, max_total_tokens=300_000)
+
+    err = exc_info.value
+    assert err.reason == "token_budget_exceeded"
+    assert err.turns_used == 2
+    assert err.tokens_used == 400_000
+    # Only 2 of the 15 available fake responses were ever consumed -- proof
+    # the loop actually stopped early instead of running to max_iterations.
+    assert len(client.calls) == 2
+
+
+def test_token_budget_does_not_abort_the_turn_that_actually_concludes(
+    evidence_items, sample_manifest, request_
+):
+    # A turn that reaches submit_conclusion should always be allowed to
+    # finish and return, even if its own usage pushes the running total past
+    # the budget -- the call already happened and was already paid for;
+    # throwing away a successful conclusion at the last second would be
+    # strictly worse than letting it land.
+    client = FakeClient(
+        responses=[
+            response(
+                [
+                    tool_use(
+                        "call_1",
+                        "submit_conclusion",
+                        {
+                            "test_step_id": "TS-4.2",
+                            "control_objective_ref": "CO-4",
+                            "conclusion": "insufficient_evidence",
+                            "narrative": "No evidence was found.",
+                            "evidence_citations": [],
+                            "procedures_performed": ["Searched CY support."],
+                            "ipe_completeness_accuracy_status": "not_applicable",
+                            "ipe_completeness_accuracy_evidence": [],
+                            "exceptions": [],
+                            "additional_support_requests": [],
+                            "confidence": "low",
+                            "confidence_rationale": "Nothing relevant was found.",
+                        },
+                    )
+                ],
+                usage=fake_usage(input_tokens=500_000),
+            )
+        ]
+    )
+    conclusion, audit_log = run_test_step(
+        request_, evidence_items, sample_manifest, client, max_total_tokens=300_000
+    )
+    assert conclusion.conclusion == "insufficient_evidence"
+    assert len(audit_log) == 1

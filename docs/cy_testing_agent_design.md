@@ -399,3 +399,49 @@ Recommendation:
   conclusion — no concluding from the prompt content alone.
 - **Forced close:** the turn only ends via `submit_conclusion`; no free-text
   final answer accepted.
+
+## 8. Cost circuit breaker & failure-preserving audit trail
+
+**Built:** `agent/loop.py` (`IncompleteRunError`, `MAX_TOTAL_TOKENS`,
+`run_test_step`'s `max_total_tokens`/`on_turn` params), `agent/run_control.py`
+(`iter_control_results`/`run_control`'s `max_total_tokens`/`on_turn` params,
+`IncompleteRunError` handling), `cy_testing_app.py` (sidebar spending cap,
+live per-turn progress, partial-audit-log display on failure).
+
+A real run hit `MAX_TOOL_ITERATIONS` (15) without ever calling
+`submit_conclusion` — 34 API requests, ~13.7M tokens, roughly $65 — and came
+back as a bare `RuntimeError` string with the entire audit log discarded.
+Two separate problems, both now fixed:
+
+1. **No spend cap other than iteration count.** 15 iterations is not a cost
+   bound — each iteration can itself be an arbitrarily large request (a
+   badly-chunked extraction, an uncapped PY excerpt). `run_test_step` now
+   also tracks cumulative token usage (`response.usage`, every field summed:
+   input, output, cache write, cache read) turn over turn and aborts via
+   `IncompleteRunError` the moment it crosses `max_total_tokens` (default
+   `MAX_TOTAL_TOKENS = 300_000`), independent of and generally well before
+   the iteration cap. The one exception: a turn that actually reaches
+   `submit_conclusion` is always allowed to return normally even if its own
+   usage pushes the running total past the cap — that call already happened
+   and was already paid for, and discarding a successful conclusion at the
+   last second would be strictly worse. The cap is user-adjustable in the
+   Streamlit sidebar ("Spending cap"), since a legitimately complex step and
+   a runaway one aren't distinguishable in advance.
+2. **Total loss of partial work on failure.** Every tool call before an
+   abort was real, billed API usage that had already found *something* —
+   discarding it on failure wasted both the money and the information.
+   `IncompleteRunError` (subclass of `RuntimeError`, so old bare `except
+   Exception` callers still catch it) carries `audit_log` (every tool call
+   made before the abort), `reason` (`"token_budget_exceeded"` or
+   `"max_iterations"`), `tokens_used`, and `turns_used`.
+   `iter_control_results` special-cases it and includes all four on the
+   yielded error dict instead of just `{"error": str}`; the CLI
+   (`run_control.main`) writes them to the step's output JSON, and the
+   Streamlit app renders them in an expander ("Tool calls made before
+   failure") under the error banner so a failed step still shows what was
+   searched and what was found.
+
+Still a gap, not yet built: real-time *dollar* cost (token counts are a
+proxy — cache reads are billed far cheaper than fresh input tokens, so
+`tokens_used` overstates actual spend on a well-cached run) and a pre-flight
+cost estimate before a run starts.

@@ -35,7 +35,7 @@ import streamlit as st
 from anthropic import AnthropicFoundry
 
 from agent.intake import build_manifest_from_any_columns, read_excel_rows
-from agent.loop import DEFAULT_MODEL
+from agent.loop import DEFAULT_MODEL, MAX_TOOL_ITERATIONS, MAX_TOTAL_TOKENS
 from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
 
@@ -65,6 +65,24 @@ with st.sidebar:
         help="Must match a model actually deployed on this resource.",
     )
     st.caption("These are only used for this session -- nothing is saved to disk.")
+
+    st.header("Spending cap")
+    max_total_tokens = st.number_input(
+        "Max tokens per test step",
+        min_value=10_000,
+        max_value=2_000_000,
+        value=MAX_TOTAL_TOKENS,
+        step=10_000,
+        help=(
+            "Hard cutoff. If one test step's running total of input+output "
+            "tokens crosses this, it's aborted rather than left to keep "
+            "burning turns -- but everything it already found is still kept "
+            "and shown, not thrown away. Lower this if you want to catch a "
+            "runaway step (bad extraction, a huge PY file) even cheaper; "
+            "raise it only if a legitimately complex step keeps hitting the "
+            "cap with a conclusion still in reach."
+        ),
+    )
 
 # ── 1. Control details ───────────────────────────────────────────────────────
 st.header("1. Control details")
@@ -210,13 +228,46 @@ if st.button("Run test steps", type="primary"):
             }
             client = AnthropicFoundry(api_key=api_key, resource=resource)
 
+            # Live progress -- a step can run for a couple of minutes across
+            # several tool calls, and iter_control_results only yields once a
+            # step is fully done or aborted. Without this there is no
+            # visibility (and no cost signal) while the money is being spent.
+            progress = st.empty()
+
+            def _show_progress(step_id: str, turn: int, tokens: int, log: list) -> None:
+                progress.info(
+                    f"Running **{step_id}** — turn {turn}/{MAX_TOOL_ITERATIONS}, ~{tokens:,} tokens used so far, "
+                    f"{len(log)} tool call(s) made. (Cap: {int(max_total_tokens):,} tokens)"
+                )
+
             all_results = {}
             for test_step_id, result in iter_control_results(
-                spec, tmp_dir, client, model, sample_manifests=sample_manifests
+                spec,
+                tmp_dir,
+                client,
+                model,
+                sample_manifests=sample_manifests,
+                max_total_tokens=int(max_total_tokens),
+                on_turn=_show_progress,
             ):
+                progress.empty()
                 st.subheader(test_step_id)
                 if "error" in result:
                     st.error(f"Failed: {result['error']}")
+                    if "audit_log" in result:
+                        # A token-budget or max-iterations abort still made
+                        # real, billed API calls -- show what they actually
+                        # found instead of a dead end with nothing to show
+                        # for the spend.
+                        st.caption(
+                            f"Stopped after {result['turns_used']} turn(s), "
+                            f"~{result['tokens_used']:,} tokens used, "
+                            f"{len(result['audit_log'])} tool call(s) made before the abort."
+                        )
+                        with st.expander("Tool calls made before failure"):
+                            for entry in result["audit_log"]:
+                                st.markdown(f"**Turn {entry.turn} — `{entry.tool_name}`**" + (" ⚠️ error" if entry.is_error else ""))
+                                st.json({"input": entry.input, "output": entry.output})
                 else:
                     _render_conclusion(result["conclusion"])
                 all_results[test_step_id] = result

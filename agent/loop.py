@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime
 import json
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from agent.schemas import (
     CheckSampleCoverageError,
@@ -44,6 +44,18 @@ from agent.schemas import validate_citations_against_transcript
 DEFAULT_MODEL = "claude-sonnet-5"
 PROMPT_VERSION = "v1"
 MAX_TOOL_ITERATIONS = 15
+
+# Hard spending cap, in tokens (input + output + cache write/read, summed
+# across every turn of one test step). A real run without this hit ~400K
+# input tokens on a SINGLE request before the extraction/caching fixes, and
+# separately burned $65 with zero output by grinding through
+# MAX_TOOL_ITERATIONS turns without ever calling submit_conclusion. Token
+# count is a proxy for spend, not an exact dollar figure (cache reads are
+# billed far cheaper than fresh input) -- the point is to fail fast and
+# cheaply instead of silently running up a real bill. 300K is generous
+# relative to a healthy run (low thousands of tokens/request) while staying
+# well under what a runaway loop can rack up.
+MAX_TOTAL_TOKENS = 300_000
 
 # Section 0 of the design doc: this block goes into the cacheable system
 # prompt prefix so the model reads company vocabulary correctly instead of
@@ -295,6 +307,47 @@ class AuditLogEntry:
     timestamp: str
 
 
+class IncompleteRunError(RuntimeError):
+    """Raised when a test step is aborted before submit_conclusion -- either
+    the iteration count or the token budget ran out first. Unlike a bare
+    RuntimeError, this carries everything already paid for: the audit log of
+    every tool call made so far, and the token/turn counts that triggered
+    the abort. A caller can show that instead of a total loss (see
+    agent/run_control.py's iter_control_results, which surfaces these on the
+    error dict it yields).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        audit_log: list[AuditLogEntry],
+        tokens_used: int,
+        turns_used: int,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.audit_log = audit_log
+        self.tokens_used = tokens_used
+        self.turns_used = turns_used
+
+
+def _usage_tokens(usage: Any) -> int:
+    """Sums every token field a Messages API usage object can carry. Missing
+    fields (a minimal test double, or an SDK version without cache fields)
+    default to 0 rather than raising.
+    """
+    if usage is None:
+        return 0
+    return (
+        getattr(usage, "input_tokens", 0)
+        + getattr(usage, "output_tokens", 0)
+        + getattr(usage, "cache_creation_input_tokens", 0)
+        + getattr(usage, "cache_read_input_tokens", 0)
+    )
+
+
 def _execute_tool(
     block: Any, ctx: ToolContext, turn: int, audit_log: list[AuditLogEntry]
 ) -> tuple[dict, bool, ConclusionOutput | None]:
@@ -392,7 +445,16 @@ def run_test_step(
     client: "AnthropicClientLike",
     model: str = DEFAULT_MODEL,
     max_iterations: int = MAX_TOOL_ITERATIONS,
+    max_total_tokens: int = MAX_TOTAL_TOKENS,
+    on_turn: "Callable[[int, int, list[AuditLogEntry]], None] | None" = None,
 ) -> tuple[ConclusionOutput, list[AuditLogEntry]]:
+    """on_turn, if given, is called once per completed turn with
+    (turn_number, cumulative_tokens_used, audit_log_so_far) -- purely for a
+    caller (the Streamlit app) to show live progress while a step is still
+    running. It sees the same audit_log list this function keeps appending
+    to, so a caller that only reads it (rather than mutating it) is safe;
+    nothing here depends on its return value.
+    """
     ctx = ToolContext(
         evidence_items=evidence_items,
         model=model,
@@ -400,6 +462,7 @@ def run_test_step(
     )
 
     audit_log: list[AuditLogEntry] = []
+    tokens_used = 0
     system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
     messages: list[dict] = [{"role": "user", "content": build_user_turn(request)}]
 
@@ -425,6 +488,8 @@ def run_test_step(
         if getattr(response, "stop_reason", None) == "refusal":
             raise RuntimeError(f"model declined the request: {getattr(response, 'stop_details', None)}")
 
+        tokens_used += _usage_tokens(getattr(response, "usage", None))
+
         messages.append({"role": "assistant", "content": response.content})
         tool_use_blocks = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 
@@ -438,6 +503,17 @@ def run_test_step(
                     ),
                 }
             )
+            if on_turn is not None:
+                on_turn(turn, tokens_used, audit_log)
+            if tokens_used >= max_total_tokens:
+                raise IncompleteRunError(
+                    f"test step {request.test_step_id!r} exceeded the {max_total_tokens:,}-token "
+                    f"budget after {turn} turn(s) without reaching submit_conclusion",
+                    reason="token_budget_exceeded",
+                    audit_log=audit_log,
+                    tokens_used=tokens_used,
+                    turns_used=turn,
+                )
             continue
 
         tool_results = []
@@ -457,10 +533,27 @@ def run_test_step(
 
         messages.append({"role": "user", "content": tool_results})
 
+        if on_turn is not None:
+            on_turn(turn, tokens_used, audit_log)
+
         if final_conclusion is not None:
             return final_conclusion, audit_log
 
-    raise RuntimeError(
+        if tokens_used >= max_total_tokens:
+            raise IncompleteRunError(
+                f"test step {request.test_step_id!r} exceeded the {max_total_tokens:,}-token "
+                f"budget after {turn} turn(s) without reaching submit_conclusion",
+                reason="token_budget_exceeded",
+                audit_log=audit_log,
+                tokens_used=tokens_used,
+                turns_used=turn,
+            )
+
+    raise IncompleteRunError(
         f"test step {request.test_step_id!r} did not reach submit_conclusion "
-        f"within {max_iterations} tool-loop iterations"
+        f"within {max_iterations} tool-loop iterations",
+        reason="max_iterations",
+        audit_log=audit_log,
+        tokens_used=tokens_used,
+        turns_used=max_iterations,
     )

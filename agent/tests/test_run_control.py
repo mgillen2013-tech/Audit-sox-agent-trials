@@ -196,3 +196,28 @@ def test_run_control_missing_sample_list_row_still_runs(control_dir: tuple[Path,
 
     assert results["TS-4.2"]["conclusion"].conclusion == "satisfied"
     assert results["TS-9.9"]["conclusion"].conclusion == "insufficient_evidence"
+
+
+def test_run_control_preserves_audit_log_on_incomplete_run(control_dir: tuple[Path, dict]):
+    # This is the direct regression test for the real $65 failure: a step
+    # that never reaches submit_conclusion must not come back as a bare
+    # error string with everything already paid for thrown away.
+    base_dir, spec = control_dir
+    # run_test_step's default max_iterations is 15 -- iter_control_results
+    # doesn't expose a smaller override, so this needs one response per
+    # iteration, each a real (never-concluding) tool call.
+    client = FakeClient(
+        responses=[
+            response([tool_use(f"t{i}", "search_cy_support", {"query": "accrual recalculation GL", "top_k": 5})])
+            for i in range(15)
+        ]
+    )
+
+    results = run_control(spec, base_dir, client, model="claude-opus-5")
+
+    result = results["TS-4.2"]
+    assert "error" in result
+    assert result["reason"] == "max_iterations"
+    assert len(result["audit_log"]) == 15
+    assert all(entry.tool_name == "search_cy_support" for entry in result["audit_log"])
+    assert "tokens_used" in result and "turns_used" in result
