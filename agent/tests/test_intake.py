@@ -5,7 +5,12 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from agent.intake import build_manifests_from_rows, parse_sample_list
+from agent.intake import (
+    build_manifest_from_any_columns,
+    build_manifests_from_rows,
+    parse_sample_list,
+    read_excel_rows,
+)
 
 
 def _write_sample_list(path: Path, rows: list[list]) -> Path:
@@ -145,3 +150,80 @@ def test_build_manifests_from_rows_matches_excel_path():
 def test_build_manifests_from_rows_rejects_missing_required_field():
     with pytest.raises(ValueError, match="is missing"):
         build_manifests_from_rows([{"test_step_id": "TS-1.1", "sample_id": "S01"}])
+
+
+# --------------------------------------------------------------------------
+# build_manifest_from_any_columns / read_excel_rows -- the arbitrary-column
+# path, exercised against data shaped like a real E1 AP payment export
+# (this is what actually broke the fixed-column parser in practice).
+# --------------------------------------------------------------------------
+
+_E1_STYLE_ROWS = [
+    {
+        "Sample Selection #": 1,
+        "invoice number f0411.vinv": "IN-88213",
+        "invoice payment amount f0414.paap": 12450.00,
+        "business unit f0414.mcu": "35210",
+        "check/ item f0413.docm": "48213",
+    },
+    {
+        "Sample Selection #": 2,
+        "invoice number f0411.vinv": "IN-88214",
+        "invoice payment amount f0414.paap": 8300.00,
+        "business unit f0414.mcu": "35211",
+        "check/ item f0413.docm": "48214",
+    },
+]
+
+
+def test_build_manifest_from_any_columns_uses_detected_id_column():
+    manifest = build_manifest_from_any_columns(
+        _E1_STYLE_ROWS,
+        test_step_id="T1.1",
+        population_description="All AP payments issued in the test period",
+        selection_method="random",
+        population_size=156,
+    )
+    assert manifest.sample_size == 2
+    assert manifest.samples[0].sample_id == "1"
+    assert manifest.samples[1].sample_id == "2"
+
+
+def test_build_manifest_from_any_columns_builds_identifying_details_and_key_fields():
+    manifest = build_manifest_from_any_columns(
+        _E1_STYLE_ROWS, test_step_id="T1.1", population_description="AP payments", selection_method="random"
+    )
+    sample = manifest.samples[0]
+    assert "invoice number f0411.vinv: IN-88213" in sample.identifying_details
+    assert sample.key_fields["business unit f0414.mcu"] == "35210"
+
+
+def test_build_manifest_from_any_columns_falls_back_to_row_number_without_id_column():
+    rows = [{"invoice number": "IN-1"}, {"invoice number": "IN-2"}]
+    manifest = build_manifest_from_any_columns(
+        rows, test_step_id="T1.1", population_description="AP payments", selection_method="random"
+    )
+    assert manifest.samples[0].sample_id == "row_1"
+    assert manifest.samples[1].sample_id == "row_2"
+
+
+def test_build_manifest_from_any_columns_rejects_bad_selection_method():
+    with pytest.raises(ValueError, match="selection_method"):
+        build_manifest_from_any_columns(
+            _E1_STYLE_ROWS, test_step_id="T1.1", population_description="AP payments", selection_method="vibes"
+        )
+
+
+def test_read_excel_rows_matches_real_export_shape(tmp_path: Path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Sample Selection #", "invoice number f0411.vinv", "business unit f0414.mcu"])
+    ws.append([1, "IN-88213", "35210"])
+    ws.append([2, "IN-88214", "35211"])
+    path = tmp_path / "T1.1 SS.156 Population & Samples.xlsx"
+    wb.save(path)
+
+    rows = read_excel_rows(path)
+    assert len(rows) == 2
+    assert rows[0]["Sample Selection #"] == 1
+    assert rows[0]["invoice number f0411.vinv"] == "IN-88213"

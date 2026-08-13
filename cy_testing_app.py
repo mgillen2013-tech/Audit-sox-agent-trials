@@ -11,6 +11,14 @@ a temp folder, then calls the exact same iter_control_results() the
 command-line runner uses, so the orchestration logic here is the same logic
 proven by the CLI runs, not a second implementation of it.
 
+Sample list uploads are per test step and accept ANY spreadsheet columns
+(see agent.intake.build_manifest_from_any_columns) -- a real population/
+sample export straight out of E1 or wherever has columns like "invoice
+number f0411.vinv", not "identifying_details". Population description,
+selection method, and population size are entered directly on the form
+instead of expected to live in the file, since they're audit judgments,
+not something a source system export carries.
+
 This is still a shell, not the full review UI from the design doc (no
 approve/edit/reject, no citation-card source previews) -- it's the intake
 + run + raw-results half, so you can drive a real control without hand-
@@ -26,10 +34,12 @@ from pathlib import Path
 import streamlit as st
 from anthropic import AnthropicFoundry
 
-from agent.intake import parse_sample_list
+from agent.intake import build_manifest_from_any_columns, read_excel_rows
 from agent.loop import DEFAULT_MODEL
 from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
+
+SELECTION_METHODS = ["random", "haphazard", "judgmental", "all_items"]
 
 st.set_page_config(page_title="CY Testing Agent", page_icon="🧾", layout="wide")
 st.title("🧾 CY Testing Agent")
@@ -76,22 +86,39 @@ for i in range(int(num_steps)):
     with st.expander(f"Test step {i + 1}", expanded=(i == 0)):
         tsid = st.text_input("Test step ID", key=f"tsid_{i}", placeholder=f"TS-{i + 1}")
         tstext = st.text_area("Test step text", key=f"tstext_{i}", placeholder="What this step requires you to test.")
-        test_steps.append({"test_step_id": tsid, "test_step_text": tstext})
+
+        st.markdown("**Sample**")
+        pop_desc = st.text_input(
+            "Population description",
+            key=f"popdesc_{i}",
+            placeholder="e.g. All AP payments issued in the test period",
+        )
+        sel_method = st.selectbox("Selection method", SELECTION_METHODS, key=f"selmethod_{i}")
+        pop_size = st.number_input(
+            "Population size (optional -- leave 0 if unknown)", key=f"popsize_{i}", min_value=0, step=1
+        )
+        sample_file = st.file_uploader(
+            "Sample list for this step (any Excel export -- no specific columns required)",
+            type=["xlsx", "xls", "xlsm"],
+            key=f"samplefile_{i}",
+        )
+
+        test_steps.append(
+            {
+                "test_step_id": tsid,
+                "test_step_text": tstext,
+                "population_description": pop_desc,
+                "selection_method": sel_method,
+                "population_size": pop_size,
+                "sample_file": sample_file,
+            }
+        )
 
 # ── 3. Files ──────────────────────────────────────────────────────────────
-st.header("3. Upload files")
+st.header("3. Upload PY testing + CY support")
 py_testing_file = st.file_uploader("PY testing workpaper", type=["pdf", "xlsx", "xls", "xlsm"])
 cy_support_files = st.file_uploader(
     "CY support evidence (one or more)", type=["pdf", "xlsx", "xls", "xlsm"], accept_multiple_files=True
-)
-sample_list_file = st.file_uploader(
-    "Sample list (Excel)",
-    type=["xlsx", "xls", "xlsm"],
-    help=(
-        "Required columns: test_step_id, sample_id, identifying_details, "
-        "population_description, selection_method (random/haphazard/judgmental/all_items). "
-        "Optional: population_size, plus any other columns you want kept per sample."
-    ),
 )
 
 
@@ -130,15 +157,15 @@ if st.button("Run test steps", type="primary"):
     errors = []
     if not control_id or not control_objective_ref or not control_objective_text:
         errors.append("Fill in all of the control details.")
-    step_ids = [s["test_step_id"] for s in test_steps]
-    if any(not s["test_step_id"] or not s["test_step_text"] for s in test_steps):
-        errors.append("Fill in every field for every test step.")
+    for s in test_steps:
+        if not s["test_step_id"] or not s["test_step_text"] or not s["population_description"]:
+            errors.append(f"Fill in every field for test step {s['test_step_id'] or '(unnamed)'}.")
+        if s["sample_file"] is None:
+            errors.append(f"Upload a sample list for test step {s['test_step_id'] or '(unnamed)'}.")
     if py_testing_file is None:
         errors.append("Upload a PY testing workpaper.")
     if not cy_support_files:
         errors.append("Upload at least one CY support file.")
-    if sample_list_file is None:
-        errors.append("Upload a sample list.")
     if not api_key or not resource:
         errors.append("Fill in the Foundry API key and resource name in the sidebar.")
 
@@ -151,39 +178,42 @@ if st.button("Run test steps", type="primary"):
             (tmp_dir / py_testing_file.name).write_bytes(py_testing_file.getvalue())
             for f in cy_support_files:
                 (tmp_dir / f.name).write_bytes(f.getvalue())
-            (tmp_dir / sample_list_file.name).write_bytes(sample_list_file.getvalue())
 
-            try:
-                manifests = parse_sample_list(tmp_dir / sample_list_file.name)
-            except ValueError as exc:
-                st.error(f"Couldn't read the sample list: {exc}")
+            sample_manifests = {}
+            build_failed = False
+            for s in test_steps:
+                sample_path = tmp_dir / s["sample_file"].name
+                sample_path.write_bytes(s["sample_file"].getvalue())
+                try:
+                    rows = read_excel_rows(sample_path)
+                    sample_manifests[s["test_step_id"]] = build_manifest_from_any_columns(
+                        rows,
+                        test_step_id=s["test_step_id"],
+                        population_description=s["population_description"],
+                        selection_method=s["selection_method"],
+                        population_size=int(s["population_size"]) or None,
+                    )
+                except ValueError as exc:
+                    st.error(f"Sample list for {s['test_step_id']}: {exc}")
+                    build_failed = True
+
+            if build_failed:
                 st.stop()
-
-            unmatched = set(manifests) - set(step_ids)
-            if unmatched:
-                st.warning(
-                    f"Sample list has test_step_id(s) not defined above (ignored): {sorted(unmatched)}"
-                )
-            missing = set(step_ids) - set(manifests)
-            if missing:
-                st.warning(
-                    f"No sample list rows for test_step_id(s) {sorted(missing)} -- "
-                    f"those steps will run with an empty sample."
-                )
 
             spec = {
                 "control_id": control_id,
                 "control_objective_ref": control_objective_ref,
                 "control_objective_text": control_objective_text,
                 "py_testing_file": py_testing_file.name,
-                "sample_list_file": sample_list_file.name,
                 "cy_support_files": [f.name for f in cy_support_files],
-                "test_steps": test_steps,
+                "test_steps": [{"test_step_id": s["test_step_id"], "test_step_text": s["test_step_text"]} for s in test_steps],
             }
             client = AnthropicFoundry(api_key=api_key, resource=resource)
 
             all_results = {}
-            for test_step_id, result in iter_control_results(spec, tmp_dir, client, model):
+            for test_step_id, result in iter_control_results(
+                spec, tmp_dir, client, model, sample_manifests=sample_manifests
+            ):
                 st.subheader(test_step_id)
                 if "error" in result:
                     st.error(f"Failed: {result['error']}")

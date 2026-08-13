@@ -113,17 +113,37 @@ SamplePopulationManifest = {
 `sample_id` list from this manifest for the given test step — this is what
 resolves the open question of where that input comes from.
 
-**Built:** `agent/intake.py` parses this from a flat Excel sheet — one row
-per sample, columns `test_step_id` / `sample_id` / `identifying_details` /
-`population_description` / `selection_method` (required) and
-`population_size` (optional). Any other column becomes `key_fields`.
-`sample_size` is computed from the row count per `test_step_id`, not read
-from a column — it can't drift out of sync with the actual list that way.
+**Built, two paths.** `agent/intake.py` has both:
+- `parse_sample_list` / `build_manifests_from_rows`: the clean fixed-column
+  format above (`test_step_id` / `sample_id` / `identifying_details` /
+  `population_description` / `selection_method` required, `population_size`
+  optional). Used by the CLI's `control.json` workflow. `sample_size` is
+  computed from row count, never read from a column, so it can't drift out
+  of sync with the actual list.
+- `build_manifest_from_any_columns` / `read_excel_rows`: **what the
+  Streamlit app actually uses**, after a real run surfaced that this
+  assumption was wrong — a real sample/population export (an E1 AP payment
+  extract, in the case that broke it) has columns like `invoice number
+  f0411.vinv`, not `identifying_details`, and has no
+  `population_description`/`selection_method` concept at all, because
+  those are audit judgments, not something the source system tracks.
+  Forcing a rename before upload was exactly the friction this app exists
+  to remove. This path takes any spreadsheet — sample_id is auto-detected
+  from a likely id-ish column (falling back to row position),
+  `identifying_details` and `key_fields` are built from every column
+  present, and population description / selection method / population size
+  are entered on the form once per test step instead of expected to live in
+  the file. One file = one test step's samples here, matching how a real
+  export naturally exists.
+
 `agent/run_control.py` wires this together with real PY/CY file extraction
-(`agent/extraction`) into one test-step run per row in a small `control.json`
-spec (see `agent/control.example.json`) — still no upload form, and PY
-excerpts aren't yet sliced per test step (every step sees the whole
-extracted PY file), but real files now drive the whole loop end to end.
+(`agent/extraction`) into one test-step run per step in a small
+`control.json` spec (see `agent/control.example.json`) for the CLI, or
+directly from the Streamlit form's uploads for the app (`iter_control_results`
+takes pre-built manifests via a `sample_manifests` argument, skipping the
+file-based path entirely). PY excerpts still aren't sliced per test step
+(every step sees the whole extracted PY file) — real files now drive the
+whole loop end to end either way.
 
 ## 2. Document extraction strategy (PDFs + Excel)
 

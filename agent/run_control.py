@@ -54,10 +54,16 @@ from typing import Any
 from agent.extraction import extract, extract_many
 from agent.intake import parse_sample_list
 from agent.loop import DEFAULT_MODEL, TestStepRequest, run_test_step
-from agent.schemas import ConclusionOutput
+from agent.schemas import ConclusionOutput, SamplePopulationManifest
 
 
-def iter_control_results(spec: dict[str, Any], base_dir: Path, client: Any, model: str) -> Iterator[tuple[str, dict]]:
+def iter_control_results(
+    spec: dict[str, Any],
+    base_dir: Path,
+    client: Any,
+    model: str,
+    sample_manifests: dict[str, SamplePopulationManifest] | None = None,
+) -> Iterator[tuple[str, dict]]:
     """The testable core -- no file writing, no env var reads. Yields
     (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
     or (test_step_id, {"error": str}) as each test step finishes, rather
@@ -65,10 +71,19 @@ def iter_control_results(spec: dict[str, Any], base_dir: Path, client: Any, mode
     with several steps can take minutes, and a caller (the Streamlit app)
     that wants to show progress per step needs results as they land, not
     a batch dump at the end.
+
+    sample_manifests: pass already-built manifests to skip
+    spec["sample_list_file"] / parse_sample_list() entirely -- used by the
+    Streamlit app, which builds one manifest per test step directly from
+    whatever columns that step's uploaded file actually has (see
+    agent.intake.build_manifest_from_any_columns) rather than requiring one
+    combined file in the clean fixed-column format. Falls back to the
+    file-based path when omitted, for the CLI's control.json workflow.
     """
     py_evidence = extract(base_dir / spec["py_testing_file"])
     cy_evidence = extract_many([base_dir / f for f in spec["cy_support_files"]])
-    sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])
+    if sample_manifests is None:
+        sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])
 
     for step in spec["test_steps"]:
         test_step_id = step["test_step_id"]
@@ -98,11 +113,17 @@ def iter_control_results(spec: dict[str, Any], base_dir: Path, client: Any, mode
         yield test_step_id, {"conclusion": conclusion, "audit_log": audit_log}
 
 
-def run_control(spec: dict[str, Any], base_dir: Path, client: Any, model: str) -> dict[str, dict]:
+def run_control(
+    spec: dict[str, Any],
+    base_dir: Path,
+    client: Any,
+    model: str,
+    sample_manifests: dict[str, SamplePopulationManifest] | None = None,
+) -> dict[str, dict]:
     """Batch wrapper over iter_control_results() for callers (the CLI, tests)
     that just want the whole set of results at the end.
     """
-    return dict(iter_control_results(spec, base_dir, client, model))
+    return dict(iter_control_results(spec, base_dir, client, model, sample_manifests=sample_manifests))
 
 
 def main() -> None:
