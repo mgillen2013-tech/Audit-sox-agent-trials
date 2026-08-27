@@ -183,13 +183,16 @@ def test_cache_breakpoint_on_newest_message_never_accumulates(evidence_items, sa
         responses=[
             response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
             response([tool_use("t2", "search_cy_support", {"query": "accrual again", "top_k": 5})]),
-            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+            response(
+                [tool_use("t3", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
+            ),
+            response([tool_use("t4", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
 
     run_test_step(request_, evidence_items, sample_manifest, client)
 
-    assert len(client.calls) == 3
+    assert len(client.calls) == 4
     for call in client.calls:
         last_content = call["messages"][-1]["content"]
         assert isinstance(last_content, list), "last message should be in block form, not a bare string"
@@ -309,7 +312,10 @@ def test_fabricated_citation_is_rejected_and_model_can_retry(evidence_items, sam
             ),
             # Retry: search first, then cite a real evidence_id.
             response([tool_use("t2", "search_cy_support", {"query": "accrual", "top_k": 5})]),
-            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+            response(
+                [tool_use("t3", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
+            ),
+            response([tool_use("t4", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
 
@@ -358,6 +364,134 @@ def test_tool_call_count_matches_audit_log_even_after_invalid_input(evidence_ite
     assert len(audit_log) == 2
     assert audit_log[0].is_error is True
     assert conclusion.model_metadata.tool_call_count == 2
+
+
+def test_satisfied_without_coverage_check_is_rejected(evidence_items, sample_manifest, request_):
+    # The system prompt ASKS for check_sample_coverage before concluding; this
+    # proves the backend REFUSES a sampled "satisfied" that skipped it -- the
+    # model is pushed to check coverage and only then gets accepted.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([tool_use("t2", "submit_conclusion", _submit_conclusion_input())]),  # no coverage call yet
+            response(
+                [tool_use("t3", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
+            ),
+            response([tool_use("t4", "submit_conclusion", _submit_conclusion_input())]),
+        ]
+    )
+
+    conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
+
+    rejected = audit_log[1]
+    assert rejected.tool_name == "submit_conclusion"
+    assert rejected.is_error is True
+    assert "check_sample_coverage" in rejected.output["error"]
+    assert conclusion.conclusion == "satisfied"
+
+
+def test_satisfied_with_incomplete_coverage_is_rejected(evidence_items, request_):
+    # Two required samples, evidence found for only one -- "satisfied" must
+    # bounce with the missing sample named, and a downgraded conclusion
+    # (insufficient_evidence) must still go through.
+    manifest = SamplePopulationManifest(
+        test_step_id="TS-4.2",
+        population_description="All month-end accrual reconciliations",
+        sample_size=2,
+        selection_method="all_items",
+        samples=[
+            SampleItem(sample_id="S01", test_step_id="TS-4.2", identifying_details="October accrual"),
+            SampleItem(sample_id="S02", test_step_id="TS-4.2", identifying_details="November accrual"),
+        ],
+    )
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response(
+                [tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
+            ),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),  # satisfied, 1/2 covered
+            response(
+                [
+                    tool_use(
+                        "t4",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+
+    conclusion, audit_log = run_test_step(request_, evidence_items, manifest, client)
+
+    rejected = audit_log[2]
+    assert rejected.is_error is True
+    assert "S02" in rejected.output["error"]
+    assert "1/2" in rejected.output["error"]
+    assert conclusion.conclusion == "insufficient_evidence"
+
+
+def test_wrapup_warning_injected_before_last_iteration(evidence_items, sample_manifest, request_):
+    # The $65 failure: the model ground through every turn with no idea a
+    # limit existed, then aborted with nothing. It must now be told to wrap
+    # up one turn before the cliff.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([tool_use("t2", "search_cy_support", {"query": "accrual again", "top_k": 5})]),
+            response(
+                [
+                    tool_use(
+                        "t3",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+
+    conclusion, _ = run_test_step(request_, evidence_items, sample_manifest, client, max_iterations=3)
+
+    assert conclusion.conclusion == "insufficient_evidence"
+    # Not warned yet going into turn 2...
+    assert not any(
+        "close to its turn/token limit" in _message_text(m["content"]) for m in client.calls[1]["messages"]
+    )
+    # ...warned going into turn 3, the final allowed iteration.
+    assert any(
+        "close to its turn/token limit" in _message_text(m["content"]) for m in client.calls[2]["messages"]
+    )
+
+
+def test_wrapup_warning_injected_near_token_budget(evidence_items, sample_manifest, request_):
+    client = FakeClient(
+        responses=[
+            response(
+                [tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})],
+                usage=fake_usage(input_tokens=850),  # 85% of the 1000 budget
+            ),
+            response(
+                [
+                    tool_use(
+                        "t2",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+
+    conclusion, _ = run_test_step(
+        request_, evidence_items, sample_manifest, client, max_total_tokens=1_000
+    )
+
+    assert conclusion.conclusion == "insufficient_evidence"
+    assert any(
+        "close to its turn/token limit" in _message_text(m["content"]) for m in client.calls[1]["messages"]
+    )
 
 
 def test_no_tool_call_is_nudged_not_accepted_as_final(evidence_items, sample_manifest, request_):

@@ -235,7 +235,9 @@ TOOLS = [
         "Submit your final conclusion for this test step. This is the only "
         "way to end the conversation -- call it once you've gathered enough "
         "evidence (via search_cy_support) to conclude, including concluding "
-        "insufficient_evidence.",
+        "insufficient_evidence. Note: when the test step has a sample, a "
+        "'satisfied' conclusion is only accepted after a check_sample_coverage "
+        "call showing complete coverage.",
         SubmitConclusionInput,
     ),
 ]
@@ -411,10 +413,37 @@ def _execute_tool(
         is_error = False
 
     elif block.name == "submit_conclusion":
+        gate_error: str | None = None
         try:
             validate_citations_against_transcript(parsed, ctx.evidence_ids_returned_by_search)
         except ValueError as exc:
-            content = {"error": str(exc)}
+            gate_error = str(exc)
+
+        # Server-enforced, like the fabrication guard: the system prompt and
+        # tool descriptions ASK for check_sample_coverage before concluding,
+        # but a "satisfied" on a sampled test step with unverified or
+        # incomplete coverage is exactly the conclusion an audit reviewer
+        # can't accept, so the backend refuses it rather than trusting the
+        # model to have followed the instruction.
+        if gate_error is None and parsed.conclusion == "satisfied" and ctx.required_sample_ids:
+            if ctx.last_sample_coverage is None:
+                gate_error = (
+                    "a 'satisfied' conclusion for a test step with a sample requires a "
+                    "successful check_sample_coverage call first. Call it, then resubmit -- "
+                    "or, if coverage can't be established, conclude not_satisfied or "
+                    "insufficient_evidence and use request_additional_support for what's missing."
+                )
+            elif not ctx.last_sample_coverage.complete:
+                sc = ctx.last_sample_coverage
+                gate_error = (
+                    f"sample coverage is incomplete ({sc.total_found}/{sc.total_required}; "
+                    f"missing: {sc.missing}) -- 'satisfied' is not supportable. Search for "
+                    "evidence covering the missing samples and re-run check_sample_coverage, "
+                    "or conclude not_satisfied/insufficient_evidence and request additional support."
+                )
+
+        if gate_error is not None:
+            content = {"error": gate_error}
             is_error = True
         else:
             conclusion = ConclusionOutput(
@@ -439,6 +468,28 @@ def _execute_tool(
 
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+_WRAPUP_WARNING = (
+    "IMPORTANT: this test step is close to its turn/token limit. Do not start "
+    "new lines of investigation. On your next turn, call submit_conclusion "
+    "with your best-supported conclusion -- insufficient_evidence with "
+    "additional_support_requests listing exactly what's missing is a fully "
+    "valid close, and far better than running out of turns with no "
+    "conclusion at all."
+)
+
+
+def _append_wrapup_warning(messages: list[dict]) -> None:
+    """Appends the wrap-up warning as a text block on the newest user
+    message (tool results or nudge), converting a bare-string message to
+    block form if needed. The API allows text blocks after tool_result
+    blocks in the same user message.
+    """
+    last = messages[-1]
+    if isinstance(last["content"], str):
+        last["content"] = [{"type": "text", "text": last["content"]}]
+    last["content"].append({"type": "text", "text": _WRAPUP_WARNING})
 
 
 def run_test_step(
@@ -466,8 +517,23 @@ def run_test_step(
 
     audit_log: list[AuditLogEntry] = []
     tokens_used = 0
+    wrapup_warned = False
     system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
     messages: list[dict] = [{"role": "user", "content": build_user_turn(request)}]
+
+    def _maybe_warn_wrapup(turn: int) -> None:
+        # The $65 failure mode was the model grinding through every allowed
+        # turn with no idea a limit existed, then aborting with nothing.
+        # One warning, injected a turn before either cliff (last iteration,
+        # or 80% of the token budget), gives it the chance to close with a
+        # real conclusion instead. Fired at most once -- if the model
+        # ignores it, the hard aborts below still cap the spend.
+        nonlocal wrapup_warned
+        if wrapup_warned:
+            return
+        if turn >= max_iterations - 1 or tokens_used >= 0.8 * max_total_tokens:
+            _append_wrapup_warning(messages)
+            wrapup_warned = True
 
     for turn in range(1, max_iterations + 1):
         # Without this, every turn re-sends (and re-bills at full price) the
@@ -526,6 +592,7 @@ def run_test_step(
                     tokens_used=tokens_used,
                     turns_used=turn,
                 )
+            _maybe_warn_wrapup(turn)
             continue
 
         tool_results = []
@@ -560,6 +627,8 @@ def run_test_step(
                 tokens_used=tokens_used,
                 turns_used=turn,
             )
+
+        _maybe_warn_wrapup(turn)
 
     raise IncompleteRunError(
         f"test step {request.test_step_id!r} did not reach submit_conclusion "

@@ -22,9 +22,15 @@ def text_block(t: str) -> SimpleNamespace:
 def fake_usage(
     input_tokens: int = 0,
     output_tokens: int = 0,
-    cache_creation_input_tokens: int = 0,
-    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: "int | None" = None,
+    cache_read_input_tokens: "int | None" = None,
 ) -> SimpleNamespace:
+    # The cache fields default to None, NOT 0, deliberately: on the real SDK
+    # they are Optional[int] and come back as None when unpopulated. An
+    # all-int fake masked exactly that -- _usage_tokens shipped with a
+    # `getattr(usage, field, 0)` that would have raised TypeError on the
+    # first real turn, and every test passed. The double must be at least as
+    # hostile as the real SDK.
     return SimpleNamespace(
         input_tokens=input_tokens,
         output_tokens=output_tokens,

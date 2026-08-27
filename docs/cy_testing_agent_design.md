@@ -226,6 +226,17 @@ The error case matters as much as the happy path — it's the deterministic
 trigger that should push the model toward `request_additional_support`
 rather than guessing.
 
+**Built (server-enforced, not just prompted):** on a sampled test step, a
+`satisfied` submit_conclusion is refused unless a successful
+`check_sample_coverage` call earlier in that conversation showed
+`complete: true` — same mechanism as the fabrication guard. The rejection
+message names the missing samples and points to the valid outs
+(cover the gaps, or downgrade the conclusion / request additional support).
+`not_satisfied` and `insufficient_evidence` are never gated on coverage —
+an exception found in one sample doesn't require the rest to be tested
+before flagging it, and blocking the "I don't have enough" close on a
+coverage check would defeat its purpose.
+
 ### `flag_exception`
 
 Structured side-channel for exceptions, independent of the prose narrative,
@@ -440,6 +451,14 @@ Two separate problems, both now fixed:
    Streamlit app renders them in an expander ("Tool calls made before
    failure") under the error banner so a failed step still shows what was
    searched and what was found.
+
+Also built: a one-time **wrap-up warning** injected into the conversation a
+turn before either cliff (the last allowed iteration, or 80% of the token
+budget) telling the model to stop investigating and close via
+`submit_conclusion` — `insufficient_evidence` + `additional_support_requests`
+explicitly named as the valid escape. This converts the worst case from
+"abort with only a partial audit log" into "a real, reviewable conclusion,"
+with the hard aborts above still capping spend if the model ignores it.
 
 Still a gap, not yet built: real-time *dollar* cost (token counts are a
 proxy — cache reads are billed far cheaper than fresh input tokens, so

@@ -167,6 +167,9 @@ def test_run_control_missing_sample_list_row_still_runs(control_dir: tuple[Path,
             # TS-4.2 first (dict preserves insertion order, and run_control
             # iterates spec["test_steps"] in order)
             response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response(
+                [tool_use("t1b", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
+            ),
             response([tool_use("t2", "submit_conclusion", _submit_conclusion_input())]),
             # TS-9.9
             response(
