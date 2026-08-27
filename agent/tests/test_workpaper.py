@@ -161,11 +161,18 @@ def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path
     ws = wb["TS-4.2"]
     text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
     assert "Tickmark" in text
-    assert "Evidence exhibits" in text
     assert "approval.pdf p.1" in text
-    # The annotated page render is actually embedded as an image, not just
-    # described in text.
-    assert len(ws._images) == 1
+
+    # Exhibits live on their own sheet -- inline, full-page renders pushed
+    # the conclusion ~110 rows down the step sheet.
+    assert len(ws._images) == 0
+    assert "see the 'TS-4.2 - Exhibits' sheet" in text
+
+    ex_ws = wb["TS-4.2 - Exhibits"]
+    assert len(ex_ws._images) == 1
+    ex_text = " ".join(str(c.value) for r in ex_ws.iter_rows() for c in r if c.value is not None)
+    assert "Evidence exhibits" in ex_text
+    assert "Tickmark letters match" in ex_text
 
 
 def test_pdf_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path):
@@ -202,9 +209,47 @@ def test_excel_cited_evidence_gets_text_excerpt(spec: dict, results: dict, tmp_p
 
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path, support_dir=support)
     out = openpyxl.load_workbook(path)
-    text = " ".join(str(c.value) for r in out["TS-4.2"].iter_rows() for c in r if c.value is not None)
+    text = " ".join(str(c.value) for r in out["TS-4.2 - Exhibits"].iter_rows() for c in r if c.value is not None)
     assert "Exhibit A" in text
     assert "October accrual | 482110" in text
+
+
+def test_step_sheet_puts_answers_before_supporting_detail(spec: dict, results: dict, tmp_path: Path):
+    # A reviewer opening the sheet must see the verdict, coverage, IPE
+    # status, exceptions and open requests before scrolling into the
+    # narrative and evidence table -- inline exhibits previously pushed all
+    # of that ~110 rows down the page.
+    path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
+    ws = openpyxl.load_workbook(path)["TS-4.2"]
+
+    rows = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.isupper() and len(cell.value) > 3:
+                rows.setdefault(cell.value, cell.row)
+
+    assert rows["CONCLUSION"] < rows["EXCEPTIONS"] < rows["ADDITIONAL SUPPORT REQUESTED"]
+    assert rows["ADDITIONAL SUPPORT REQUESTED"] < rows["DOCUMENTATION"]
+    assert rows["DOCUMENTATION"] < rows["PROCEDURES PERFORMED"] < rows["EVIDENCE CITED"]
+    assert rows["EVIDENCE CITED"] < rows["PREPARED BY"]
+
+
+def test_empty_exceptions_says_none_not_silence(spec: dict, results: dict, tmp_path: Path):
+    # "no exceptions" and "we didn't look" must not be indistinguishable in
+    # a workpaper -- an empty section is a real audit assertion.
+    path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
+    ws = openpyxl.load_workbook(path)["TS-4.2"]
+    text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
+    assert "None noted." in text
+
+
+def test_summary_sheet_carries_ipe_and_open_request_counts(spec: dict, results: dict, tmp_path: Path):
+    path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
+    ws = openpyxl.load_workbook(path)["Summary"]
+    text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
+    assert "IPE status" in text
+    assert "Open requests" in text
+    assert "not_applicable" in text  # from the fixture's conclusion
 
 
 def test_pdf_workpaper_contents(spec: dict, results: dict, tmp_path: Path):

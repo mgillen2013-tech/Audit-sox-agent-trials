@@ -51,7 +51,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from agent.extraction import extract, extract_many
+from agent.extraction import extract, extract_many, ocr_image_items
 from agent.intake import parse_sample_list
 from agent.loop import DEFAULT_MODEL, MAX_TOTAL_TOKENS, IncompleteRunError, TestStepRequest, run_test_step
 from agent.schemas import ConclusionOutput, SamplePopulationManifest
@@ -65,6 +65,8 @@ def iter_control_results(
     sample_manifests: dict[str, SamplePopulationManifest] | None = None,
     max_total_tokens: int = MAX_TOTAL_TOKENS,
     on_turn: "Callable[[str, int, int, list], None] | None" = None,
+    ocr_scanned_pages: bool = True,
+    on_ocr: "Callable[[str, int, bool], None] | None" = None,
 ) -> Iterator[tuple[str, dict]]:
     """The testable core -- no file writing, no env var reads. Yields
     (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
@@ -99,6 +101,14 @@ def iter_control_results(
     """
     py_evidence = extract(base_dir / spec["py_testing_file"])
     cy_evidence = extract_many([base_dir / f for f in spec["cy_support_files"]])
+
+    # Scanned/image-only pages carry no text at all until this runs -- a
+    # real run concluded on the approval email alone because the invoice
+    # and payment PDFs were image-only and unreadable. One vision call per
+    # such page, once per run (not per turn), before the loop starts.
+    if ocr_scanned_pages:
+        cy_evidence, _ = ocr_image_items(cy_evidence, base_dir, client, model, on_page=on_ocr)
+
     if sample_manifests is None:
         sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])
 
@@ -161,13 +171,20 @@ def run_control(
     model: str,
     sample_manifests: dict[str, SamplePopulationManifest] | None = None,
     max_total_tokens: int = MAX_TOTAL_TOKENS,
+    ocr_scanned_pages: bool = True,
 ) -> dict[str, dict]:
     """Batch wrapper over iter_control_results() for callers (the CLI, tests)
     that just want the whole set of results at the end.
     """
     return dict(
         iter_control_results(
-            spec, base_dir, client, model, sample_manifests=sample_manifests, max_total_tokens=max_total_tokens
+            spec,
+            base_dir,
+            client,
+            model,
+            sample_manifests=sample_manifests,
+            max_total_tokens=max_total_tokens,
+            ocr_scanned_pages=ocr_scanned_pages,
         )
     )
 

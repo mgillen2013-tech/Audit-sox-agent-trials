@@ -261,6 +261,22 @@ def _sheet_title(test_step_id: str) -> str:
     return re.sub(r"[:\\/?*\[\]]", "_", test_step_id)[:31] or "step"
 
 
+def _exhibit_sheet_title(test_step_id: str) -> str:
+    # Same sanitizing, but leave room for the " - Exhibits" suffix within
+    # Excel's 31-char sheet-name limit.
+    base = re.sub(r"[:\\/?*\[\]]", "_", test_step_id)[:20] or "step"
+    return f"{base} - Exhibits"
+
+
+_SECTION_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
+_SECTION_FONT = Font(bold=True, color="FFFFFF", size=11)
+_CONCLUSION_COLORS = {
+    "satisfied": "006100",
+    "not_satisfied": "9C0006",
+    "insufficient_evidence": "9C5700",
+}
+
+
 def _build_xlsx(
     spec: dict[str, Any],
     results: dict[str, dict],
@@ -300,11 +316,21 @@ def _build_xlsx(
     kv("", "")
 
     header_row = next_row
-    for col, name in enumerate(["Test step", "Conclusion", "Confidence", "Sample coverage", "Detail sheet"], 1):
+    summary_headers = [
+        "Test step",
+        "Conclusion",
+        "Confidence",
+        "Sample coverage",
+        "IPE status",
+        "Exceptions",
+        "Open requests",
+        "Detail sheet",
+    ]
+    for col, name in enumerate(summary_headers, 1):
         cell = ws.cell(header_row, col, name)
         cell.font = Font(bold=True)
         cell.fill = _HEADER_FILL
-    for col, width in zip("ABCDE", (28, 24, 12, 18, 16)):
+    for col, width in zip("ABCDEFGH", (22, 22, 12, 16, 16, 12, 14, 22)):
         ws.column_dimensions[col].width = width
 
     for test_step_id, result in results.items():
@@ -314,21 +340,73 @@ def _build_xlsx(
             ws.cell(r, 2, "INCOMPLETE -- run did not finish").font = Font(bold=True, color="AA0000")
         else:
             conclusion: ConclusionOutput = result["conclusion"]
-            ws.cell(r, 2, _CONCLUSION_LABELS.get(conclusion.conclusion, conclusion.conclusion))
+            verdict = ws.cell(r, 2, _CONCLUSION_LABELS.get(conclusion.conclusion, conclusion.conclusion))
+            color = _CONCLUSION_COLORS.get(conclusion.conclusion)
+            if color:
+                verdict.font = Font(bold=True, color=color)
             ws.cell(r, 3, conclusion.confidence)
             if conclusion.sample_coverage:
                 sc = conclusion.sample_coverage
                 ws.cell(r, 4, f"{sc.total_found}/{sc.total_required}")
-        ws.cell(r, 5, _sheet_title(test_step_id))
+            ws.cell(r, 5, conclusion.ipe_completeness_accuracy_status)
+            ws.cell(r, 6, len(conclusion.exceptions))
+            ws.cell(r, 7, len(conclusion.additional_support_requests))
+        ws.cell(r, 8, _sheet_title(test_step_id))
 
     for test_step_id, result in results.items():
         step_ws = wb.create_sheet(_sheet_title(test_step_id))
-        _write_step_sheet(
-            step_ws, test_step_id, step_texts.get(test_step_id, ""), result,
-            evidence_map, support_dir, _live_buffers,
+        letters, images, excerpts = _write_step_sheet(
+            step_ws, test_step_id, step_texts.get(test_step_id, ""), result, evidence_map, support_dir
         )
+        # Exhibits live on their own sheet: inline, a couple of full-page
+        # renders pushed the conclusion, IPE status, and open requests
+        # ~110 rows down the sheet, so a reviewer had to scroll past the
+        # pictures to reach the answers. The step sheet stays readable
+        # top-to-bottom; this is the appendix.
+        if images or excerpts:
+            ex_ws = wb.create_sheet(_exhibit_sheet_title(test_step_id))
+            _write_exhibit_sheet(ex_ws, test_step_id, images, excerpts, _live_buffers)
 
     wb.save(out_path)
+
+
+def _write_exhibit_sheet(
+    ws,
+    test_step_id: str,
+    images: list[tuple[str, BytesIO, tuple[int, int]]],
+    excerpts: list[tuple[str, list[str]]],
+    live_buffers: list[BytesIO],
+) -> None:
+    ws.column_dimensions["A"].width = 30
+    for col in "BCDEF":
+        ws.column_dimensions[col].width = 26
+
+    from openpyxl.drawing.image import Image as XLImage
+
+    row = 1
+    ws.cell(row, 1, f"Evidence exhibits — test step {test_step_id}").font = Font(bold=True, size=12)
+    row += 1
+    ws.cell(row, 1, "Tickmark letters match the 'Evidence cited' table on the test step sheet.").font = Font(
+        italic=True
+    )
+    row += 2
+
+    for caption, buf, (w, h) in images:
+        ws.cell(row, 1, caption).font = Font(bold=True)
+        row += 1
+        img = XLImage(buf)
+        img.width, img.height = w, h
+        ws.add_image(img, f"A{row}")
+        live_buffers.append(buf)
+        row += int(h / 19) + 3  # default row height ~19px at 96dpi
+
+    for caption, lines in excerpts:
+        ws.cell(row, 1, caption).font = Font(bold=True)
+        row += 1
+        for line in lines:
+            ws.cell(row, 1, line).alignment = Alignment(vertical="top")
+            row += 1
+        row += 1
 
 
 def _write_step_sheet(
@@ -338,41 +416,65 @@ def _write_step_sheet(
     result: dict,
     evidence_map: dict[str, EvidenceItem],
     support_dir: Path | None,
-    live_buffers: list[BytesIO],
-) -> None:
-    ws.column_dimensions["A"].width = 26
-    for col in "BCDE":
-        ws.column_dimensions[col].width = 40
+) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int]]], list[tuple[str, list[str]]]]:
+    """Writes one test step's sheet, ordered so a reviewer reads answers
+    first (conclusion, coverage, IPE, exceptions, open requests) before the
+    supporting detail. Returns the exhibit material for the caller to place
+    on a separate sheet -- inline images used to push the conclusion ~110
+    rows down the page.
+    """
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 100
+    for col in "CDEF":
+        ws.column_dimensions[col].width = 34
 
     row = 1
 
-    def put(label: str, value: str, *, bold: bool = False) -> None:
+    def section(title: str) -> None:
+        nonlocal row
+        for col in range(1, 7):
+            ws.cell(row, col).fill = _SECTION_FILL
+        c = ws.cell(row, 1, title)
+        c.font = _SECTION_FONT
+        row += 2
+
+    def put(label: str, value: str, *, bold: bool = False, color: str | None = None) -> None:
         nonlocal row
         ws.cell(row, 1, label).font = Font(bold=True)
         c = ws.cell(row, 2, value)
         c.alignment = Alignment(wrap_text=True, vertical="top")
-        if bold:
-            c.font = Font(bold=True)
+        if bold or color:
+            c.font = Font(bold=bold, color=color) if color else Font(bold=True)
         row += 1
 
-    def put_list(label: str, values: list[str]) -> None:
+    def put_block(text: str) -> None:
+        nonlocal row
+        c = ws.cell(row, 2, text)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        row += 2
+
+    def put_list(values: list[str], *, empty: str | None = None) -> None:
         nonlocal row
         if not values:
+            if empty:
+                ws.cell(row, 2, empty).font = Font(italic=True)
+                row += 2
             return
-        ws.cell(row, 1, label).font = Font(bold=True)
         for v in values:
-            c = ws.cell(row, 2, f"- {v}")
+            c = ws.cell(row, 2, f"• {v}")
             c.alignment = Alignment(wrap_text=True, vertical="top")
             row += 1
         row += 1
 
-    put("", _DRAFT_BANNER, bold=True)
+    ws.cell(row, 1, _DRAFT_BANNER).font = Font(bold=True, color="9C0006")
+    row += 2
     put("Test step", test_step_id)
     put("Test step text", test_step_text)
     row += 1
 
     if "error" in result:
-        put("Status", "INCOMPLETE -- run did not finish", bold=True)
+        section("RESULT — INCOMPLETE")
+        put("Status", "INCOMPLETE -- run did not finish", bold=True, color="9C0006")
         put("Error", str(result["error"]))
         if "reason" in result:
             put("Abort reason", str(result["reason"]))
@@ -380,23 +482,18 @@ def _write_step_sheet(
         audit_log = result.get("audit_log") or []
         if audit_log:
             put("Tool calls before abort", str(len(audit_log)))
+            row += 1
+            section("SEARCHES ATTEMPTED BEFORE ABORT")
             put_list(
-                "Searches attempted",
                 [
                     str(e.input.get("query", ""))
                     for e in audit_log
                     if e.tool_name == "search_cy_support" and e.input.get("query")
-                ],
+                ]
             )
-        return
+        return [], [], []
 
     conclusion: ConclusionOutput = result["conclusion"]
-    put("Conclusion", _CONCLUSION_LABELS.get(conclusion.conclusion, conclusion.conclusion), bold=True)
-    put("Confidence", f"{conclusion.confidence} -- {conclusion.confidence_rationale}")
-    row += 1
-    put("Documentation", conclusion.narrative)
-    row += 1
-    put_list("Procedures performed", conclusion.procedures_performed)
 
     letters: list[str] = []
     exhibit_images: list[tuple[str, BytesIO, tuple[int, int]]] = []
@@ -406,9 +503,45 @@ def _write_step_sheet(
             conclusion.evidence_citations, evidence_map, support_dir
         )
 
+    # ── Answers first ──────────────────────────────────────────────────
+    section("CONCLUSION")
+    put(
+        "Conclusion",
+        _CONCLUSION_LABELS.get(conclusion.conclusion, conclusion.conclusion),
+        bold=True,
+        color=_CONCLUSION_COLORS.get(conclusion.conclusion),
+    )
+    put("Confidence", conclusion.confidence)
+    put("Confidence rationale", conclusion.confidence_rationale)
+    if conclusion.sample_coverage:
+        sc = conclusion.sample_coverage
+        put(
+            "Sample coverage",
+            f"{sc.total_found} of {sc.total_required} ({sc.coverage_pct}%)"
+            + (f"; missing: {', '.join(sc.missing)}" if sc.missing else ""),
+        )
+    put("IPE status", conclusion.ipe_completeness_accuracy_status)
+    row += 1
+
+    section("EXCEPTIONS")
+    put_list(conclusion.exceptions, empty="None noted.")
+
+    section("ADDITIONAL SUPPORT REQUESTED")
+    put_list(conclusion.additional_support_requests, empty="None — testing is complete on the evidence provided.")
+
+    # ── Supporting detail ──────────────────────────────────────────────
+    section("DOCUMENTATION")
+    put_block(conclusion.narrative)
+
+    section("PROCEDURES PERFORMED")
+    put_list(conclusion.procedures_performed)
+
+    if conclusion.ipe_completeness_accuracy_evidence:
+        section("IPE COMPLETENESS & ACCURACY EVIDENCE")
+        put_list(conclusion.ipe_completeness_accuracy_evidence)
+
     if conclusion.evidence_citations:
-        ws.cell(row, 1, "Evidence cited").font = Font(bold=True)
-        row += 1
+        section("EVIDENCE CITED")
         headers = ["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"]
         for col, name in enumerate(headers, 1):
             cell = ws.cell(row, col, name)
@@ -426,46 +559,19 @@ def _write_step_sheet(
                     c.font = Font(bold=True, color="AA0000")
             row += 1
         row += 1
+        if exhibit_images or excerpts:
+            ws.cell(row, 1, f"Exhibits for these citations: see the '{_exhibit_sheet_title(test_step_id)}' sheet.").font = Font(
+                italic=True
+            )
+            row += 2
 
-    if exhibit_images or excerpts:
-        ws.cell(row, 1, "Evidence exhibits").font = Font(bold=True)
-        row += 1
-        from openpyxl.drawing.image import Image as XLImage
-
-        for caption, buf, (w, h) in exhibit_images:
-            ws.cell(row, 1, caption).font = Font(italic=True)
-            row += 1
-            img = XLImage(buf)
-            img.width, img.height = w, h
-            ws.add_image(img, f"A{row}")
-            live_buffers.append(buf)
-            # Advance past the image so following content doesn't overlap
-            # (default row height ~= 19px at 96dpi).
-            row += int(h / 19) + 3
-        for caption, lines in excerpts:
-            ws.cell(row, 1, caption).font = Font(italic=True)
-            row += 1
-            for line in lines:
-                ws.cell(row, 2, line).alignment = Alignment(wrap_text=False, vertical="top")
-                row += 1
-            row += 1
-
-    if conclusion.sample_coverage:
-        sc = conclusion.sample_coverage
-        put(
-            "Sample coverage",
-            f"{sc.total_found} of {sc.total_required} ({sc.coverage_pct}%)"
-            + (f"; missing: {', '.join(sc.missing)}" if sc.missing else ""),
-        )
-    put("IPE status", conclusion.ipe_completeness_accuracy_status)
-    put_list("IPE C&A evidence", conclusion.ipe_completeness_accuracy_evidence)
-    put_list("Exceptions", conclusion.exceptions)
-    put_list("Additional support requested", conclusion.additional_support_requests)
-
-    row += 1
+    section("PREPARED BY")
     md = conclusion.model_metadata
-    put("Prepared by", f"CY testing agent ({md.model}, prompt {md.prompt_version}) -- {md.timestamp}")
+    put("Prepared by", f"CY testing agent ({md.model}, prompt {md.prompt_version})")
+    put("Timestamp", md.timestamp)
     put("Tool calls", str(md.tool_call_count))
+
+    return letters, exhibit_images, excerpts
 
 
 # --------------------------------------------------------------------------

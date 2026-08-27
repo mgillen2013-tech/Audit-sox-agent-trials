@@ -225,6 +225,28 @@ Per file type:
 - **Native (text) PDFs:** `pdfplumber` or `PyMuPDF` for text + table
   extraction, keeping page number and bounding box per chunk so citations are
   precise and the review UI can render the exact region.
+
+**OCR (built — `agent/extraction/ocr.py`):** image-only pages used to stay
+permanently unreadable — they became `image_ocr` placeholders with
+`extracted_text=None`, and a real run concluded on an approval email alone
+because the invoice and payment PDFs were scans. Now each such page is
+transcribed by **Claude vision**, using the client the run already has.
+Vision rather than Tesseract on purpose: the user runs this on Windows,
+where Tesseract means a separate binary install and PATH setup, and the
+documents in this bucket (scanned invoices, E1 screenshots, remittances)
+are exactly the layout-heavy material Tesseract handles worst.
+
+This is the only place extraction talks to a model, and it stays honest
+about it: OCR'd text is prefixed `[OCR transcription of a scanned page]`
+and carries `extraction_confidence = 0.8`, not the 1.0 of a native read,
+so a reviewer can tell which citations rest on a transcription. The prompt
+forbids inferring or completing values and requires `[illegible]` for
+anything unreadable — on audit evidence an invented figure is worse than a
+missing one. Cost is bounded: one call per image-only page, once per run
+(not per turn), ~1-2K tokens each; pages that already have text are never
+re-read. Every failure path (render error, API error, empty response)
+leaves the original placeholder intact, so a failed OCR degrades to the
+old behavior rather than breaking a run. Toggleable in the app.
 - **Scanned PDFs / embedded screenshots / emails saved as PDF:** OCR
   (Tesseract or a hosted OCR API) per page/region. Keep the OCR confidence
   score on the `EvidenceItem` — this is what lets the agent legitimately say
@@ -565,6 +587,24 @@ Zero LLM calls: the file is rendered entirely from the structured
 ConclusionOutput the run already produced, so generation is deterministic
 and free. Every sheet/page carries a DRAFT banner ("AI-prepared, pending
 human reviewer approval") — same non-negotiable as the system prompt.
+
+**Sheet organization (built, after reviewing a real generated
+workpaper):** the first real output buried its own conclusions — two
+full-page exhibit renders sat inline in the test-step sheet, pushing
+sample coverage, IPE status, exceptions, and open support requests to
+around row 140, so a reviewer had to scroll past the pictures to reach
+the answers. Now: exhibits move to a dedicated `<step> - Exhibits` sheet
+(the step sheet cross-references it by name), and the step sheet is
+ordered **answers first** — CONCLUSION (verdict, confidence + rationale,
+sample coverage, IPE status), EXCEPTIONS, ADDITIONAL SUPPORT REQUESTED —
+then the supporting detail: DOCUMENTATION, PROCEDURES PERFORMED, IPE C&A
+EVIDENCE, EVIDENCE CITED, PREPARED BY. Sections carry banded headers, the
+verdict is color-coded (green/red/amber), and empty EXCEPTIONS /
+ADDITIONAL SUPPORT sections print "None noted." rather than rendering
+nothing — in a workpaper, "no exceptions" and "we didn't look" must not be
+indistinguishable. The Summary sheet gained IPE status, exception count,
+and open-request count columns so a multi-step control's state is legible
+without opening every sheet.
 
 **Evidence exhibits with tickmarks (built):** mirroring how a human
 workpaper points at evidence, each citation gets a red tickmark letter

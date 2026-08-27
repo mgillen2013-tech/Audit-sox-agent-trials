@@ -12,6 +12,7 @@ from pathlib import Path
 from agent.schemas import EvidenceItem
 
 from .excel import extract_excel
+from .ocr import ocr_image_items
 from .pdf import extract_pdf
 
 _HANDLERS = {
@@ -52,4 +53,4 @@ def extract_many(paths: list[str | Path]) -> list[EvidenceItem]:
     return renumbered
 
 
-__all__ = ["extract", "extract_many", "extract_excel", "extract_pdf"]
+__all__ = ["extract", "extract_many", "extract_excel", "extract_pdf", "ocr_image_items"]

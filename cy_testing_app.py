@@ -172,6 +172,17 @@ py_testing_file = st.file_uploader("PY testing workpaper", type=["pdf", "xlsx", 
 cy_support_files = st.file_uploader(
     "CY support evidence (one or more)", type=["pdf", "xlsx", "xls", "xlsm"], accept_multiple_files=True
 )
+ocr_scanned_pages = st.checkbox(
+    "Read scanned/image-only pages with vision OCR",
+    value=True,
+    help=(
+        "Scanned PDFs (a photographed invoice, an E1 screenshot saved to PDF) "
+        "carry no text at all -- without this they're flagged as unreadable and "
+        "the conclusion rests on whatever else was provided. This transcribes "
+        "them once per run, before testing starts. Costs roughly 1-2K tokens "
+        "per scanned page; pages that already have text are never re-read."
+    ),
+)
 
 
 def _render_conclusion(conclusion: ConclusionOutput) -> None:
@@ -307,6 +318,12 @@ if run_clicked:
             # visibility (and no cost signal) while the money is being spent.
             progress = st.empty()
 
+            def _show_ocr(source_file: str, page_num: int, ok: bool) -> None:
+                progress.info(
+                    f"{'Transcribed' if ok else 'Could not transcribe'} scanned page — "
+                    f"{source_file} p.{page_num}"
+                )
+
             def _show_progress(step_id: str, turn: int, tokens: int, log: list) -> None:
                 progress.info(
                     f"Running **{step_id}** — turn {turn}/{MAX_TOOL_ITERATIONS}, ~{tokens:,} cost-weighted "
@@ -322,6 +339,8 @@ if run_clicked:
                 sample_manifests=sample_manifests,
                 max_total_tokens=int(max_total_tokens),
                 on_turn=_show_progress,
+                ocr_scanned_pages=ocr_scanned_pages,
+                on_ocr=_show_ocr,
             ):
                 progress.empty()
                 _render_result(test_step_id, result)
