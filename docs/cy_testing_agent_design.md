@@ -432,8 +432,8 @@ Two separate problems, both now fixed:
    discarding it on failure wasted both the money and the information.
    `IncompleteRunError` (subclass of `RuntimeError`, so old bare `except
    Exception` callers still catch it) carries `audit_log` (every tool call
-   made before the abort), `reason` (`"token_budget_exceeded"` or
-   `"max_iterations"`), `tokens_used`, and `turns_used`.
+   made before the abort), `reason` (`"token_budget_exceeded"`,
+   `"max_iterations"`, or `"model_refusal"`), `tokens_used`, and `turns_used`.
    `iter_control_results` special-cases it and includes all four on the
    yielded error dict instead of just `{"error": str}`; the CLI
    (`run_control.main`) writes them to the step's output JSON, and the

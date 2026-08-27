@@ -336,15 +336,18 @@ class IncompleteRunError(RuntimeError):
 def _usage_tokens(usage: Any) -> int:
     """Sums every token field a Messages API usage object can carry. Missing
     fields (a minimal test double, or an SDK version without cache fields)
-    default to 0 rather than raising.
+    default to 0 rather than raising. The ``or 0`` matters: on the real SDK
+    the cache fields are Optional[int] -- the attribute EXISTS but is None
+    when unpopulated, so getattr's default alone never applies and a bare
+    sum would raise TypeError on the first real turn.
     """
     if usage is None:
         return 0
     return (
-        getattr(usage, "input_tokens", 0)
-        + getattr(usage, "output_tokens", 0)
-        + getattr(usage, "cache_creation_input_tokens", 0)
-        + getattr(usage, "cache_read_input_tokens", 0)
+        (getattr(usage, "input_tokens", 0) or 0)
+        + (getattr(usage, "output_tokens", 0) or 0)
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
     )
 
 
@@ -485,10 +488,19 @@ def run_test_step(
             messages=messages,
         )
 
-        if getattr(response, "stop_reason", None) == "refusal":
-            raise RuntimeError(f"model declined the request: {getattr(response, 'stop_details', None)}")
-
         tokens_used += _usage_tokens(getattr(response, "usage", None))
+
+        if getattr(response, "stop_reason", None) == "refusal":
+            # Same preserve-paid-work rule as the budget/iteration aborts: a
+            # refusal on turn 8 still had 7 turns of real, billed tool calls
+            # behind it -- carry them out instead of discarding them.
+            raise IncompleteRunError(
+                f"model declined the request: {getattr(response, 'stop_details', None)}",
+                reason="model_refusal",
+                audit_log=audit_log,
+                tokens_used=tokens_used,
+                turns_used=turn,
+            )
 
         messages.append({"role": "assistant", "content": response.content})
         tool_use_blocks = [b for b in response.content if getattr(b, "type", None) == "tool_use"]

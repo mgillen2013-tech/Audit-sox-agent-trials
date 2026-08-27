@@ -78,8 +78,8 @@ def iter_control_results(
     max-iterations circuit breaker (agent.loop.IncompleteRunError) still
     yields everything already paid for: the error dict also carries
     "audit_log" (every tool call made before the abort), "reason"
-    ("token_budget_exceeded" or "max_iterations"), "tokens_used", and
-    "turns_used". A run that already spent real money on API calls before
+    ("token_budget_exceeded", "max_iterations", or "model_refusal"),
+    "tokens_used", and "turns_used". A run that already spent real money before
     failing should never come back as a bare error string with nothing to
     show for it -- see the design doc's note on this circuit breaker.
 

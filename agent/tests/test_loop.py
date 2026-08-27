@@ -403,6 +403,62 @@ def test_max_iterations_exhausted_raises(evidence_items, sample_manifest, reques
     assert len(err.audit_log) == 0  # no tool calls were ever made, just nudges -- audit_log is legitimately empty here
 
 
+def test_none_cache_usage_fields_do_not_crash_token_tracking(
+    evidence_items, sample_manifest, request_
+):
+    # On the real SDK, usage.cache_creation_input_tokens /
+    # cache_read_input_tokens are Optional[int]: the attribute EXISTS but is
+    # None when unpopulated, so getattr(usage, ..., 0) returns None and a
+    # bare sum raises TypeError on the very first real turn -- crashing the
+    # run through the generic error path with the audit log lost, which is
+    # the exact failure class the circuit breaker exists to prevent.
+    none_usage = fake_usage(input_tokens=100, output_tokens=50)
+    none_usage.cache_creation_input_tokens = None
+    none_usage.cache_read_input_tokens = None
+
+    client = FakeClient(
+        responses=[
+            response(
+                [tool_use("t1", "submit_conclusion", {
+                    "test_step_id": "TS-4.2",
+                    "control_objective_ref": "CO-4",
+                    "conclusion": "insufficient_evidence",
+                    "narrative": "No evidence was found.",
+                    "evidence_citations": [],
+                    "procedures_performed": ["Searched CY support."],
+                    "ipe_completeness_accuracy_status": "not_applicable",
+                    "ipe_completeness_accuracy_evidence": [],
+                    "exceptions": [],
+                    "additional_support_requests": [],
+                    "confidence": "low",
+                    "confidence_rationale": "Nothing relevant was found.",
+                })],
+                usage=none_usage,
+            )
+        ]
+    )
+    conclusion, _ = run_test_step(request_, evidence_items, sample_manifest, client)
+    assert conclusion.conclusion == "insufficient_evidence"
+
+
+def test_refusal_preserves_audit_log(evidence_items, sample_manifest, request_):
+    # A refusal after real tool calls must carry them out, same as the
+    # budget/iteration aborts -- not discard them via a bare RuntimeError.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([text("declining")], stop_reason="refusal"),
+        ]
+    )
+    with pytest.raises(IncompleteRunError, match="declined") as exc_info:
+        run_test_step(request_, evidence_items, sample_manifest, client)
+
+    err = exc_info.value
+    assert err.reason == "model_refusal"
+    assert len(err.audit_log) == 1
+    assert err.audit_log[0].tool_name == "search_cy_support"
+
+
 def test_on_turn_callback_fires_every_turn(evidence_items, sample_manifest, request_):
     # This is what the Streamlit app hooks to show live progress -- it must
     # fire during the run, not just be inferable after the fact from the
