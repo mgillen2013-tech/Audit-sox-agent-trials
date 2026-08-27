@@ -4,3 +4,4 @@ pdfplumber
 rank_bm25
 anthropic
 streamlit
+reportlab

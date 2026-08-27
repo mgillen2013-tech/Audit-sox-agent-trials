@@ -464,3 +464,27 @@ Still a gap, not yet built: real-time *dollar* cost (token counts are a
 proxy — cache reads are billed far cheaper than fresh input tokens, so
 `tokens_used` overstates actual spend on a well-cached run) and a pre-flight
 cost estimate before a run starts.
+
+## 9. Workpaper file output
+
+**Built:** `agent/workpaper.py`, wired into both the Streamlit app (download
+button that survives script reruns via `st.session_state`) and the CLI
+(written next to the per-step JSONs).
+
+One generated workpaper file per control, in the **same file type as the
+uploaded PY workpaper** (PY was a PDF → PDF via reportlab; PY was Excel →
+.xlsx via openpyxl). It's a clean generated document with standard workpaper
+sections — control header, then per test step: conclusion + confidence,
+documentation narrative, procedures performed, evidence citation table,
+sample coverage, IPE status, exceptions, additional support requested, and
+prepared-by metadata (model, prompt version, timestamp, tool calls) — NOT a
+cell-level edit of the PY file. That was an explicit user choice:
+predictable layout over a fragile in-place edit of an arbitrary workbook.
+Failed/incomplete steps appear in the workpaper marked INCOMPLETE with the
+abort reason and the searches attempted, so the file never looks finished
+while a step is missing.
+
+Zero LLM calls: the file is rendered entirely from the structured
+ConclusionOutput the run already produced, so generation is deterministic
+and free. Every sheet/page carries a DRAFT banner ("AI-prepared, pending
+human reviewer approval") — same non-negotiable as the system prompt.

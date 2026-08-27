@@ -222,6 +222,14 @@ def main() -> None:
             )
         )
 
+    try:
+        from agent.workpaper import build_workpaper
+
+        wp_path = build_workpaper(spec, results, spec["py_testing_file"], output_dir)
+        print(f"Wrote CY workpaper (DRAFT): {wp_path}")
+    except Exception as exc:  # noqa: BLE001 -- the JSON results above are already written; don't lose them over the file build
+        print(f"WARNING: workpaper file generation failed: {exc}")
+
     print(f"\nWrote results to {output_dir}")
 
 

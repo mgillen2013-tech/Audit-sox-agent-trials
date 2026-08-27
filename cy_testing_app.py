@@ -38,6 +38,7 @@ from agent.intake import build_manifest_from_any_columns, read_excel_rows
 from agent.loop import DEFAULT_MODEL, MAX_TOOL_ITERATIONS, MAX_TOTAL_TOKENS
 from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
+from agent.workpaper import build_workpaper
 
 SELECTION_METHODS = ["random", "haphazard", "judgmental", "all_items"]
 
@@ -169,9 +170,37 @@ def _render_conclusion(conclusion: ConclusionOutput) -> None:
         st.json(conclusion.model_dump())
 
 
+def _render_result(test_step_id: str, result: dict) -> None:
+    """One test step's outcome -- success or preserved failure. Used both
+    for live rendering during a run and for re-rendering from
+    st.session_state afterward: Streamlit reruns this whole script on ANY
+    widget click (including the workpaper download button), and anything
+    rendered only inside the run-click block vanishes on that rerun.
+    """
+    st.subheader(test_step_id)
+    if "error" in result:
+        st.error(f"Failed: {result['error']}")
+        if "audit_log" in result:
+            # A token-budget or max-iterations abort still made real,
+            # billed API calls -- show what they actually found instead of
+            # a dead end with nothing to show for the spend.
+            st.caption(
+                f"Stopped after {result['turns_used']} turn(s), "
+                f"~{result['tokens_used']:,} tokens used, "
+                f"{len(result['audit_log'])} tool call(s) made before the abort."
+            )
+            with st.expander("Tool calls made before failure"):
+                for entry in result["audit_log"]:
+                    st.markdown(f"**Turn {entry.turn} — `{entry.tool_name}`**" + (" ⚠️ error" if entry.is_error else ""))
+                    st.json({"input": entry.input, "output": entry.output})
+    else:
+        _render_conclusion(result["conclusion"])
+
+
 # ── Run ───────────────────────────────────────────────────────────────────
 st.header("4. Run")
-if st.button("Run test steps", type="primary"):
+run_clicked = st.button("Run test steps", type="primary")
+if run_clicked:
     errors = []
     if not control_id or not control_objective_ref or not control_objective_text:
         errors.append("Fill in all of the control details.")
@@ -251,25 +280,44 @@ if st.button("Run test steps", type="primary"):
                 on_turn=_show_progress,
             ):
                 progress.empty()
-                st.subheader(test_step_id)
-                if "error" in result:
-                    st.error(f"Failed: {result['error']}")
-                    if "audit_log" in result:
-                        # A token-budget or max-iterations abort still made
-                        # real, billed API calls -- show what they actually
-                        # found instead of a dead end with nothing to show
-                        # for the spend.
-                        st.caption(
-                            f"Stopped after {result['turns_used']} turn(s), "
-                            f"~{result['tokens_used']:,} tokens used, "
-                            f"{len(result['audit_log'])} tool call(s) made before the abort."
-                        )
-                        with st.expander("Tool calls made before failure"):
-                            for entry in result["audit_log"]:
-                                st.markdown(f"**Turn {entry.turn} — `{entry.tool_name}`**" + (" ⚠️ error" if entry.is_error else ""))
-                                st.json({"input": entry.input, "output": entry.output})
-                else:
-                    _render_conclusion(result["conclusion"])
+                _render_result(test_step_id, result)
                 all_results[test_step_id] = result
 
+            # Generate the CY workpaper file (same file type as the PY
+            # upload) while the temp dir still exists, and keep only the
+            # BYTES -- the temp dir is gone the moment this with-block
+            # closes, and the download button needs to survive reruns.
+            wp_bytes = wp_name = None
+            try:
+                wp_path = build_workpaper(spec, all_results, py_testing_file.name, tmp_dir)
+                wp_bytes, wp_name = wp_path.read_bytes(), wp_path.name
+            except Exception as exc:  # noqa: BLE001 -- the run's results must still show even if the file build breaks
+                st.warning(f"Couldn't generate the workpaper file: {exc}")
+
+        st.session_state["run_output"] = {"results": all_results, "wp_bytes": wp_bytes, "wp_name": wp_name}
         st.success("Done.")
+
+# Rendered OUTSIDE the run-click block so results and the download button
+# survive Streamlit's script reruns (every widget click is a rerun -- without
+# this, clicking Download would blank the whole results view).
+_out = st.session_state.get("run_output")
+if _out:
+    if not run_clicked:  # freshly-run results were already rendered live above
+        st.header("Results (last run)")
+        for _tsid, _result in _out["results"].items():
+            _render_result(_tsid, _result)
+    if _out["wp_bytes"]:
+        st.download_button(
+            "⬇️ Download CY workpaper (DRAFT)",
+            data=_out["wp_bytes"],
+            file_name=_out["wp_name"],
+            mime=(
+                "application/pdf"
+                if _out["wp_name"].endswith(".pdf")
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        )
+        st.caption(
+            "Same file type as the PY workpaper you uploaded. Stamped DRAFT -- "
+            "review and approve before it goes anywhere."
+        )
