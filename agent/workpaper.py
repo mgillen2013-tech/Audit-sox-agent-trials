@@ -20,13 +20,14 @@ prompt).
 from __future__ import annotations
 
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from agent.schemas import ConclusionOutput
+from agent.schemas import ConclusionOutput, EvidenceCitation, EvidenceItem
 
 _DRAFT_BANNER = "DRAFT -- AI-prepared, pending human reviewer approval. Not a finalized workpaper."
 
@@ -35,6 +36,166 @@ _CONCLUSION_LABELS = {
     "not_satisfied": "Not satisfied",
     "insufficient_evidence": "Insufficient evidence",
 }
+
+
+# ── Evidence exhibits (tickmark annotation) ────────────────────────────────
+# Mirrors how a human workpaper points at evidence: the citation table gets a
+# tickmark letter per citation (A, B, C...), and the cited source is embedded
+# as an exhibit -- a rendered PDF page with red boxes drawn where the quoted
+# text was found (tight boxes via text search; falls back to the extracted
+# region's bbox; a scanned/screenshot page with no text layer becomes a
+# full-page exhibit labeled with its letter). Excel-sourced citations get a
+# text excerpt of the cited range instead of an image. All deterministic --
+# zero LLM calls -- and every step degrades gracefully: if an exhibit can't
+# be rendered, the citation row still stands, just without a picture.
+
+_PDF_RENDER_DPI = 110
+_MAX_EXHIBIT_WIDTH_PX = 640
+_MAX_EXCERPT_ROWS = 12
+
+_BBOX_RE = re.compile(r"p\.(\d+) \(bbox ([\d.\-]+),([\d.\-]+),([\d.\-]+),([\d.\-]+)\)")
+
+
+def _tickmark_letters(n: int) -> list[str]:
+    return [chr(65 + i) if i < 26 else str(i + 1) for i in range(n)]
+
+
+def _clean_quote_for_search(quote: str) -> str | None:
+    # The model's quote_or_summary may be a paraphrase or stitch pieces with
+    # ellipses -- search for the longest literal-looking fragment.
+    pieces = re.split(r"\.\.\.|…|\n", quote)
+    best = max((re.sub(r"\s+", " ", p).strip() for p in pieces), key=len, default="")
+    if len(best) < 12:
+        return None
+    return best[:60]
+
+
+def _search_rects(page, quote: str) -> list[tuple[float, float, float, float]]:
+    chunk = _clean_quote_for_search(quote)
+    if not chunk:
+        return []
+    try:
+        matches = page.search(chunk, regex=False, case=False)
+    except Exception:  # noqa: BLE001 -- search is best-effort tightening only
+        return []
+    return [(m["x0"], m["top"], m["x1"], m["bottom"]) for m in matches[:3]]
+
+
+def _item_rect(page, item: EvidenceItem) -> list[tuple[float, float, float, float]]:
+    m = _BBOX_RE.search(item.location)
+    if not m:
+        return []
+    x0, top, x1, bottom = (float(v) for v in m.groups()[1:])
+    # A bbox covering (almost) the whole page isn't a pointer, it's the page
+    # -- drawing a box around everything marks nothing.
+    if (x1 - x0) * (bottom - top) >= 0.9 * page.width * page.height:
+        return []
+    return [(x0, top, x1, bottom)]
+
+
+def _draw_letter(draw, pos: tuple[float, float], letter: str) -> None:
+    from PIL import ImageFont
+
+    try:
+        font = ImageFont.load_default(size=20)
+    except TypeError:  # older Pillow: no size kwarg
+        font = ImageFont.load_default()
+    x, y = pos
+    draw.rectangle([x, y, x + 24, y + 24], fill="red")
+    draw.text((x + 6, y + 2), letter, fill="white", font=font)
+
+
+def _render_pdf_exhibit(
+    pdf_path: Path, page_num: int, marks: list[tuple[str, EvidenceItem, str]]
+) -> tuple[BytesIO, tuple[int, int]]:
+    """marks: (tickmark letter, evidence item, quote to locate). Returns the
+    annotated page as PNG bytes plus its pixel size.
+    """
+    import pdfplumber
+    from PIL import ImageDraw
+
+    with pdfplumber.open(pdf_path) as pdf:
+        page = pdf.pages[page_num - 1]
+        pim = page.to_image(resolution=_PDF_RENDER_DPI)
+
+        letter_positions: list[tuple[str, tuple[float, float] | None]] = []
+        for letter, item, quote in marks:
+            rects = _search_rects(page, quote) or _item_rect(page, item)
+            for r in rects:
+                pim.draw_rect(r, fill=None, stroke="red", stroke_width=3)
+            letter_positions.append((letter, (rects[0][0], rects[0][1]) if rects else None))
+
+        pil = pim.annotated.convert("RGB")
+        draw = ImageDraw.Draw(pil)
+        scale = _PDF_RENDER_DPI / 72.0
+        unanchored = 0
+        for letter, pos in letter_positions:
+            if pos is not None:
+                px = (max(pos[0] * scale - 28, 0), max(pos[1] * scale - 4, 0))
+            else:
+                # No locatable region (e.g. a screenshot page with no text
+                # layer): the whole page is the exhibit -- stack the letters
+                # in the top-left corner.
+                px = (6 + unanchored * 30, 6)
+                unanchored += 1
+            _draw_letter(draw, px, letter)
+
+    if pil.width > _MAX_EXHIBIT_WIDTH_PX:
+        ratio = _MAX_EXHIBIT_WIDTH_PX / pil.width
+        pil = pil.resize((_MAX_EXHIBIT_WIDTH_PX, int(pil.height * ratio)))
+    buf = BytesIO()
+    pil.save(buf, "PNG")
+    buf.seek(0)
+    return buf, (pil.width, pil.height)
+
+
+def _excerpt_lines(item: EvidenceItem) -> list[str]:
+    if item.extracted_table:
+        rows = item.extracted_table[:_MAX_EXCERPT_ROWS]
+        lines = [" | ".join(row) for row in rows]
+        if len(item.extracted_table) > _MAX_EXCERPT_ROWS:
+            lines.append(f"... ({len(item.extracted_table) - _MAX_EXCERPT_ROWS} more row(s) in the source)")
+        return lines
+    if item.extracted_text:
+        return item.extracted_text.splitlines()[:_MAX_EXCERPT_ROWS]
+    return []
+
+
+def _build_step_exhibits(
+    citations: list[EvidenceCitation],
+    evidence_map: dict[str, EvidenceItem],
+    support_dir: Path,
+) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int]]], list[tuple[str, list[str]]]]:
+    """Returns (tickmark letter per citation, PDF exhibit images as
+    (caption, png bytes, (w,h)), Excel/text excerpts as (caption, lines)).
+    """
+    letters = _tickmark_letters(len(citations))
+
+    pdf_groups: dict[tuple[str, int], list[tuple[str, EvidenceItem, str]]] = {}
+    excerpts: list[tuple[str, list[str]]] = []
+    for letter, cit in zip(letters, citations):
+        item = evidence_map.get(cit.evidence_id)
+        if item is None:
+            continue
+        m = _BBOX_RE.search(item.location)
+        if item.source_type in ("pdf_text", "pdf_table", "image_ocr") and m:
+            key = (item.source_file, int(m.group(1)))
+            pdf_groups.setdefault(key, []).append((letter, item, cit.quote_or_summary))
+        else:
+            lines = _excerpt_lines(item)
+            if lines:
+                excerpts.append((f"Exhibit {letter} — {item.location}", lines))
+
+    images: list[tuple[str, BytesIO, tuple[int, int]]] = []
+    for (source_file, page_num), marks in pdf_groups.items():
+        try:
+            buf, size = _render_pdf_exhibit(support_dir / source_file, page_num, marks)
+        except Exception:  # noqa: BLE001 -- an unrenderable page must not sink the workpaper
+            continue
+        mark_list = ", ".join(letter for letter, _, _ in marks)
+        images.append((f"Exhibit ({mark_list}) — {source_file} p.{page_num}", buf, size))
+
+    return letters, images, excerpts
 
 
 def workpaper_path_for(py_testing_filename: str, control_id: str, out_dir: Path) -> Path:
@@ -49,6 +210,7 @@ def build_workpaper(
     results: dict[str, dict],
     py_testing_filename: str,
     out_dir: Path,
+    support_dir: Path | None = None,
 ) -> Path:
     """Writes the control's CY workpaper and returns the written path.
 
@@ -59,13 +221,31 @@ def build_workpaper(
     in the workpaper as incomplete rather than silently omitted: a reviewer
     needs to see that a step has no conclusion yet, not a file that looks
     finished with a step missing.
+
+    support_dir: the directory still holding spec["cy_support_files"] (the
+    run's staging dir). When given, citations get tickmark letters and the
+    cited sources are embedded as annotated exhibits. Extraction is
+    deterministic, so re-extracting here reproduces the exact evidence_ids
+    the run used -- same files, same order, same ids. When omitted (or if
+    re-extraction fails) the workpaper is text-only, never broken.
     """
     out_path = workpaper_path_for(py_testing_filename, spec["control_id"], out_dir)
     step_texts = {s["test_step_id"]: s.get("test_step_text", "") for s in spec.get("test_steps", [])}
+
+    evidence_map: dict[str, EvidenceItem] = {}
+    if support_dir is not None:
+        try:
+            from agent.extraction import extract_many
+
+            items = extract_many([support_dir / f for f in spec.get("cy_support_files", [])])
+            evidence_map = {item.evidence_id: item for item in items}
+        except Exception:  # noqa: BLE001 -- exhibits are an enhancement, not a precondition
+            evidence_map = {}
+
     if out_path.suffix == ".pdf":
-        _build_pdf(spec, results, step_texts, out_path)
+        _build_pdf(spec, results, step_texts, out_path, evidence_map, support_dir)
     else:
-        _build_xlsx(spec, results, step_texts, out_path)
+        _build_xlsx(spec, results, step_texts, out_path, evidence_map, support_dir)
     return out_path
 
 
@@ -82,9 +262,17 @@ def _sheet_title(test_step_id: str) -> str:
 
 
 def _build_xlsx(
-    spec: dict[str, Any], results: dict[str, dict], step_texts: dict[str, str], out_path: Path
+    spec: dict[str, Any],
+    results: dict[str, dict],
+    step_texts: dict[str, str],
+    out_path: Path,
+    evidence_map: dict[str, EvidenceItem],
+    support_dir: Path | None,
 ) -> None:
     wb = openpyxl.Workbook()
+    # Exhibit PNG buffers must stay alive until wb.save() -- openpyxl reads
+    # image data at save time, not at add_image time.
+    _live_buffers: list[BytesIO] = []
 
     ws = wb.active
     ws.title = "Summary"
@@ -135,12 +323,23 @@ def _build_xlsx(
 
     for test_step_id, result in results.items():
         step_ws = wb.create_sheet(_sheet_title(test_step_id))
-        _write_step_sheet(step_ws, test_step_id, step_texts.get(test_step_id, ""), result)
+        _write_step_sheet(
+            step_ws, test_step_id, step_texts.get(test_step_id, ""), result,
+            evidence_map, support_dir, _live_buffers,
+        )
 
     wb.save(out_path)
 
 
-def _write_step_sheet(ws, test_step_id: str, test_step_text: str, result: dict) -> None:
+def _write_step_sheet(
+    ws,
+    test_step_id: str,
+    test_step_text: str,
+    result: dict,
+    evidence_map: dict[str, EvidenceItem],
+    support_dir: Path | None,
+    live_buffers: list[BytesIO],
+) -> None:
     ws.column_dimensions["A"].width = 26
     for col in "BCDE":
         ws.column_dimensions[col].width = 40
@@ -199,21 +398,57 @@ def _write_step_sheet(ws, test_step_id: str, test_step_text: str, result: dict) 
     row += 1
     put_list("Procedures performed", conclusion.procedures_performed)
 
+    letters: list[str] = []
+    exhibit_images: list[tuple[str, BytesIO, tuple[int, int]]] = []
+    excerpts: list[tuple[str, list[str]]] = []
+    if conclusion.evidence_citations and evidence_map and support_dir is not None:
+        letters, exhibit_images, excerpts = _build_step_exhibits(
+            conclusion.evidence_citations, evidence_map, support_dir
+        )
+
     if conclusion.evidence_citations:
         ws.cell(row, 1, "Evidence cited").font = Font(bold=True)
         row += 1
-        for col, name in enumerate(["Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"], 1):
+        headers = ["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"]
+        for col, name in enumerate(headers, 1):
             cell = ws.cell(row, col, name)
             cell.font = Font(bold=True)
             cell.fill = _HEADER_FILL
         row += 1
-        for cit in conclusion.evidence_citations:
+        for i, cit in enumerate(conclusion.evidence_citations):
+            letter = letters[i] if i < len(letters) else ""
             for col, value in enumerate(
-                [cit.evidence_id, cit.source_file, cit.location, cit.quote_or_summary, cit.relevance], 1
+                [letter, cit.evidence_id, cit.source_file, cit.location, cit.quote_or_summary, cit.relevance], 1
             ):
-                ws.cell(row, col, value).alignment = Alignment(wrap_text=True, vertical="top")
+                c = ws.cell(row, col, value)
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+                if col == 1:
+                    c.font = Font(bold=True, color="AA0000")
             row += 1
         row += 1
+
+    if exhibit_images or excerpts:
+        ws.cell(row, 1, "Evidence exhibits").font = Font(bold=True)
+        row += 1
+        from openpyxl.drawing.image import Image as XLImage
+
+        for caption, buf, (w, h) in exhibit_images:
+            ws.cell(row, 1, caption).font = Font(italic=True)
+            row += 1
+            img = XLImage(buf)
+            img.width, img.height = w, h
+            ws.add_image(img, f"A{row}")
+            live_buffers.append(buf)
+            # Advance past the image so following content doesn't overlap
+            # (default row height ~= 19px at 96dpi).
+            row += int(h / 19) + 3
+        for caption, lines in excerpts:
+            ws.cell(row, 1, caption).font = Font(italic=True)
+            row += 1
+            for line in lines:
+                ws.cell(row, 2, line).alignment = Alignment(wrap_text=False, vertical="top")
+                row += 1
+            row += 1
 
     if conclusion.sample_coverage:
         sc = conclusion.sample_coverage
@@ -239,7 +474,12 @@ def _write_step_sheet(ws, test_step_id: str, test_step_text: str, result: dict) 
 
 
 def _build_pdf(
-    spec: dict[str, Any], results: dict[str, dict], step_texts: dict[str, str], out_path: Path
+    spec: dict[str, Any],
+    results: dict[str, dict],
+    step_texts: dict[str, str],
+    out_path: Path,
+    evidence_map: dict[str, EvidenceItem],
+    support_dir: Path | None,
 ) -> None:
     # Imported here, not module-level: reportlab is only needed when PY was a
     # PDF, and keeping the import local means an Excel-only user without it
@@ -304,17 +544,26 @@ def _build_pdf(
         story.append(Spacer(1, 6))
         bullet_list("Procedures performed", conclusion.procedures_performed)
 
+        letters: list[str] = []
+        exhibit_images: list[tuple[str, BytesIO, tuple[int, int]]] = []
+        excerpts: list[tuple[str, list[str]]] = []
+        if conclusion.evidence_citations and evidence_map and support_dir is not None:
+            letters, exhibit_images, excerpts = _build_step_exhibits(
+                conclusion.evidence_citations, evidence_map, support_dir
+            )
+
         if conclusion.evidence_citations:
-            rows = [["Evidence ID", "Source file", "Location", "Quote / summary"]] + [
+            rows = [["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary"]] + [
                 [
+                    Paragraph(f"<b><font color='red'>{letters[i] if i < len(letters) else ''}</font></b>", body),
                     Paragraph(cit.evidence_id, body),
                     Paragraph(cit.source_file, body),
                     Paragraph(cit.location, body),
                     Paragraph(cit.quote_or_summary, body),
                 ]
-                for cit in conclusion.evidence_citations
+                for i, cit in enumerate(conclusion.evidence_citations)
             ]
-            table = Table(rows, colWidths=[0.8 * inch, 1.5 * inch, 1.7 * inch, 3.0 * inch])
+            table = Table(rows, colWidths=[0.7 * inch, 0.8 * inch, 1.4 * inch, 1.6 * inch, 2.5 * inch])
             table.setStyle(
                 TableStyle(
                     [
@@ -326,6 +575,21 @@ def _build_pdf(
             )
             story.append(table)
             story.append(Spacer(1, 6))
+
+        if exhibit_images or excerpts:
+            from reportlab.platypus import Image as RLImage
+
+            story.append(Paragraph("<b>Evidence exhibits:</b>", body))
+            for caption, buf, (w, h) in exhibit_images:
+                story.append(Paragraph(f"<i>{caption}</i>", body))
+                display_w = min(6.5 * inch, w)
+                story.append(RLImage(buf, width=display_w, height=h * (display_w / w)))
+                story.append(Spacer(1, 8))
+            for caption, lines in excerpts:
+                story.append(Paragraph(f"<i>{caption}</i>", body))
+                for line in lines:
+                    story.append(Paragraph(line, body))
+                story.append(Spacer(1, 8))
 
         if conclusion.sample_coverage:
             sc = conclusion.sample_coverage

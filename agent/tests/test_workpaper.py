@@ -115,6 +115,98 @@ def test_xlsx_workpaper_contents(spec: dict, results: dict, tmp_path: Path):
     assert "november accrual reconciliation" in failed  # searches attempted before the abort are documented
 
 
+def _make_support_pdf(path: Path) -> None:
+    from reportlab.lib.pagesizes import letter as letter_size
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(str(path), pagesize=letter_size)
+    c.drawString(72, 700, "Approved / Vendor Number 21022452 / Cost Center 0510")
+    c.drawString(72, 680, "Payment Amount 11,678.47 dated 12/04/2025")
+    c.showPage()
+    c.save()
+
+
+@pytest.fixture
+def annotated_setup(spec: dict, results: dict, tmp_path: Path) -> tuple[dict, dict, Path]:
+    # A real support file on disk whose deterministic re-extraction yields
+    # ev_0001 for the page text -- the id the citation below points at.
+    support = tmp_path / "support"
+    support.mkdir()
+    _make_support_pdf(support / "approval.pdf")
+    spec = {**spec, "cy_support_files": ["approval.pdf"]}
+
+    conclusion: ConclusionOutput = results["TS-4.2"]["conclusion"]
+    annotated = conclusion.model_copy(
+        update={
+            "evidence_citations": [
+                EvidenceCitation(
+                    evidence_id="ev_0001",
+                    source_file="approval.pdf",
+                    location="approval.pdf p.1",
+                    quote_or_summary="Approved / Vendor Number 21022452 / Cost Center 0510",
+                    relevance="Approval evidence for the sampled payment",
+                )
+            ]
+        }
+    )
+    results = {"TS-4.2": {"conclusion": annotated, "audit_log": []}}
+    return spec, results, support
+
+
+def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path):
+    spec, results, support = annotated_setup
+    path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path, support_dir=support)
+
+    wb = openpyxl.load_workbook(path)
+    ws = wb["TS-4.2"]
+    text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
+    assert "Tickmark" in text
+    assert "Evidence exhibits" in text
+    assert "approval.pdf p.1" in text
+    # The annotated page render is actually embedded as an image, not just
+    # described in text.
+    assert len(ws._images) == 1
+
+
+def test_pdf_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path):
+    spec, results, support = annotated_setup
+    path = build_workpaper(spec, results, "PY_Testing_C14.pdf", tmp_path, support_dir=support)
+
+    with pdfplumber.open(path) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        image_count = sum(len(page.images) for page in pdf.pages)
+    assert "Evidence exhibits" in text
+    assert image_count >= 1
+
+
+def test_workpaper_without_support_dir_is_text_only(annotated_setup, tmp_path: Path):
+    # No support_dir (or a failed re-extraction) must degrade to the plain
+    # citation table, never break the build.
+    spec, results, _ = annotated_setup
+    path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
+    wb = openpyxl.load_workbook(path)
+    assert len(wb["TS-4.2"]._images) == 0
+
+
+def test_excel_cited_evidence_gets_text_excerpt(spec: dict, results: dict, tmp_path: Path):
+    # Excel-sourced citations can't be screenshotted -- the cited range's
+    # extracted rows are excerpted into the workpaper instead.
+    support = tmp_path / "support"
+    support.mkdir()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Item", "Amount"])
+    ws.append(["October accrual", "482110"])
+    wb.save(support / "Recon_Oct2026.xlsx")
+    spec = {**spec, "cy_support_files": ["Recon_Oct2026.xlsx"]}
+
+    path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path, support_dir=support)
+    out = openpyxl.load_workbook(path)
+    text = " ".join(str(c.value) for r in out["TS-4.2"].iter_rows() for c in r if c.value is not None)
+    assert "Exhibit A" in text
+    assert "October accrual | 482110" in text
+
+
 def test_pdf_workpaper_contents(spec: dict, results: dict, tmp_path: Path):
     path = build_workpaper(spec, results, "PY_Testing_C14.pdf", tmp_path)
 

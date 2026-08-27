@@ -289,7 +289,7 @@ if run_clicked:
             # closes, and the download button needs to survive reruns.
             wp_bytes = wp_name = None
             try:
-                wp_path = build_workpaper(spec, all_results, py_testing_file.name, tmp_dir)
+                wp_path = build_workpaper(spec, all_results, py_testing_file.name, tmp_dir, support_dir=tmp_dir)
                 wp_bytes, wp_name = wp_path.read_bytes(), wp_path.name
             except Exception as exc:  # noqa: BLE001 -- the run's results must still show even if the file build breaks
                 st.warning(f"Couldn't generate the workpaper file: {exc}")

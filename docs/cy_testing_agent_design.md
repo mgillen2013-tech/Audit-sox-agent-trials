@@ -488,3 +488,18 @@ Zero LLM calls: the file is rendered entirely from the structured
 ConclusionOutput the run already produced, so generation is deterministic
 and free. Every sheet/page carries a DRAFT banner ("AI-prepared, pending
 human reviewer approval") — same non-negotiable as the system prompt.
+
+**Evidence exhibits with tickmarks (built):** mirroring how a human
+workpaper points at evidence, each citation gets a red tickmark letter
+(A, B, C…) in the citation table, and the cited source is embedded as an
+exhibit: the cited PDF page is rendered to an image with red boxes drawn
+where the quoted text was located (tight boxes via pdfplumber text search
+against the citation's quote; falls back to the extracted region's bbox; a
+scanned/screenshot page with no text layer becomes a full-page exhibit
+labeled with its letter — which is exactly the E1-screenshot case in real
+support files). Excel-sourced citations get a text excerpt of the cited
+range instead of an image. The evidence_id → source-region mapping comes
+from re-running the deterministic extraction over the same support files
+(same files, same order ⇒ same ids), so this too costs zero LLM calls.
+Every exhibit is best-effort: a page that can't render degrades to the
+text-only citation row, never a failed workpaper build.
