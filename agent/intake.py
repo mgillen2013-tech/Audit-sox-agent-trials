@@ -159,6 +159,12 @@ def parse_sample_list(path: str | Path) -> dict[str, SamplePopulationManifest]:
 # anywhere in it, because those are audit judgments, not data the source
 # system tracks. Forcing a rename before upload is exactly the kind of
 # friction this app exists to remove.
+#
+# This is also the path used for a real workpaper's common shape: one
+# workbook, one tab holding the full population (used for IPE
+# completeness/accuracy, not sample selection) and another tab holding the
+# selected sample items -- read_excel_rows(path, sheet_name=...) targets
+# either tab of the same file.
 # --------------------------------------------------------------------------
 
 _SAMPLE_ID_CANDIDATES = {
@@ -181,13 +187,18 @@ _SAMPLE_ID_CANDIDATES = {
 }
 
 
-def read_excel_rows(path: str | Path) -> list[dict[str, Any]]:
+def read_excel_rows(path: str | Path, sheet_name: str | None = None) -> list[dict[str, Any]]:
     """Reads a plain Excel sheet into row dicts keyed by header text, with
     no required columns -- feeds build_manifest_from_any_columns().
+
+    sheet_name: which tab to read. Defaults to the active sheet (the
+    single-tab case). A real workpaper file often carries the population
+    and the sample selections as two tabs of the SAME workbook -- pass the
+    tab name explicitly to read either one out of it.
     """
     path = Path(path)
     wb = openpyxl.load_workbook(path, data_only=True)
-    ws = wb.active
+    ws = wb[sheet_name] if sheet_name else wb.active
 
     all_rows = list(ws.iter_rows())
     if not all_rows:
@@ -210,19 +221,22 @@ def read_excel_rows(path: str | Path) -> list[dict[str, Any]]:
 def build_manifest_from_any_columns(
     rows: list[dict[str, Any]],
     test_step_id: str,
-    population_description: str,
-    selection_method: str,
+    population_description: str = "",
+    selection_method: str | None = None,
     population_size: int | None = None,
 ) -> SamplePopulationManifest:
-    """One file = one test step's sample here (matches how a real
+    """One sheet = one test step's sample here (matches how a real
     population/sample export naturally exists -- one export per test, not
     one file spanning several). sample_id is auto-detected from a
     likely-looking id column (e.g. "Sample Selection #"); if none is found,
     falls back to the row's position. identifying_details and key_fields
     are built from every column present, since in an export like this every
     column genuinely is an identifying transaction field.
+
+    selection_method is optional -- left None when not supplied, rather
+    than forced to a guessed value.
     """
-    if selection_method not in _SELECTION_METHODS:
+    if selection_method is not None and selection_method not in _SELECTION_METHODS:
         raise ValueError(
             f"selection_method {selection_method!r} must be one of {'/'.join(_SELECTION_METHODS)}"
         )

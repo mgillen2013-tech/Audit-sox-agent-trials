@@ -25,10 +25,15 @@ class SampleItem(BaseModel):
 
 class SamplePopulationManifest(BaseModel):
     test_step_id: str
-    population_description: str
+    population_description: str = ""
     population_size: int | None = None
     sample_size: int
-    selection_method: Literal["random", "haphazard", "judgmental", "all_items"]
+    # Optional: the intake UI no longer forces a human to type this (it was
+    # never actually surfaced to the model or the workpaper -- see loop.py's
+    # build_user_turn), so it's honest to make it match what's actually
+    # collected rather than a required field with a fake-good value behind
+    # it. Still validated against the known set when it IS given.
+    selection_method: Literal["random", "haphazard", "judgmental", "all_items"] | None = None
     samples: list[SampleItem]
 
     @model_validator(mode="after")

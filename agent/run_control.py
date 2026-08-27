@@ -119,6 +119,8 @@ def iter_control_results(
             test_step_text=step["test_step_text"],
             py_conclusion_text=step.get("py_conclusion_text", ""),
             py_support_excerpts=py_evidence,
+            sample_size=manifest.sample_size if manifest else None,
+            population_size=manifest.population_size if manifest else None,
         )
 
         step_on_turn = (

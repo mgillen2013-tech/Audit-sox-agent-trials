@@ -130,6 +130,16 @@ class TestStepRequest:
     # not, the PY conclusion is normally readable from py_support_excerpts
     # itself, so there's no need to make a human retype it.
     py_conclusion_text: str = ""
+    # From the SamplePopulationManifest, when one exists. Without this the
+    # model's ONLY signal about sample size is check_sample_coverage's
+    # total_required count, with zero context for why it's that size -- a
+    # real run saw the model treat a correct, intentional 1-item sample as
+    # suspicious (a CY support filename said "selection 1", implying more
+    # might exist) purely because it had no population figure to check that
+    # against. Both are None when not known -- the line is omitted rather
+    # than shown as a suspicious "0" or "unknown".
+    sample_size: int | None = None
+    population_size: int | None = None
 
 
 def _render_evidence_item(item: EvidenceItem) -> str:
@@ -178,17 +188,36 @@ def build_user_turn(request: TestStepRequest) -> str:
         if request.py_conclusion_text
         else "PY conclusion: not separately provided -- read it from the PY support excerpts below if relevant.\n\n"
     )
+    sample_line = _render_sample_line(request.sample_size, request.population_size)
     return f"""\
 Control objective ({request.control_objective_ref}): {request.control_objective_text}
 
 Test step ({request.test_step_id}): {request.test_step_text}
 
-{py_conclusion_line}PY support excerpts (format/approach precedent only -- not evidence for this
+{sample_line}{py_conclusion_line}PY support excerpts (format/approach precedent only -- not evidence for this
 year's conclusion):
 {py_excerpts}
 
 Use search_cy_support to find this year's evidence for this test step before
 concluding anything."""
+
+
+def _render_sample_line(sample_size: int | None, population_size: int | None) -> str:
+    if sample_size is None:
+        return ""
+    if population_size is not None:
+        return (
+            f"Sample: {sample_size} item(s) selected for testing from a population of "
+            f"{population_size}. This is the correct, complete sample -- do not treat it as "
+            "partial just because a support filename or document label suggests otherwise.\n\n"
+        )
+    return (
+        f"Sample: {sample_size} item(s) selected for testing. The full underlying population "
+        "size was not provided to you -- if evidence in CY support implies the tested sample "
+        "should be larger (e.g. a filename or document says \"selection 1\" of several), use "
+        "request_additional_support to ask for the full sample selection listing rather than "
+        "assuming either that more items exist or that they don't.\n\n"
+    )
 
 
 def _tool_def(name: str, description: str, model) -> dict[str, Any]:

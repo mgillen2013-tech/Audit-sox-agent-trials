@@ -150,6 +150,20 @@ def test_run_control_wires_real_files_through_the_loop(control_dir: tuple[Path, 
     assert conclusion.evidence_citations[0].evidence_id == "ev_0001"
     assert len(results["TS-4.2"]["audit_log"]) == 3
 
+    # The manifest's sample_size (1 row) and population_size (12, from the
+    # sample list fixture) must reach the model's first turn -- without
+    # this the model has no way to tell a correct small sample from a
+    # partial upload (the real bug this was built to fix). Content is in
+    # block form by call time (agent/loop.py's cache-breakpoint pass
+    # converts the bare string), so extract the text out of it.
+    first_turn_content = client.calls[0]["messages"][0]["content"]
+    first_turn_text = (
+        first_turn_content
+        if isinstance(first_turn_content, str)
+        else " ".join(b.get("text", "") for b in first_turn_content if isinstance(b, dict))
+    )
+    assert "Sample: 1 item(s) selected for testing from a population of 12." in first_turn_text
+
 
 def test_run_control_missing_sample_list_row_still_runs(control_dir: tuple[Path, dict]):
     # A test step with no matching rows in the sample list -> empty manifest

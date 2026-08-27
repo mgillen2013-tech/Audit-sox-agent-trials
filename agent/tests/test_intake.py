@@ -227,3 +227,41 @@ def test_read_excel_rows_matches_real_export_shape(tmp_path: Path):
     assert len(rows) == 2
     assert rows[0]["Sample Selection #"] == 1
     assert rows[0]["invoice number f0411.vinv"] == "IN-88213"
+
+
+def test_build_manifest_from_any_columns_selection_method_optional():
+    # The real workflow no longer collects selection_method -- must build a
+    # valid manifest without it, not silently require a fake-good value.
+    manifest = build_manifest_from_any_columns(
+        _E1_STYLE_ROWS, test_step_id="T1.1", population_description="AP payments"
+    )
+    assert manifest.selection_method is None
+    assert manifest.sample_size == 2
+
+
+def test_read_excel_rows_targets_a_specific_tab(tmp_path: Path):
+    # The real shape this is built for: one workbook, population on one
+    # tab, the sample selections on another.
+    wb = openpyxl.Workbook()
+    pop_ws = wb.active
+    pop_ws.title = "Population"
+    pop_ws.append(["invoice number", "amount"])
+    for i in range(1, 6):
+        pop_ws.append([f"IN-{i}", i * 100])
+
+    sample_ws = wb.create_sheet("Sample")
+    sample_ws.append(["Sample Selection #", "invoice number"])
+    sample_ws.append([1, "IN-2"])
+    path = tmp_path / "T1.1 SS.156 Population & Samples.xlsx"
+    wb.save(path)
+
+    pop_rows = read_excel_rows(path, sheet_name="Population")
+    sample_rows = read_excel_rows(path, sheet_name="Sample")
+
+    assert len(pop_rows) == 5
+    assert len(sample_rows) == 1
+    assert sample_rows[0]["invoice number"] == "IN-2"
+
+    # Default (no sheet_name) still reads the active sheet, unchanged
+    # behavior for a single-tab file.
+    assert read_excel_rows(path) == pop_rows

@@ -101,6 +101,32 @@ def test_build_user_turn_includes_py_conclusion_when_given(request_: TestStepReq
     assert "PY conclusion: Satisfied. No exceptions noted." in turn
 
 
+def test_build_user_turn_omits_sample_line_when_unknown(request_: TestStepRequest):
+    # Neither sample_size nor population_size set -- must not fabricate a
+    # sample-size line out of nothing.
+    turn = build_user_turn(request_)
+    assert "Sample:" not in turn
+
+
+def test_build_user_turn_states_sample_is_complete_when_population_known(request_: TestStepRequest):
+    # This is the direct fix for the real run that treated a correct,
+    # intentional 1-item sample as suspicious purely for lack of a
+    # population figure to check it against.
+    request_.sample_size = 1
+    request_.population_size = 1
+    turn = build_user_turn(request_)
+    assert "Sample: 1 item(s) selected for testing from a population of 1." in turn
+    assert "do not treat it as" in turn
+
+
+def test_build_user_turn_flags_uncertainty_when_population_unknown(request_: TestStepRequest):
+    request_.sample_size = 1
+    turn = build_user_turn(request_)
+    assert "Sample: 1 item(s) selected for testing." in turn
+    assert "population size was not provided" in turn
+    assert "request_additional_support" in turn
+
+
 def test_py_excerpts_are_capped_not_dumped_in_full(request_: TestStepRequest):
     # A real run showed a large PY testing file (or, before extraction
     # chunked large tables, one huge extracted table) pushing a single test

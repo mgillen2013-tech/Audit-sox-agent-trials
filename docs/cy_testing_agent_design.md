@@ -101,10 +101,10 @@ SampleItem = {
 
 SamplePopulationManifest = {
   test_step_id: str
-  population_description: str       # e.g. "All POs > $5,000 issued Oct 2025-Sep 2026"
+  population_description: str       # e.g. "All POs > $5,000 issued Oct 2025-Sep 2026" -- may be "" (see below)
   population_size: int | null
   sample_size: int
-  selection_method: "random" | "haphazard" | "judgmental" | "all_items"
+  selection_method: "random" | "haphazard" | "judgmental" | "all_items" | null
   samples: [SampleItem]
 }
 ```
@@ -128,13 +128,38 @@ resolves the open question of where that input comes from.
   `population_description`/`selection_method` concept at all, because
   those are audit judgments, not something the source system tracks.
   Forcing a rename before upload was exactly the friction this app exists
-  to remove. This path takes any spreadsheet — sample_id is auto-detected
-  from a likely id-ish column (falling back to row position),
-  `identifying_details` and `key_fields` are built from every column
-  present, and population description / selection method / population size
-  are entered on the form once per test step instead of expected to live in
-  the file. One file = one test step's samples here, matching how a real
-  export naturally exists.
+  to remove. `sample_id` is auto-detected from a likely id-ish column
+  (falling back to row position); `identifying_details` and `key_fields`
+  are built from every column present.
+
+**One workbook, two tabs (built):** a further real-run correction — the
+app originally collected `population_description` / `selection_method` /
+`population_size` as manual per-step form fields, and a separate "sample
+list" file upload per step. A real run showed the actual cost of that: the
+model's only signal about sample size was `check_sample_coverage`'s bare
+count, with zero context for *why* it was that size, so a correct
+1-item judgmental sample got treated as suspicious purely because a CY
+support filename said "selection 1" (implying more might exist). The fix
+wasn't a better prompt — it was giving the model a real number to check
+against. The intake is now: **one Excel workbook per control**, one tab
+holding the full population, another holding the sample selections
+(`read_excel_rows(path, sheet_name=...)` targets either tab of the same
+file) — matching how these files actually arrive in practice, per the
+user directly. `population_size` is computed by counting the population
+tab's rows, never typed. `selection_method` is dropped from the UI
+entirely (it was collected but never actually reached the model or the
+workpaper — see `_render_sample_line` below); the schema field is now
+optional (`| null`) rather than forced to a fake-good value. The whole
+workbook is also added to CY support evidence, so the population tab is
+searchable and can back an IPE completeness/accuracy conclusion.
+
+`agent/loop.py`'s `build_user_turn` now renders a `Sample:` line from
+`TestStepRequest.sample_size` / `population_size` (populated in
+`run_control.py` from the manifest): when population size is known, it
+tells the model outright that the sample is correct and complete, so it
+stops treating a small-but-intentional sample as a red flag; when it's
+unknown, it explicitly tells the model to use
+`request_additional_support` instead of guessing.
 
 `agent/run_control.py` wires this together with real PY/CY file extraction
 (`agent/extraction`) into one test-step run per step in a small
