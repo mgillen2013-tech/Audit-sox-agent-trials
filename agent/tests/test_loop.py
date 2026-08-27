@@ -101,6 +101,96 @@ def test_build_user_turn_includes_py_conclusion_when_given(request_: TestStepReq
     assert "PY conclusion: Satisfied. No exceptions noted." in turn
 
 
+def test_cache_reads_are_cost_weighted_not_face_value(evidence_items, sample_manifest, request_):
+    # A real run got budget-aborted mid-investigation because cache READS
+    # (billed at ~1/10th of fresh input) were counted at face value -- 12
+    # well-cached turns "spent" 300K raw tokens while the actual bill was a
+    # small fraction of that. 100K cache-read tokens must count as ~10K
+    # weighted units, so three such turns (30K weighted) stay far under a
+    # 300K budget instead of tripping it at raw count.
+    client = FakeClient(
+        responses=[
+            response(
+                [tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})],
+                usage=fake_usage(input_tokens=500, cache_read_input_tokens=100_000),
+            ),
+            response(
+                [tool_use("t2", "search_cy_support", {"query": "accrual GL", "top_k": 5})],
+                usage=fake_usage(input_tokens=500, cache_read_input_tokens=100_000),
+            ),
+            response(
+                [
+                    tool_use(
+                        "t3",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ],
+                usage=fake_usage(input_tokens=500, cache_read_input_tokens=100_000),
+            ),
+        ]
+    )
+    # Raw-summed, these 3 turns would be ~301,500 and trip a 300K budget
+    # before the conclusion lands; cost-weighted they're ~31,500.
+    conclusion, _ = run_test_step(
+        request_, evidence_items, sample_manifest, client, max_total_tokens=300_000
+    )
+    assert conclusion.conclusion == "insufficient_evidence"
+
+
+def test_output_tokens_weighted_heavier_than_input(evidence_items, sample_manifest, request_):
+    # Output bills ~5x input -- 30K output tokens/turn must count as ~150K
+    # weighted, tripping a 200K budget on turn 2 even though the raw sum
+    # (60K) would look comfortably under it.
+    client = FakeClient(
+        responses=[
+            response([text("stalling")], stop_reason="end_turn", usage=fake_usage(output_tokens=30_000))
+            for _ in range(15)
+        ]
+    )
+    with pytest.raises(IncompleteRunError) as exc_info:
+        run_test_step(request_, evidence_items, sample_manifest, client, max_total_tokens=200_000)
+    assert exc_info.value.reason == "token_budget_exceeded"
+    assert exc_info.value.turns_used == 2
+
+
+def test_build_user_turn_includes_cy_evidence_inventory(request_: TestStepRequest, evidence_items):
+    turn = build_user_turn(request_, cy_evidence=evidence_items)
+    assert "CY evidence inventory" in turn
+    assert "[ev_001]" in turn
+    assert "[ev_002]" in turn
+    assert "fishing for it" in turn.lower()
+    # The map is not license to cite unretrieved items.
+    assert "retrieve an item with search_cy_support before citing" in turn
+
+
+def test_build_user_turn_without_inventory_unchanged(request_: TestStepRequest):
+    assert "CY evidence inventory" not in build_user_turn(request_)
+
+
+def test_run_test_step_puts_inventory_in_first_turn(evidence_items, sample_manifest, request_):
+    client = FakeClient(
+        responses=[
+            response(
+                [
+                    tool_use(
+                        "t1",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            )
+        ]
+    )
+    run_test_step(request_, evidence_items, sample_manifest, client)
+    first = client.calls[0]["messages"][0]["content"]
+    text = first if isinstance(first, str) else " ".join(
+        b.get("text", "") for b in first if isinstance(b, dict)
+    )
+    assert "CY evidence inventory" in text
+    assert "[ev_001]" in text
+
+
 def test_build_user_turn_omits_sample_line_when_unknown(request_: TestStepRequest):
     # Neither sample_size nor population_size set -- must not fabricate a
     # sample-size line out of nothing.

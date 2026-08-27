@@ -502,6 +502,33 @@ Two separate problems, both now fixed:
    failure") under the error banner so a failed step still shows what was
    searched and what was found.
 
+**Cost-weighted budget (built, corrected after a real run):** the cap
+counts fresh-input-token *equivalents*, not raw usage-field sums: cache
+writes ~1.25x, cache reads ~0.1x, output ~5x — the standard Anthropic
+price ratios. The first version summed every field raw, which counted
+cache reads at 10x their real price; a real, legitimately-progressing run
+(sensible targeted searches, small evidence pool) got aborted at "300K
+tokens" that were mostly cheap cache re-reads — the counter said budget
+blown while the actual bill was a small fraction of 300K fresh tokens.
+This is also why the app's number reads lower than Foundry's raw token
+dashboard.
+
+**Turn efficiency (built, same real run):** two changes that attack why a
+model burns turns rather than how many it gets. (1) `search_cy_support`
+results now return items nearly whole (2,000-char cap with an explicit
+truncation notice) instead of 280-char snippets — the audit log showed
+the model re-querying the SAME approval email with different field names
+just to see more of it through the keyhole. (2) The first user turn now
+includes a **CY evidence inventory**: the complete id/location/preview
+map of every extracted evidence item (capped at 40), with an explicit
+instruction that anything not listed was not provided and belongs in
+`request_additional_support`, not in more searches — the same run burned
+turns fishing for a delegation-of-authority matrix that was never
+uploaded. The inventory is a map, not retrieved evidence: the fabrication
+guard still requires an item to have been returned by search before it
+can be cited. Measured on the real control's files: first-turn context ≈
+4K tokens all-in.
+
 Also built: a one-time **wrap-up warning** injected into the conversation a
 turn before either cliff (the last allowed iteration, or 80% of the token
 budget) telling the model to stop investigating and close via

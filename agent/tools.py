@@ -114,16 +114,28 @@ def search_cy_support(inp: SearchCySupportInput, ctx: ToolContext) -> SearchCySu
     ranked = sorted(zip(overlap_items, scores), key=lambda pair: pair[1], reverse=True)
     top = ranked[: inp.top_k]
 
-    results = [
-        SearchResult(
-            evidence_id=item.evidence_id,
-            source_file=item.source_file,
-            location=item.location,
-            snippet=_searchable_text(item)[:280],
-            score=round(float(score), 4),
+    # 2,000 chars, not a keyhole: an earlier 280-char snippet cap made the
+    # model re-search the SAME document over and over to fish out different
+    # fields (a real run's audit log showed successive queries that were
+    # just different field names from one approval email), burning turns
+    # and budget re-retrieving what one result should have shown whole.
+    # Per-control evidence pools are kept small by extraction chunking, so
+    # returning items nearly-whole is cheap; anything longer than the cap
+    # says so explicitly instead of truncating silently.
+    results = []
+    for item, score in top:
+        text = _searchable_text(item)
+        if len(text) > 2_000:
+            text = text[:2_000] + f"\n...[truncated -- {len(text):,} chars total; search more specifically to see other parts]"
+        results.append(
+            SearchResult(
+                evidence_id=item.evidence_id,
+                source_file=item.source_file,
+                location=item.location,
+                snippet=text,
+                score=round(float(score), 4),
+            )
         )
-        for item, score in top
-    ]
 
     ctx.evidence_ids_returned_by_search.update(r.evidence_id for r in results)
     return SearchCySupportOutput(results=results)

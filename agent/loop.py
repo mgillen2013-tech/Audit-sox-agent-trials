@@ -45,16 +45,18 @@ DEFAULT_MODEL = "claude-sonnet-5"
 PROMPT_VERSION = "v1"
 MAX_TOOL_ITERATIONS = 15
 
-# Hard spending cap, in tokens (input + output + cache write/read, summed
-# across every turn of one test step). A real run without this hit ~400K
-# input tokens on a SINGLE request before the extraction/caching fixes, and
-# separately burned $65 with zero output by grinding through
-# MAX_TOOL_ITERATIONS turns without ever calling submit_conclusion. Token
-# count is a proxy for spend, not an exact dollar figure (cache reads are
-# billed far cheaper than fresh input) -- the point is to fail fast and
-# cheaply instead of silently running up a real bill. 300K is generous
-# relative to a healthy run (low thousands of tokens/request) while staying
-# well under what a runaway loop can rack up.
+# Hard spending cap, in COST-WEIGHTED token units (fresh-input-token
+# equivalents: cache writes ~1.25x, cache reads ~0.1x, output ~5x -- see
+# _usage_tokens), summed across every turn of one test step. A real run
+# without any cap hit ~400K input tokens on a SINGLE request before the
+# extraction/caching fixes, and separately burned $65 with zero output by
+# grinding through MAX_TOOL_ITERATIONS turns without ever calling
+# submit_conclusion. An earlier version of this cap summed usage fields
+# raw, which counted cache reads at 10x their real price and aborted a
+# legitimately-progressing run mid-investigation -- cost-weighting is what
+# makes the number mean "roughly proportional to dollars." On Opus-class
+# input pricing, 300K weighted units is on the order of a few dollars per
+# test step -- the ceiling for a runaway, well above any healthy run.
 MAX_TOTAL_TOKENS = 300_000
 
 # Section 0 of the design doc: this block goes into the cacheable system
@@ -181,7 +183,35 @@ def _render_py_excerpts(items: list[EvidenceItem]) -> str:
     return text
 
 
-def build_user_turn(request: TestStepRequest) -> str:
+_MAX_INVENTORY_ITEMS = 40
+
+
+def _render_cy_inventory(items: list[EvidenceItem]) -> str:
+    """The complete map of what CY evidence exists, shown up front. Without
+    this the model can only discover the evidence pool by fishing with
+    searches -- a real run burned turns querying for documents that simply
+    weren't there (a delegation-of-authority matrix, org charts) with no
+    way to know that short of failed search after failed search. With the
+    map, one glance answers "what do I have?" and searches are for READING
+    items, not discovering them. Capped: a huge pool falls back to a count
+    plus the first _MAX_INVENTORY_ITEMS entries.
+    """
+    if not items:
+        return "(no CY evidence extracted)"
+    lines = []
+    for item in items[:_MAX_INVENTORY_ITEMS]:
+        body = item.extracted_text or (
+            " | ".join(item.extracted_table[0]) if item.extracted_table else ""
+        )
+        preview = " ".join(body.split())[:110]
+        lines.append(f"[{item.evidence_id}] ({item.source_type}) {item.location} -- {preview}")
+    text = "\n".join(lines)
+    if len(items) > _MAX_INVENTORY_ITEMS:
+        text += f"\n...and {len(items) - _MAX_INVENTORY_ITEMS} more item(s) -- discover them via search_cy_support."
+    return text
+
+
+def build_user_turn(request: TestStepRequest, cy_evidence: list[EvidenceItem] | None = None) -> str:
     py_excerpts = _render_py_excerpts(request.py_support_excerpts)
     py_conclusion_line = (
         f"PY conclusion: {request.py_conclusion_text}\n\n"
@@ -189,17 +219,31 @@ def build_user_turn(request: TestStepRequest) -> str:
         else "PY conclusion: not separately provided -- read it from the PY support excerpts below if relevant.\n\n"
     )
     sample_line = _render_sample_line(request.sample_size, request.population_size)
+    inventory_block = ""
+    if cy_evidence is not None:
+        inventory_block = f"""\
+CY evidence inventory -- this is the COMPLETE list of evidence extracted from
+this control's CY support files. If a document type is not in this list (e.g.
+a policy, an authority matrix, an org chart), it was not provided: do not
+spend searches fishing for it -- note it via request_additional_support
+instead. You must still retrieve an item with search_cy_support before citing
+it; this inventory is a map, not retrieved evidence.
+{_render_cy_inventory(cy_evidence)}
+
+"""
     return f"""\
 Control objective ({request.control_objective_ref}): {request.control_objective_text}
 
 Test step ({request.test_step_id}): {request.test_step_text}
 
-{sample_line}{py_conclusion_line}PY support excerpts (format/approach precedent only -- not evidence for this
+{sample_line}{inventory_block}{py_conclusion_line}PY support excerpts (format/approach precedent only -- not evidence for this
 year's conclusion):
 {py_excerpts}
 
 Use search_cy_support to find this year's evidence for this test step before
-concluding anything."""
+concluding anything. Be efficient: searches return items nearly in full, so
+a handful of searches should cover a small evidence pool -- do not re-query
+the same document for different fields."""
 
 
 def _render_sample_line(sample_size: int | None, population_size: int | None) -> str:
@@ -365,20 +409,29 @@ class IncompleteRunError(RuntimeError):
 
 
 def _usage_tokens(usage: Any) -> int:
-    """Sums every token field a Messages API usage object can carry. Missing
-    fields (a minimal test double, or an SDK version without cache fields)
-    default to 0 rather than raising. The ``or 0`` matters: on the real SDK
-    the cache fields are Optional[int] -- the attribute EXISTS but is None
-    when unpopulated, so getattr's default alone never applies and a bare
-    sum would raise TypeError on the first real turn.
+    """Cost-weighted token units for the spending budget, in fresh-input-token
+    equivalents. A raw sum of every usage field counted cache READS at full
+    price -- but a cache read bills at roughly 1/10th of fresh input, and on
+    a well-cached multi-turn run cache reads dominate the raw count. A real
+    run "spent" 300K raw-counted tokens in 12 turns and got budget-aborted
+    mid-investigation when its actual bill was a small fraction of what
+    300K fresh tokens would cost. Weights (relative to fresh input = 1.0):
+    cache write ~1.25x, cache read ~0.1x, output ~5x -- the standard
+    Anthropic price ratios, stable across models.
+
+    Missing fields (a minimal test double, or an SDK version without cache
+    fields) default to 0 rather than raising. The ``or 0`` matters: on the
+    real SDK the cache fields are Optional[int] -- the attribute EXISTS but
+    is None when unpopulated, so getattr's default alone never applies and
+    a bare sum would raise TypeError on the first real turn.
     """
     if usage is None:
         return 0
-    return (
+    return round(
         (getattr(usage, "input_tokens", 0) or 0)
-        + (getattr(usage, "output_tokens", 0) or 0)
-        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
-        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+        + 5.0 * (getattr(usage, "output_tokens", 0) or 0)
+        + 1.25 * (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        + 0.1 * (getattr(usage, "cache_read_input_tokens", 0) or 0)
     )
 
 
@@ -548,7 +601,7 @@ def run_test_step(
     tokens_used = 0
     wrapup_warned = False
     system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
-    messages: list[dict] = [{"role": "user", "content": build_user_turn(request)}]
+    messages: list[dict] = [{"role": "user", "content": build_user_turn(request, cy_evidence=evidence_items)}]
 
     def _maybe_warn_wrapup(turn: int) -> None:
         # The $65 failure mode was the model grinding through every allowed

@@ -376,7 +376,7 @@ def _write_step_sheet(
         put("Error", str(result["error"]))
         if "reason" in result:
             put("Abort reason", str(result["reason"]))
-            put("Tokens used", f"{result.get('tokens_used', 0):,}")
+            put("Cost-weighted tokens used", f"{result.get('tokens_used', 0):,}")
         audit_log = result.get("audit_log") or []
         if audit_log:
             put("Tool calls before abort", str(len(audit_log)))

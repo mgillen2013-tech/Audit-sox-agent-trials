@@ -78,19 +78,21 @@ with st.sidebar:
 
     st.header("Spending cap")
     max_total_tokens = st.number_input(
-        "Max tokens per test step",
+        "Max cost-weighted tokens per test step",
         min_value=10_000,
         max_value=2_000_000,
         value=MAX_TOTAL_TOKENS,
         step=10_000,
         help=(
-            "Hard cutoff. If one test step's running total of input+output "
-            "tokens crosses this, it's aborted rather than left to keep "
-            "burning turns -- but everything it already found is still kept "
-            "and shown, not thrown away. Lower this if you want to catch a "
-            "runaway step (bad extraction, a huge PY file) even cheaper; "
-            "raise it only if a legitimately complex step keeps hitting the "
-            "cap with a conclusion still in reach."
+            "Hard cutoff, in cost-weighted token units that track actual "
+            "dollars: cached re-reads count at ~1/10th (they bill ~10x "
+            "cheaper), model output counts 5x (it bills ~5x more). This is "
+            "why the number here reads lower than Foundry's raw token "
+            "dashboard -- Foundry counts every cached token at face value. "
+            "If a step crosses the cap it's aborted, but everything it "
+            "already found is kept and shown. Lower this to catch a runaway "
+            "step cheaper; raise it only if a legitimately complex step "
+            "keeps hitting the cap with a conclusion still in reach."
         ),
     )
 
@@ -217,7 +219,7 @@ def _render_result(test_step_id: str, result: dict) -> None:
             # a dead end with nothing to show for the spend.
             st.caption(
                 f"Stopped after {result['turns_used']} turn(s), "
-                f"~{result['tokens_used']:,} tokens used, "
+                f"~{result['tokens_used']:,} cost-weighted tokens used, "
                 f"{len(result['audit_log'])} tool call(s) made before the abort."
             )
             with st.expander("Tool calls made before failure"):
@@ -307,8 +309,8 @@ if run_clicked:
 
             def _show_progress(step_id: str, turn: int, tokens: int, log: list) -> None:
                 progress.info(
-                    f"Running **{step_id}** — turn {turn}/{MAX_TOOL_ITERATIONS}, ~{tokens:,} tokens used so far, "
-                    f"{len(log)} tool call(s) made. (Cap: {int(max_total_tokens):,} tokens)"
+                    f"Running **{step_id}** — turn {turn}/{MAX_TOOL_ITERATIONS}, ~{tokens:,} cost-weighted "
+                    f"tokens used so far, {len(log)} tool call(s) made. (Cap: {int(max_total_tokens):,})"
                 )
 
             all_results = {}
