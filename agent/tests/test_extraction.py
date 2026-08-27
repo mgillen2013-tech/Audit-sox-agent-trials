@@ -116,6 +116,92 @@ def test_excel_flagged_cell_captured_as_evidence(sample_xlsx: Path):
     assert "Approval missing supervisor signature" in cell.extracted_text
 
 
+def test_excel_whole_row_highlight_collapses_to_one_item(tmp_path: Path):
+    # Real preparer convention seen in a live run: the ENTIRE row of a
+    # sampled population item gets highlighted (every column), not one
+    # cell. The old per-cell logic turned that into one EvidenceItem per
+    # cell -- individually meaningless ("value: 'PK'; fill_color: ...")
+    # and already redundant with the row's own content in the table
+    # extraction. This is the direct regression test for that: it flooded
+    # a real run's evidence pool (57 fragments from 3 rows) and burned the
+    # whole tool-call budget with the model trying to chase them down.
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Population"
+    header = ["Invoice", "Vendor", "Amount", "Date"]
+    ws.append(header)
+    ws.append(["INV-1", "Acme", 100, "2026-01-01"])
+    ws.append(["INV-2", "Premiere Onboard LLC", 30000, "2026-02-01"])  # the sampled row
+    ws.append(["INV-3", "Beta", 200, "2026-03-01"])
+
+    yellow = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
+    for col in range(1, 5):
+        ws.cell(row=3, column=col).fill = yellow
+
+    path = tmp_path / "population.xlsx"
+    wb.save(path)
+
+    items = extract_excel(path)
+    cells = [i for i in items if i.source_type == "excel_cell"]
+
+    assert len(cells) == 1
+    assert cells[0].location == "Population!A3:D3"
+    assert "entire row highlighted" in cells[0].extracted_text
+    assert "4 of 4 populated columns" in cells[0].extracted_text
+    # Untouched rows produce no cell-level noise at all.
+    assert not any("INV-1" in c.extracted_text or "INV-3" in c.extracted_text for c in cells)
+
+
+def test_excel_sparse_highlight_in_row_stays_per_cell(tmp_path: Path):
+    # A single flagged cell in an otherwise-normal row (the real
+    # PO-testing exception case) must NOT be swept into a row-level
+    # summary -- only a genuinely whole-row highlight collapses.
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Invoice", "Vendor", "Amount", "Date"])
+    ws.append(["INV-1", "Acme", 100, "2026-01-01"])
+    ws.cell(row=2, column=3).fill = PatternFill(
+        start_color="FFFF0000", end_color="FFFF0000", fill_type="solid"
+    )
+
+    path = tmp_path / "sparse.xlsx"
+    wb.save(path)
+
+    items = extract_excel(path)
+    cells = [i for i in items if i.source_type == "excel_cell"]
+    assert len(cells) == 1
+    assert cells[0].location == "Sheet!C2"
+    assert "entire row highlighted" not in cells[0].extracted_text
+    assert "value: 100" in cells[0].extracted_text
+
+
+def test_excel_comment_in_highlighted_row_still_reported_individually(tmp_path: Path):
+    # A comment is real, specific content a preparer wrote -- it must
+    # survive even when the rest of its row collapses into a row summary.
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Invoice", "Vendor", "Amount", "Date"])
+    ws.append(["INV-1", "Acme", 100, "2026-01-01"])
+
+    yellow = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
+    for col in range(1, 5):
+        ws.cell(row=2, column=col).fill = yellow
+    ws.cell(row=2, column=3).comment = Comment("Confirmed against remittance", "Preparer")
+
+    path = tmp_path / "commented_row.xlsx"
+    wb.save(path)
+
+    items = extract_excel(path)
+    cells = [i for i in items if i.source_type == "excel_cell"]
+
+    row_summaries = [c for c in cells if "entire row highlighted" in c.extracted_text]
+    commented = [c for c in cells if "comment:" in c.extracted_text]
+    assert len(row_summaries) == 1
+    assert len(commented) == 1
+    assert commented[0].location == "Sheet!C2"
+    assert "Confirmed against remittance" in commented[0].extracted_text
+
+
 def test_excel_all_ids_unique(sample_xlsx: Path):
     items = extract_excel(sample_xlsx)
     ids = [i.evidence_id for i in items]

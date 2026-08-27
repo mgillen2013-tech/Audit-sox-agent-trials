@@ -197,6 +197,31 @@ Per file type:
   preparers color-code exceptions and leave comments, and that's real signal
   extraction shouldn't discard. `extraction_confidence = 1.0` always (it's
   structured data, not inferred).
+
+  **Built (fixed after a real run):** annotated-cell extraction originally
+  emitted one `excel_cell` EvidenceItem per colored/commented cell,
+  unconditionally. A real population tab had 3 sampled rows highlighted
+  across every column (a normal preparer convention: mark the whole
+  selected row within the population listing, not one cell) — that turned
+  into 57 individually-meaningless fragments (`value: 'PK'; fill_color:
+  FFFFFF00`, no column label, no relation to the other 19 pieces of the
+  same row), on top of the row's real content already sitting in the
+  table extraction. The model burned its entire tool-call/token budget
+  (200K tokens, 20 calls, no conclusion) trying to chase these down
+  individually — this was the actual root cause, not a prompting or
+  budget-size problem. Fixed: when most of a row's populated cells share
+  the *same* highlight color (≥60%, ≥3 cells — `_WHOLE_ROW_FRACTION` /
+  `_WHOLE_ROW_MIN_CELLS` in `agent/extraction/excel.py`), it collapses to
+  ONE row-level EvidenceItem ("Row 3: entire row highlighted... likely
+  marks a selected/sampled item... see the table extraction for full
+  values") instead of one per cell. A comment on a cell is never absorbed
+  into that collapse — it's real, specific content and always stays its
+  own item, even inside an otherwise-collapsed row. A single flagged cell
+  (the genuine exception case, e.g. the PO-testing fixture) is
+  untouched — collapsing only triggers on a genuinely whole-row pattern.
+  On the real file this dropped 57 fragments to 3, and the CY evidence
+  pool for the whole control (4 support files) to 16 items / ~10K
+  characters total.
 - **Native (text) PDFs:** `pdfplumber` or `PyMuPDF` for text + table
   extraction, keeping page number and bounding box per chunk so citations are
   precise and the review UI can render the exact region.

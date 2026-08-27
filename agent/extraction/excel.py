@@ -120,19 +120,79 @@ def _extract_tables(
     return items
 
 
+# Real preparer convention seen in a live run: the ENTIRE row of a sampled
+# population item gets highlighted (every column, same color), not one cell.
+# The naive per-cell logic below turned one such row into ~20 separate
+# EvidenceItems like "value: 'PK'; fill_color: FFFFFF00" -- individually
+# meaningless (no column label, no relation to the other 19 fragments of the
+# same row) and already redundant with the row's own full content, which
+# _extract_tables already captured as real text. On a real run this flooded
+# the evidence pool (57 fragments from 3 highlighted rows) and the model
+# burned its whole tool-call budget trying to chase them down as if they
+# were distinct pieces of evidence instead of realizing they're one marked
+# row. A row where most of its populated cells share the SAME highlight
+# color collapses to a single "this row is marked" EvidenceItem instead.
+_WHOLE_ROW_FRACTION = 0.6
+_WHOLE_ROW_MIN_CELLS = 3
+
+
 def _extract_annotated_cells(
     ws: Worksheet, filename: str, counter: Iterator[int]
 ) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
+
     for row in ws.iter_rows():
-        for cell in row:
-            if cell.value is None:
-                continue
+        non_empty = [c for c in row if c.value is not None]
+        if not non_empty:
+            continue
+
+        flagged: list[tuple] = []  # (cell, fill_color, comment_text)
+        for cell in non_empty:
             comment_text = cell.comment.text.strip() if cell.comment else None
             fill_color = _fill_color(cell)
-            if comment_text is None and fill_color is None:
-                continue
+            if comment_text is not None or fill_color is not None:
+                flagged.append((cell, fill_color, comment_text))
 
+        if not flagged:
+            continue
+
+        # Commented cells are always individually meaningful (a preparer
+        # wrote something specific there) -- never absorbed into a row
+        # summary, whole-row-colored or not.
+        commented = [f for f in flagged if f[2] is not None]
+        colorable = [f for f in flagged if f[2] is None and f[1] is not None]
+
+        colors = {f[1] for f in colorable}
+        is_whole_row = (
+            len(colors) == 1
+            and len(colorable) >= _WHOLE_ROW_MIN_CELLS
+            and len(colorable) / len(non_empty) >= _WHOLE_ROW_FRACTION
+        )
+
+        if is_whole_row:
+            color = next(iter(colors))
+            first_cell, last_cell = colorable[0][0], colorable[-1][0]
+            items.append(
+                EvidenceItem(
+                    evidence_id=f"ev_{next(counter):04d}",
+                    source_file=filename,
+                    source_type="excel_cell",
+                    location=f"{ws.title}!{first_cell.coordinate}:{last_cell.coordinate}",
+                    extracted_text=(
+                        f"Row {first_cell.row}: entire row highlighted (fill_color: {color}) across "
+                        f"{len(colorable)} of {len(non_empty)} populated columns -- likely marks a "
+                        "selected/sampled item within this population. See the table extraction for "
+                        "this row's full field values."
+                    ),
+                    extracted_table=None,
+                    extraction_confidence=1.0,
+                    preview_ref=f"{filename}!{ws.title}!row{first_cell.row}",
+                )
+            )
+        else:
+            commented = flagged  # no whole-row collapse -- every flagged cell stands alone as before
+
+        for cell, fill_color, comment_text in commented:
             parts = [f"value: {cell.value!r}"]
             if fill_color:
                 parts.append(f"fill_color: {fill_color}")
