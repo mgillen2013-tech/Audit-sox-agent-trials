@@ -161,6 +161,20 @@ stops treating a small-but-intentional sample as a red flag; when it's
 unknown, it explicitly tells the model to use
 `request_additional_support` instead of guessing.
 
+**Sample roster (built, after a 2-sample run exhausted its budget).** The
+`Sample:` line above gave a bare COUNT and nothing else — the model was
+never shown the `sample_id`s or `identifying_details`, even though the
+manifest carries both for every item. With one sample that was survivable:
+there is one thing to find and all CY support relates to it. With two, the
+model had to discover the ids by calling `check_sample_coverage` and
+reading `missing`, then work out which evidence belonged to which item by
+fishing — and burned the whole cap doing it. `build_user_turn` now lists
+each selected item (`sample_id` + identifying field values, capped at 25
+items / 240 chars each), states that those ids are exactly what
+`check_sample_coverage` expects in `found_evidence_ids`, and instructs
+matching on **field values, not filenames** — support files are commonly
+named for a selection number, mis-named, or cover several items at once.
+
 `agent/run_control.py` wires this together with real PY/CY file extraction
 (`agent/extraction`) into one test-step run per step in a small
 `control.json` spec (see `agent/control.example.json`) for the CLI, or

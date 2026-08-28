@@ -163,6 +163,7 @@ def iter_control_results(
             py_support_excerpts=py_evidence,
             sample_size=manifest.sample_size if manifest else None,
             population_size=manifest.population_size if manifest else None,
+            samples=list(manifest.samples) if manifest else [],
         )
 
         # A step reports its running total each turn; keep the latest so the

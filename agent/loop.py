@@ -28,6 +28,7 @@ from agent.schemas import (
     ModelMetadata,
     RequestAdditionalSupportInput,
     SampleCoverage,
+    SampleItem,
     SamplePopulationManifest,
     SearchCySupportInput,
     SubmitConclusionInput,
@@ -142,6 +143,13 @@ class TestStepRequest:
     # than shown as a suspicious "0" or "unknown".
     sample_size: int | None = None
     population_size: int | None = None
+    # The actual selected items, from the SamplePopulationManifest. Without
+    # these the model gets a bare COUNT and has to discover both the
+    # sample_ids (by calling check_sample_coverage and reading `missing`)
+    # and what each item even is (by fishing with searches). With one
+    # sample that was survivable -- everything in CY support related to it.
+    # With two it burned a real run's whole budget.
+    samples: list[SampleItem] = field(default_factory=list)
 
 
 def _render_evidence_item(item: EvidenceItem) -> str:
@@ -218,7 +226,7 @@ def build_user_turn(request: TestStepRequest, cy_evidence: list[EvidenceItem] | 
         if request.py_conclusion_text
         else "PY conclusion: not separately provided -- read it from the PY support excerpts below if relevant.\n\n"
     )
-    sample_line = _render_sample_line(request.sample_size, request.population_size)
+    sample_line = _render_sample_line(request.sample_size, request.population_size, request.samples)
     inventory_block = ""
     if cy_evidence is not None:
         inventory_block = f"""\
@@ -246,22 +254,61 @@ a handful of searches should cover a small evidence pool -- do not re-query
 the same document for different fields."""
 
 
-def _render_sample_line(sample_size: int | None, population_size: int | None) -> str:
+_MAX_ROSTER_ITEMS = 25
+_MAX_ROSTER_DETAIL_CHARS = 240
+
+
+def _render_sample_roster(samples: list[SampleItem]) -> str:
+    """The selected items themselves -- sample_id plus the field values that
+    identify each one. Without this the model knows only how MANY items were
+    selected, so on a multi-item sample it has to work out both the
+    sample_ids and what each item is by trial and error.
+    """
+    if not samples:
+        return ""
+
+    lines = []
+    for item in samples[:_MAX_ROSTER_ITEMS]:
+        detail = " ".join(item.identifying_details.split())
+        if len(detail) > _MAX_ROSTER_DETAIL_CHARS:
+            detail = detail[:_MAX_ROSTER_DETAIL_CHARS] + "..."
+        lines.append(f"  sample_id {item.sample_id!r}: {detail}")
+    if len(samples) > _MAX_ROSTER_ITEMS:
+        lines.append(f"  ...and {len(samples) - _MAX_ROSTER_ITEMS} more item(s).")
+
+    return (
+        "The selected items, exactly as they appear in the sample listing. These "
+        "sample_id values are what check_sample_coverage expects in "
+        "found_evidence_ids:\n"
+        + "\n".join(lines)
+        + "\nFind CY support for EACH of these separately. Match evidence to an item on "
+        "its field values (invoice number, vendor, amount, dates), NOT on a filename -- a "
+        "support file may be named for a selection number, mis-named, or cover several "
+        "items at once.\n\n"
+    )
+
+
+def _render_sample_line(
+    sample_size: int | None, population_size: int | None, samples: list[SampleItem] | None = None
+) -> str:
     if sample_size is None:
         return ""
+    roster = _render_sample_roster(samples or [])
     if population_size is not None:
-        return (
+        header = (
             f"Sample: {sample_size} item(s) selected for testing from a population of "
             f"{population_size}. This is the correct, complete sample -- do not treat it as "
             "partial just because a support filename or document label suggests otherwise.\n\n"
         )
-    return (
-        f"Sample: {sample_size} item(s) selected for testing. The full underlying population "
-        "size was not provided to you -- if evidence in CY support implies the tested sample "
-        "should be larger (e.g. a filename or document says \"selection 1\" of several), use "
-        "request_additional_support to ask for the full sample selection listing rather than "
-        "assuming either that more items exist or that they don't.\n\n"
-    )
+    else:
+        header = (
+            f"Sample: {sample_size} item(s) selected for testing. The full underlying population "
+            "size was not provided to you -- if evidence in CY support implies the tested sample "
+            "should be larger (e.g. a filename or document says \"selection 1\" of several), use "
+            "request_additional_support to ask for the full sample selection listing rather than "
+            "assuming either that more items exist or that they don't.\n\n"
+        )
+    return header + roster
 
 
 def _tool_def(name: str, description: str, model) -> dict[str, Any]:

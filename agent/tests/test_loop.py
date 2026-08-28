@@ -191,6 +191,47 @@ def test_run_test_step_puts_inventory_in_first_turn(evidence_items, sample_manif
     assert "[ev_001]" in text
 
 
+def test_sample_roster_names_each_selected_item(request_: TestStepRequest):
+    # A real 2-sample run burned its whole budget: the model was told only
+    # "2 item(s) selected" and had to discover both the sample_ids and what
+    # each item was by trial and error.
+    request_.sample_size = 2
+    request_.population_size = 30
+    request_.samples = [
+        SampleItem(
+            sample_id="1",
+            test_step_id="TS-4.2",
+            identifying_details="invoice number: 2859; payee: Premiere Onboard LLC; amount: 30000",
+        ),
+        SampleItem(
+            sample_id="2",
+            test_step_id="TS-4.2",
+            identifying_details="invoice number: 35713082; payee: Lockton Companies; amount: 11193",
+        ),
+    ]
+    turn = build_user_turn(request_)
+
+    assert "sample_id '1'" in turn and "sample_id '2'" in turn
+    assert "Premiere Onboard LLC" in turn
+    assert "Lockton Companies" in turn
+    # The ids must be presented as what check_sample_coverage expects, so
+    # the model doesn't have to discover them from a failed call.
+    assert "found_evidence_ids" in turn
+    # Their support files were named "sample 2 support" -- matching on
+    # filenames rather than field values is the trap.
+    assert "NOT on a filename" in turn
+
+
+def test_sample_roster_is_capped_on_a_large_sample(request_: TestStepRequest):
+    request_.sample_size = 40
+    request_.samples = [
+        SampleItem(sample_id=str(i), test_step_id="TS-4.2", identifying_details=f"invoice {i}")
+        for i in range(40)
+    ]
+    turn = build_user_turn(request_)
+    assert "and 15 more item(s)" in turn
+
+
 def test_build_user_turn_omits_sample_line_when_unknown(request_: TestStepRequest):
     # Neither sample_size nor population_size set -- must not fabricate a
     # sample-size line out of nothing.
