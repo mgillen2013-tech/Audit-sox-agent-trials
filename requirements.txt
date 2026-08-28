@@ -5,3 +5,4 @@ rank_bm25
 anthropic
 streamlit
 reportlab
+rapidocr-onnxruntime

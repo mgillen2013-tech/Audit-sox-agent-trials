@@ -570,9 +570,13 @@ cost estimate before a run starts.
 button that survives script reruns via `st.session_state`) and the CLI
 (written next to the per-step JSONs).
 
-One generated workpaper file per control, in the **same file type as the
-uploaded PY workpaper** (PY was a PDF → PDF via reportlab; PY was Excel →
-.xlsx via openpyxl). It's a clean generated document with standard workpaper
+One generated workpaper file per control, **Excel by default** (`fmt="pdf"`
+gives a flat reportlab rendering when explicitly asked). Output format used
+to mirror the PY file's type; that was dropped because a PDF precedent then
+silently downgraded this year's deliverable to the flat page rendering, when
+only the xlsx output carries the real structure — a filterable Summary tab,
+one tab per test step, and an exhibits tab per step. It's a clean generated
+document with standard workpaper
 sections — control header, then per test step: conclusion + confidence,
 documentation narrative, procedures performed, evidence citation table,
 sample coverage, IPE status, exceptions, additional support requested, and
@@ -605,6 +609,36 @@ nothing — in a workpaper, "no exceptions" and "we didn't look" must not be
 indistinguishable. The Summary sheet gained IPE status, exception count,
 and open-request count columns so a multi-step control's state is legible
 without opening every sheet.
+
+**Tickmarks on scanned pages (built — `agent/wordboxes.py`):** boxes on a
+native-text PDF come free from pdfplumber's text-layer search. A SCANNED
+page (an E1 screenshot, a photographed invoice) has no text layer, so those
+exhibits could only be embedded whole with the letter parked in a corner.
+Vision OCR gave those pages readable *text* but no coordinates, so it
+didn't help. Local OCR (`rapidocr-onnxruntime` — pip-only, models bundled
+in the wheel, no system binary, works offline) now supplies the missing
+half: a box per detected line, **zero tokens**.
+
+Division of labor is deliberate: Claude vision produces the text that goes
+IN the workpaper (it is the better reader — local OCR misread a real
+invoice line as "Involce no.: 2859"), and local OCR is used ONLY to answer
+*where on the page is that*. Unlike a vision call it MEASURES coordinates
+instead of estimating them, which matters because on audit evidence a box
+40px off, pointing at the wrong field, is worse than no box.
+
+Matching is **anchor-based**, and getting this wrong is the real hazard.
+The model's quote is often a summary, while the page shows raw values — so
+the matcher extracts the distinctive values (amounts, invoice numbers,
+vendor ids, cost centers) and boxes those. Two guards, both from an
+observed failure: amounts are anchored WHOLE (`$30,000.00` → `3000000`,
+never the fragment `000`, which matched every `$10,000.00` line item on a
+real invoice and boxed the wrong amounts), and any anchor matching more
+than two lines is discarded as non-identifying rather than guessed at —
+bare years are dropped for the same reason. Verified on the real scanned
+invoice: boxes land on `Invoice no.: 2859` and both `$30,000.00` totals,
+and on none of the three `$10,000.00` line items. Absent rapidocr, an
+unreadable page, or no confident match all fall back to the whole-page
+exhibit.
 
 **Evidence exhibits with tickmarks (built):** mirroring how a human
 workpaper points at evidence, each citation gets a red tickmark letter

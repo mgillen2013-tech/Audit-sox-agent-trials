@@ -79,9 +79,13 @@ def results() -> dict:
     return {"TS-4.2": {"conclusion": conclusion, "audit_log": []}, "TS-9.9": failed}
 
 
-def test_path_matches_py_file_type(tmp_path: Path):
+def test_excel_is_the_default_regardless_of_py_file_type(tmp_path: Path):
+    # Excel is the deliverable default: it's the only output carrying the
+    # full structure (per-step sheets, exhibits sheet, filterable summary).
+    # Matching the PY file type meant a PDF precedent silently downgraded
+    # this year's workpaper to the flat rendering.
     assert workpaper_path_for("PY_C14.xlsm", "C-14", tmp_path).suffix == ".xlsx"
-    assert workpaper_path_for("PY_C14.pdf", "C-14", tmp_path).suffix == ".pdf"
+    assert workpaper_path_for("PY_C14.pdf", "C-14", tmp_path).suffix == ".xlsx"
     # Control ids with filesystem-hostile characters can't break the filename.
     assert "/" not in workpaper_path_for("PY.pdf", "C/14 (AP)", tmp_path).name
 
@@ -172,12 +176,16 @@ def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path
     assert len(ex_ws._images) == 1
     ex_text = " ".join(str(c.value) for r in ex_ws.iter_rows() for c in r if c.value is not None)
     assert "Evidence exhibits" in ex_text
-    assert "Tickmark letters match" in ex_text
+    # A reviewer looking at a red box shouldn't have to flip back to the
+    # step sheet to learn what it marks -- the legend travels with the page.
+    assert "TICKMARK LEGEND" in ex_text
+    assert "Vendor Number 21022452" in ex_text
+    assert "could not be located" in ex_text  # explains a corner-letter exhibit
 
 
 def test_pdf_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path):
     spec, results, support = annotated_setup
-    path = build_workpaper(spec, results, "PY_Testing_C14.pdf", tmp_path, support_dir=support)
+    path = build_workpaper(spec, results, "PY_Testing_C14.pdf", tmp_path, support_dir=support, fmt="pdf")
 
     with pdfplumber.open(path) as pdf:
         text = "\n".join(page.extract_text() or "" for page in pdf.pages)
@@ -253,7 +261,7 @@ def test_summary_sheet_carries_ipe_and_open_request_counts(spec: dict, results: 
 
 
 def test_pdf_workpaper_contents(spec: dict, results: dict, tmp_path: Path):
-    path = build_workpaper(spec, results, "PY_Testing_C14.pdf", tmp_path)
+    path = build_workpaper(spec, results, "PY_Testing_C14.pdf", tmp_path, fmt="pdf")
 
     assert path.suffix == ".pdf"
     with pdfplumber.open(path) as pdf:

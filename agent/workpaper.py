@@ -2,8 +2,12 @@
 
 Takes the structured results a control run already produced (ConclusionOutput
 per test step, or the preserved failure info for a step that aborted) and
-writes one workpaper file per control, matching the PY workpaper's file type:
-PY was a PDF -> generate a PDF; PY was Excel -> generate .xlsx. This is a
+writes one workpaper file per control. Excel by default -- SOX testing lives
+in workbooks, and only the xlsx output carries the full structure (a
+filterable summary, one sheet per test step, an exhibits sheet per step).
+PDF is available via fmt="pdf" as a flat read-only rendering, but is no
+longer inferred from the PY file's type: matching PY meant a PDF precedent
+silently downgraded this year's deliverable. This is a
 CLEAN generated document with standard workpaper sections, not a cell-level
 edit of the PY file -- per the design decision that a predictable layout
 beats a fragile in-place edit of an arbitrary workbook.
@@ -114,20 +118,39 @@ def _render_pdf_exhibit(
     import pdfplumber
     from PIL import ImageDraw
 
+    from agent.wordboxes import find_text_boxes
+
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[page_num - 1]
         pim = page.to_image(resolution=_PDF_RENDER_DPI)
+        scale = _PDF_RENDER_DPI / 72.0
+        # Rendered page, used only if a mark needs the local-OCR fallback --
+        # rendering is the expensive part, so do it at most once per page.
+        page_render: Any | None = None
 
         letter_positions: list[tuple[str, tuple[float, float] | None]] = []
         for letter, item, quote in marks:
             rects = _search_rects(page, quote) or _item_rect(page, item)
+
+            if not rects:
+                # No text layer to search (a scanned page / E1 screenshot).
+                # Local OCR measures where the quoted values actually sit;
+                # without this the letter just parks in the corner pointing
+                # at nothing. Pixel boxes convert back to PDF points so
+                # everything draws through the same path below.
+                if page_render is None:
+                    page_render = pim.original.convert("RGB")
+                rects = [
+                    (x0 / scale, y0 / scale, x1 / scale, y1 / scale)
+                    for x0, y0, x1, y1 in find_text_boxes(page_render, quote)
+                ]
+
             for r in rects:
                 pim.draw_rect(r, fill=None, stroke="red", stroke_width=3)
             letter_positions.append((letter, (rects[0][0], rects[0][1]) if rects else None))
 
         pil = pim.annotated.convert("RGB")
         draw = ImageDraw.Draw(pil)
-        scale = _PDF_RENDER_DPI / 72.0
         unanchored = 0
         for letter, pos in letter_positions:
             if pos is not None:
@@ -199,10 +222,15 @@ def _build_step_exhibits(
 
 
 def workpaper_path_for(py_testing_filename: str, control_id: str, out_dir: Path) -> Path:
-    """PY was a PDF -> .pdf out; anything else (the Excel family) -> .xlsx."""
-    ext = ".pdf" if Path(py_testing_filename).suffix.lower() == ".pdf" else ".xlsx"
+    """Excel by default -- SOX testing lives in workbooks, and only the xlsx
+    output carries the full structure (per-step sheets, an exhibits sheet,
+    a filterable summary). PDF is produced only when explicitly asked for
+    via `fmt`, not inferred from the PY file's type: matching PY meant a
+    PDF precedent silently downgraded this year's deliverable to the
+    flat-page rendering.
+    """
     safe_control = re.sub(r"[^\w.-]+", "_", control_id) or "control"
-    return out_dir / f"{safe_control}_CY_Testing_DRAFT{ext}"
+    return out_dir / f"{safe_control}_CY_Testing_DRAFT.xlsx"
 
 
 def build_workpaper(
@@ -211,8 +239,12 @@ def build_workpaper(
     py_testing_filename: str,
     out_dir: Path,
     support_dir: Path | None = None,
+    fmt: str = "xlsx",
 ) -> Path:
     """Writes the control's CY workpaper and returns the written path.
+
+    fmt: "xlsx" (default) or "pdf". Excel is the default deliverable and the
+    only one carrying the full structure; PDF is a flat read-only rendering.
 
     spec: the same control spec dict run_control uses (control_id,
     control_objective_ref, control_objective_text, test_steps).
@@ -230,6 +262,8 @@ def build_workpaper(
     re-extraction fails) the workpaper is text-only, never broken.
     """
     out_path = workpaper_path_for(py_testing_filename, spec["control_id"], out_dir)
+    if fmt == "pdf":
+        out_path = out_path.with_suffix(".pdf")
     step_texts = {s["test_step_id"]: s.get("test_step_text", "") for s in spec.get("test_steps", [])}
 
     evidence_map: dict[str, EvidenceItem] = {}
@@ -353,11 +387,18 @@ def _build_xlsx(
             ws.cell(r, 7, len(conclusion.additional_support_requests))
         ws.cell(r, 8, _sheet_title(test_step_id))
 
+    # Header stays visible and filterable on a control with many steps.
+    last_row = ws.max_row
+    if last_row > header_row:
+        ws.auto_filter.ref = f"A{header_row}:H{last_row}"
+    ws.freeze_panes = ws.cell(header_row + 1, 1)
+
     for test_step_id, result in results.items():
         step_ws = wb.create_sheet(_sheet_title(test_step_id))
         letters, images, excerpts = _write_step_sheet(
             step_ws, test_step_id, step_texts.get(test_step_id, ""), result, evidence_map, support_dir
         )
+        citations = [] if "error" in result else result["conclusion"].evidence_citations
         # Exhibits live on their own sheet: inline, a couple of full-page
         # renders pushed the conclusion, IPE status, and open requests
         # ~110 rows down the sheet, so a reviewer had to scroll past the
@@ -365,7 +406,9 @@ def _build_xlsx(
         # top-to-bottom; this is the appendix.
         if images or excerpts:
             ex_ws = wb.create_sheet(_exhibit_sheet_title(test_step_id))
-            _write_exhibit_sheet(ex_ws, test_step_id, images, excerpts, _live_buffers)
+            _write_exhibit_sheet(
+                ex_ws, test_step_id, images, excerpts, _live_buffers, letters, citations
+            )
 
     wb.save(out_path)
 
@@ -376,19 +419,45 @@ def _write_exhibit_sheet(
     images: list[tuple[str, BytesIO, tuple[int, int]]],
     excerpts: list[tuple[str, list[str]]],
     live_buffers: list[BytesIO],
+    letters: list[str],
+    citations: list[EvidenceCitation],
 ) -> None:
-    ws.column_dimensions["A"].width = 30
-    for col in "BCDEF":
-        ws.column_dimensions[col].width = 26
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 40
+    for col in "CDEF":
+        ws.column_dimensions[col].width = 30
 
     from openpyxl.drawing.image import Image as XLImage
 
     row = 1
     ws.cell(row, 1, f"Evidence exhibits — test step {test_step_id}").font = Font(bold=True, size=12)
-    row += 1
-    ws.cell(row, 1, "Tickmark letters match the 'Evidence cited' table on the test step sheet.").font = Font(
+    row += 2
+
+    # Tickmark legend: a reviewer looking at a red box on a page shouldn't
+    # have to flip back to the step sheet to learn what it marks.
+    if letters and citations:
+        ws.cell(row, 1, "TICKMARK LEGEND").font = Font(bold=True)
+        row += 1
+        for col, name in enumerate(["Tickmark", "Marks", "Source"], 1):
+            c = ws.cell(row, col, name)
+            c.font = Font(bold=True)
+            c.fill = _HEADER_FILL
+        row += 1
+        for letter, cit in zip(letters, citations):
+            c = ws.cell(row, 1, letter)
+            c.font = Font(bold=True, color="AA0000")
+            ws.cell(row, 2, cit.quote_or_summary).alignment = Alignment(wrap_text=True, vertical="top")
+            ws.cell(row, 3, f"{cit.source_file} ({cit.location})").alignment = Alignment(
+                wrap_text=True, vertical="top"
+            )
+            row += 1
+        row += 1
+
+    ws.cell(row, 1, "Red boxes mark the cited value on the page. A letter in the corner means the page").font = Font(
         italic=True
     )
+    row += 1
+    ws.cell(row, 1, "is the exhibit but the specific value could not be located on it.").font = Font(italic=True)
     row += 2
 
     for caption, buf, (w, h) in images:

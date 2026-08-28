@@ -346,10 +346,11 @@ if run_clicked:
                 _render_result(test_step_id, result)
                 all_results[test_step_id] = result
 
-            # Generate the CY workpaper file (same file type as the PY
-            # upload) while the temp dir still exists, and keep only the
-            # BYTES -- the temp dir is gone the moment this with-block
-            # closes, and the download button needs to survive reruns.
+            # Generate the CY workpaper (Excel) while the temp dir still
+            # exists -- exhibits re-read the support files from it -- and
+            # keep only the BYTES: the temp dir is gone the moment this
+            # with-block closes, and the download button must survive
+            # Streamlit's reruns.
             wp_bytes = wp_name = None
             try:
                 wp_path = build_workpaper(spec, all_results, py_testing_file.name, tmp_dir, support_dir=tmp_dir)
@@ -381,6 +382,7 @@ if _out:
             ),
         )
         st.caption(
-            "Same file type as the PY workpaper you uploaded. Stamped DRAFT -- "
-            "review and approve before it goes anywhere."
+            "Excel workbook: a Summary tab, one tab per test step, and an exhibits "
+            "tab per step with the cited evidence boxed and tickmarked. Stamped "
+            "DRAFT -- review and approve before it goes anywhere."
         )
