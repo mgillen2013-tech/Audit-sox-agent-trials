@@ -276,7 +276,32 @@ the same document for different fields."""
 
 
 _MAX_ROSTER_ITEMS = 25
-_MAX_ROSTER_DETAIL_CHARS = 240
+# Budgeted across the WHOLE roster rather than a fixed cap per item. A real
+# E1 sample row is ~560 chars over 21 columns, and a flat 240-char cap
+# truncated it mid-record -- keeping "Discount Available: 0" and cutting
+# off the invoice number, invoice date and business unit, i.e. exactly the
+# fields a tickmark or a search would key on. Budgeting by total means the
+# common small sample (1-3 items) gets its records in full, and only a
+# genuinely large sample gets abbreviated.
+_MAX_ROSTER_TOTAL_CHARS = 3_000
+_MIN_ROSTER_DETAIL_CHARS = 120
+
+# Values that carry no identifying information -- zero discounts, blank
+# void dates, empty PO numbers. Dropped before budgeting so the characters
+# go to fields that actually distinguish one sampled item from another.
+_UNINFORMATIVE_VALUES = {"", "0", "0.0", "0.00", "none", "n/a"}
+
+
+def _sample_detail(item: SampleItem) -> str:
+    fields = item.key_fields
+    if not fields:
+        return " ".join(item.identifying_details.split())
+    parts = [
+        f"{k}: {v}"
+        for k, v in fields.items()
+        if str(v).strip().lower() not in _UNINFORMATIVE_VALUES
+    ]
+    return "; ".join(parts) if parts else " ".join(item.identifying_details.split())
 
 
 def _render_sample_roster(samples: list[SampleItem]) -> str:
@@ -288,11 +313,14 @@ def _render_sample_roster(samples: list[SampleItem]) -> str:
     if not samples:
         return ""
 
+    shown = samples[:_MAX_ROSTER_ITEMS]
+    per_item = max(_MIN_ROSTER_DETAIL_CHARS, _MAX_ROSTER_TOTAL_CHARS // len(shown))
+
     lines = []
-    for item in samples[:_MAX_ROSTER_ITEMS]:
-        detail = " ".join(item.identifying_details.split())
-        if len(detail) > _MAX_ROSTER_DETAIL_CHARS:
-            detail = detail[:_MAX_ROSTER_DETAIL_CHARS] + "..."
+    for item in shown:
+        detail = _sample_detail(item)
+        if len(detail) > per_item:
+            detail = detail[:per_item] + "..."
         lines.append(f"  sample_id {item.sample_id!r}: {detail}")
     if len(samples) > _MAX_ROSTER_ITEMS:
         lines.append(f"  ...and {len(samples) - _MAX_ROSTER_ITEMS} more item(s).")
@@ -724,15 +752,18 @@ def run_test_step(
         tool_use_blocks = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 
         if not tool_use_blocks:
+            nudge = (
+                "Every turn must end in a tool call. Use search_cy_support to "
+                "keep gathering evidence, or submit_conclusion when ready."
+            )
+            # Both, not either: a truncated plain-text turn still made no
+            # tool call, and dropping the forced-close instruction here let
+            # the model reply with shorter prose and burn another turn
+            # without ever calling a tool.
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        _TRUNCATION_NOTICE
-                        if was_truncated
-                        else "Every turn must end in a tool call. Use search_cy_support to "
-                        "keep gathering evidence, or submit_conclusion when ready."
-                    ),
+                    "content": f"{_TRUNCATION_NOTICE}\n\n{nudge}" if was_truncated else nudge,
                 }
             )
             if on_turn is not None:

@@ -309,6 +309,46 @@ def test_sample_roster_names_each_selected_item(request_: TestStepRequest):
     assert "NOT on a filename" in turn
 
 
+def test_sample_roster_keeps_identifying_fields_over_filler(request_: TestStepRequest):
+    # A real E1 sample row is ~560 chars over 21 columns. A flat 240-char
+    # cap truncated it mid-record, keeping "Discount Available: 0" and
+    # cutting off the invoice number, invoice date and business unit --
+    # exactly the fields the model needs to match evidence to an item.
+    key_fields = {
+        "Sample #": "1",
+        "Match Doc Ty F0413.DCTM": "PK",
+        "Check/ Item F0413.DOCM": "881477",
+        "Payee Number F0413.PYE": "Premiere Onboard LLC",
+        "Total Payment Amount F0413.PAAP": "30000",
+        "Document Number F0414.DOC": "11743472",
+        "Discount Available F0414.ADSC": "0",
+        "Discount Taken F0414.ADSA": "0",
+        "PO Doc. Number F0414.PO": "",
+        "Business Unit F0414.MCU": "Talent Acquisition",
+        "Invoice Date F0411.DIVJ": "2025-09-22 00:00:00",
+        "Invoice Number F0411.VINV": "2859",
+        "Batch Date F0411.DICJ": "2025-10-07 00:00:00",
+    }
+    request_.sample_size = 1
+    request_.samples = [
+        SampleItem(
+            sample_id="1",
+            test_step_id="TS-4.2",
+            identifying_details="; ".join(f"{k}: {v}" for k, v in key_fields.items()),
+            key_fields=key_fields,
+        )
+    ]
+    turn = build_user_turn(request_)
+
+    assert "Invoice Number F0411.VINV: 2859" in turn
+    assert "Batch Date F0411.DICJ" in turn
+    assert "Talent Acquisition" in turn
+    # Zero/blank fields carry no identifying information and shouldn't eat
+    # the character budget.
+    assert "Discount Available" not in turn
+    assert "PO Doc. Number" not in turn
+
+
 def test_sample_roster_is_capped_on_a_large_sample(request_: TestStepRequest):
     request_.sample_size = 40
     request_.samples = [
