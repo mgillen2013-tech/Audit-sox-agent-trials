@@ -74,7 +74,7 @@ def _render_page_png(pdf_path: Path, page_num: int) -> bytes:
     return buf.getvalue()
 
 
-def _transcribe(png: bytes, client: Any, model: str) -> str:
+def _transcribe(png: bytes, client: Any, model: str) -> tuple[str, int]:
     message = {
         "role": "user",
         "content": [
@@ -96,9 +96,15 @@ def _transcribe(png: bytes, client: Any, model: str) -> str:
     response = (
         client.messages.create(**kwargs) if hasattr(client, "messages") else client.create_message(**kwargs)
     )
-    return "\n".join(
+    text = "\n".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     ).strip()
+    # Same cost-weighted units the tool loop's spending cap uses, so OCR
+    # spend is reported on the same scale as everything else rather than in
+    # a second, incomparable currency.
+    from agent.loop import _usage_tokens
+
+    return text, _usage_tokens(getattr(response, "usage", None))
 
 
 def ocr_image_items(
@@ -107,20 +113,28 @@ def ocr_image_items(
     client: Any,
     model: str,
     on_page: Any = None,
-) -> tuple[list[EvidenceItem], int]:
+) -> tuple[list[EvidenceItem], int, int]:
     """Fills in extracted_text for every image_ocr item by transcribing its
-    page. Returns (new item list, count actually transcribed).
+    page. Returns (new item list, count transcribed, cost-weighted tokens
+    spent).
+
+    The token total is returned rather than swallowed because this runs
+    OUTSIDE run_test_step's spending cap -- it is per-control, before the
+    tool loop starts, so the cap can neither see nor stop it. A control
+    with many scanned pages could otherwise spend real money with nothing
+    on screen accounting for it.
 
     Items are replaced, not mutated, and non-image items pass through
     untouched, so the caller's evidence_ids and ordering are preserved
     exactly -- that matters because agent/workpaper.py re-extracts to map
     evidence_ids back to source regions for exhibits.
 
-    on_page: optional callback(source_file, page_num, ok: bool) for
-    progress reporting while pages are being transcribed.
+    on_page: optional callback(source_file, page_num, ok, tokens_so_far)
+    for progress and running-cost reporting while pages are transcribed.
     """
     out: list[EvidenceItem] = []
     transcribed = 0
+    tokens_used = 0
 
     for item in items:
         if item.source_type != "image_ocr" or item.extracted_text:
@@ -130,16 +144,17 @@ def ocr_image_items(
         page_num = _page_number(item.location)
         try:
             png = _render_page_png(source_dir / item.source_file, page_num)
-            text = _transcribe(png, client, model)
+            text, tokens = _transcribe(png, client, model)
+            tokens_used += tokens
         except Exception:  # noqa: BLE001 -- a failed OCR degrades to the placeholder, never breaks the run
             if on_page is not None:
-                on_page(item.source_file, page_num, False)
+                on_page(item.source_file, page_num, False, tokens_used)
             out.append(item)
             continue
 
         if not text:
             if on_page is not None:
-                on_page(item.source_file, page_num, False)
+                on_page(item.source_file, page_num, False, tokens_used)
             out.append(item)
             continue
 
@@ -153,6 +168,6 @@ def ocr_image_items(
         )
         transcribed += 1
         if on_page is not None:
-            on_page(item.source_file, page_num, True)
+            on_page(item.source_file, page_num, True, tokens_used)
 
-    return out, transcribed
+    return out, transcribed, tokens_used

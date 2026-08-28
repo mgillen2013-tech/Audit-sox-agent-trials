@@ -66,7 +66,7 @@ def iter_control_results(
     max_total_tokens: int = MAX_TOTAL_TOKENS,
     on_turn: "Callable[[str, int, int, list], None] | None" = None,
     ocr_scanned_pages: bool = True,
-    on_ocr: "Callable[[str, int, bool], None] | None" = None,
+    on_ocr: "Callable[[str, int, bool, int], None] | None" = None,
 ) -> Iterator[tuple[str, dict]]:
     """The testable core -- no file writing, no env var reads. Yields
     (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
@@ -107,7 +107,7 @@ def iter_control_results(
     # and payment PDFs were image-only and unreadable. One vision call per
     # such page, once per run (not per turn), before the loop starts.
     if ocr_scanned_pages:
-        cy_evidence, _ = ocr_image_items(cy_evidence, base_dir, client, model, on_page=on_ocr)
+        cy_evidence, _, _ = ocr_image_items(cy_evidence, base_dir, client, model, on_page=on_ocr)
 
     if sample_manifests is None:
         sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])

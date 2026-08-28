@@ -60,7 +60,7 @@ def test_scanned_page_gets_transcribed_and_marked(scanned_pdf: Path, tmp_path: P
     assert items[0].extracted_text is None
 
     client = _OCRClient()
-    out, count = ocr_image_items(items, tmp_path, client, "claude-opus-5")
+    out, count, _tok = ocr_image_items(items, tmp_path, client, "claude-opus-5")
 
     assert count == 1
     assert "INVOICE 2859" in out[0].extracted_text
@@ -91,7 +91,7 @@ def test_image_is_actually_sent_to_the_model(scanned_pdf: Path, tmp_path: Path):
 
 def test_ocr_failure_degrades_to_placeholder(scanned_pdf: Path, tmp_path: Path):
     items = extract(scanned_pdf)
-    out, count = ocr_image_items(items, tmp_path, _OCRClient(raises=True), "claude-opus-5")
+    out, count, _tok = ocr_image_items(items, tmp_path, _OCRClient(raises=True), "claude-opus-5")
 
     assert count == 0
     assert out[0].extracted_text is None
@@ -99,7 +99,7 @@ def test_ocr_failure_degrades_to_placeholder(scanned_pdf: Path, tmp_path: Path):
 
 
 def test_empty_transcription_is_not_recorded_as_evidence(scanned_pdf: Path, tmp_path: Path):
-    out, count = ocr_image_items(extract(scanned_pdf), tmp_path, _OCRClient(texts=[""]), "claude-opus-5")
+    out, count, _tok = ocr_image_items(extract(scanned_pdf), tmp_path, _OCRClient(texts=[""]), "claude-opus-5")
     assert count == 0
     assert out[0].extracted_text is None
 
@@ -117,7 +117,7 @@ def test_non_image_items_pass_through_untouched(tmp_path: Path):
         preview_ref="recon.xlsx!Sheet1!A1:B2",
     )
     client = _OCRClient()
-    out, count = ocr_image_items([native], tmp_path, client, "claude-opus-5")
+    out, count, _tok = ocr_image_items([native], tmp_path, client, "claude-opus-5")
 
     assert count == 0
     assert client.calls == []
@@ -131,6 +131,6 @@ def test_progress_callback_reports_each_page(scanned_pdf: Path, tmp_path: Path):
         tmp_path,
         _OCRClient(),
         "claude-opus-5",
-        on_page=lambda f, p, ok: seen.append((f, p, ok)),
+        on_page=lambda f, p, ok, tok: seen.append((f, p, ok)),
     )
     assert seen == [("invoice_2859.pdf", 1, True)]

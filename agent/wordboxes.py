@@ -131,8 +131,17 @@ def _anchors(quote: str) -> tuple[str, ...]:
     return tuple(sorted(found, key=len, reverse=True))
 
 
-def find_text_boxes(pil_image: Any, quote: str) -> list[tuple[float, float, float, float]]:
-    """Pixel boxes on pil_image where `quote`'s distinctive values appear.
+def find_text_boxes(
+    lines: list[tuple[tuple[float, float, float, float], str, float]], quote: str
+) -> list[tuple[float, float, float, float]]:
+    """Pixel boxes among already-OCR'd `lines` where `quote`'s distinctive
+    values appear.
+
+    Takes lines rather than an image on purpose: OCR is by far the expensive
+    step (~1.3s per page against ~0.06s to render it), and a page usually
+    carries several tickmarks. Reading the page once and matching each quote
+    against the result keeps a 3-citation page at one OCR pass instead of
+    three.
 
     Matching is anchor-based rather than whole-string: the quote comes from
     the model and is often a summary or a stitched-together excerpt, while
@@ -140,7 +149,6 @@ def find_text_boxes(pil_image: Any, quote: str) -> list[tuple[float, float, floa
     actually sit beats trying to match a sentence that was never printed on
     the page verbatim.
     """
-    lines = ocr_line_boxes(pil_image)
     if not lines:
         return []
 

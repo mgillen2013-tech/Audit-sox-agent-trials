@@ -118,15 +118,16 @@ def _render_pdf_exhibit(
     import pdfplumber
     from PIL import ImageDraw
 
-    from agent.wordboxes import find_text_boxes
+    from agent.wordboxes import find_text_boxes, ocr_line_boxes
 
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[page_num - 1]
         pim = page.to_image(resolution=_PDF_RENDER_DPI)
         scale = _PDF_RENDER_DPI / 72.0
-        # Rendered page, used only if a mark needs the local-OCR fallback --
-        # rendering is the expensive part, so do it at most once per page.
-        page_render: Any | None = None
+        # OCR of this page, read at most ONCE and reused by every mark on
+        # it. OCR (~1.3s) dwarfs rendering (~0.06s), so doing it per mark
+        # made a 3-citation page three times slower for identical output.
+        ocr_lines: list | None = None
 
         letter_positions: list[tuple[str, tuple[float, float] | None]] = []
         for letter, item, quote in marks:
@@ -138,11 +139,11 @@ def _render_pdf_exhibit(
                 # without this the letter just parks in the corner pointing
                 # at nothing. Pixel boxes convert back to PDF points so
                 # everything draws through the same path below.
-                if page_render is None:
-                    page_render = pim.original.convert("RGB")
+                if ocr_lines is None:
+                    ocr_lines = ocr_line_boxes(pim.original.convert("RGB"))
                 rects = [
                     (x0 / scale, y0 / scale, x1 / scale, y1 / scale)
-                    for x0, y0, x1, y1 in find_text_boxes(page_render, quote)
+                    for x0, y0, x1, y1 in find_text_boxes(ocr_lines, quote)
                 ]
 
             for r in rects:

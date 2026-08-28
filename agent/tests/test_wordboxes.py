@@ -1,9 +1,10 @@
 """Tickmark box-location tests.
 
-The OCR engine itself is stubbed here rather than run: these tests are about
-the matching logic (which is where a box lands on the WRONG field), and real
-OCR is slow and unnecessary to prove that. The values in the stub are taken
-verbatim from a real scanned invoice.
+find_text_boxes takes already-OCR'd lines, so these tests feed it fixed
+lines rather than running the engine: they are about the matching logic --
+which is where a box ends up on the WRONG field -- and real OCR is slow and
+proves nothing extra here. The line values are taken verbatim from a real
+scanned invoice.
 """
 
 from __future__ import annotations
@@ -32,12 +33,6 @@ _REAL_INVOICE_LINES = [
 ]
 
 
-@pytest.fixture
-def stub_ocr(monkeypatch):
-    def _install(lines):
-        monkeypatch.setattr(wordboxes, "ocr_line_boxes", lambda img: lines)
-
-    return _install
 
 
 # --------------------------------------------------------------------------
@@ -76,9 +71,8 @@ def test_short_numbers_are_not_anchors():
 # --------------------------------------------------------------------------
 
 
-def test_box_lands_on_the_cited_total_not_similar_line_items(stub_ocr):
-    stub_ocr(_REAL_INVOICE_LINES)
-    boxes = find_text_boxes(object(), "Invoice payment amount $30,000.00")
+def test_box_lands_on_the_cited_total_not_similar_line_items():
+    boxes = find_text_boxes(_REAL_INVOICE_LINES, "Invoice payment amount $30,000.00")
 
     assert boxes  # something was located
     ten_thousand_boxes = [b for b in boxes if b[1] in (610, 640, 670)]
@@ -86,31 +80,29 @@ def test_box_lands_on_the_cited_total_not_similar_line_items(stub_ocr):
     assert (767, 794, 862, 818) in boxes
 
 
-def test_ambiguous_anchor_is_dropped_rather_than_guessed(stub_ocr):
+def test_ambiguous_anchor_is_dropped_rather_than_guessed():
     # An anchor matching many lines describes the page, not a value on it --
     # on audit evidence, no box beats a box on the wrong field.
-    stub_ocr([((0, i * 20, 50, i * 20 + 15), "PV 11743472", 0.99) for i in range(6)])
-    assert find_text_boxes(object(), "voucher 11743472") == []
+    many = [((0, i * 20, 50, i * 20 + 15), "PV 11743472", 0.99) for i in range(6)]
+    assert find_text_boxes(many, "voucher 11743472") == []
 
 
-def test_low_confidence_detections_are_ignored(stub_ocr):
-    stub_ocr(_REAL_INVOICE_LINES)
-    assert find_text_boxes(object(), "low confidence smudge 999999") == []
+def test_low_confidence_detections_are_ignored():
+    assert find_text_boxes(_REAL_INVOICE_LINES, "low confidence smudge 999999") == []
 
 
-def test_prose_quote_falls_back_to_literal_fragment(stub_ocr):
-    stub_ocr(_REAL_INVOICE_LINES)
-    boxes = find_text_boxes(object(), "Approved by Diane Milosevic on 10/1")
+def test_prose_quote_falls_back_to_literal_fragment():
+    boxes = find_text_boxes(_REAL_INVOICE_LINES, "Approved by Diane Milosevic on 10/1")
     assert (300, 1200, 600, 1230) in boxes
 
 
-def test_no_match_returns_nothing(stub_ocr):
-    stub_ocr(_REAL_INVOICE_LINES)
-    assert find_text_boxes(object(), "Purchase order 99887766") == []
+def test_no_match_returns_nothing():
+    assert find_text_boxes(_REAL_INVOICE_LINES, "Purchase order 99887766") == []
 
 
 def test_missing_ocr_engine_degrades_quietly(monkeypatch):
     # rapidocr absent must mean "whole-page exhibit", never a crash.
     monkeypatch.setattr(wordboxes, "_ocr_engine", lambda: None)
     assert wordboxes.ocr_line_boxes(object()) == []
-    assert find_text_boxes(object(), "$30,000.00") == []
+    # No lines read -> whole-page exhibit, never a crash.
+    assert find_text_boxes([], "$30,000.00") == []

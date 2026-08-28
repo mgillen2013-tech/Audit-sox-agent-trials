@@ -318,10 +318,13 @@ if run_clicked:
             # visibility (and no cost signal) while the money is being spent.
             progress = st.empty()
 
-            def _show_ocr(source_file: str, page_num: int, ok: bool) -> None:
+            def _show_ocr(source_file: str, page_num: int, ok: bool, tokens: int) -> None:
+                # OCR runs before the tool loop, so its spend sits OUTSIDE
+                # the per-step cap and can't trip it -- showing the running
+                # total is what keeps it from being invisible money.
                 progress.info(
                     f"{'Transcribed' if ok else 'Could not transcribe'} scanned page — "
-                    f"{source_file} p.{page_num}"
+                    f"{source_file} p.{page_num} · ~{tokens:,} cost-weighted tokens on OCR so far"
                 )
 
             def _show_progress(step_id: str, turn: int, tokens: int, log: list) -> None:

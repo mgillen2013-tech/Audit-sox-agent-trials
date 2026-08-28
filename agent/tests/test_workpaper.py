@@ -183,6 +183,42 @@ def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path
     assert "could not be located" in ex_text  # explains a corner-letter exhibit
 
 
+def test_scanned_page_is_ocrd_once_not_once_per_tickmark(annotated_setup, tmp_path, monkeypatch):
+    # OCR (~1.3s/page) dwarfs rendering (~0.06s). Calling it per mark made a
+    # multi-citation page several times slower for identical output.
+    from agent import wordboxes
+
+    calls = {"n": 0}
+    real = wordboxes.ocr_line_boxes
+
+    def counting(img):
+        calls["n"] += 1
+        return real(img)
+
+    monkeypatch.setattr(wordboxes, "ocr_line_boxes", counting)
+
+    spec, results, support = annotated_setup
+    conclusion = results["TS-4.2"]["conclusion"]
+    # Three citations, all on the same page, none findable in the text layer
+    # so every one falls through to the OCR path.
+    cit = conclusion.evidence_citations[0]
+    results = {
+        "TS-4.2": {
+            "conclusion": conclusion.model_copy(
+                update={
+                    "evidence_citations": [
+                        cit.model_copy(update={"quote_or_summary": f"unfindable value {n}"}) for n in range(3)
+                    ]
+                }
+            ),
+            "audit_log": [],
+        }
+    }
+
+    build_workpaper(spec, results, "PY.xlsx", tmp_path, support_dir=support)
+    assert calls["n"] <= 1, f"OCR ran {calls['n']} times for one page"
+
+
 def test_pdf_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path):
     spec, results, support = annotated_setup
     path = build_workpaper(spec, results, "PY_Testing_C14.pdf", tmp_path, support_dir=support, fmt="pdf")
