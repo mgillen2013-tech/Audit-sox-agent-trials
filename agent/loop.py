@@ -60,6 +60,27 @@ MAX_TOOL_ITERATIONS = 15
 # test step -- the ceiling for a runaway, well above any healthy run.
 MAX_TOTAL_TOKENS = 300_000
 
+# Output ceiling per turn. 4096 was too small for a real submit_conclusion:
+# a 2-sample step produced a multi-paragraph narrative plus nine evidence
+# citations with full quotes, and the JSON was cut off mid-object. The
+# fields at the END of the schema (confidence, confidence_rationale,
+# additional_support_requests, exceptions) simply never arrived, so
+# validation rejected it as "Field required" -- which reads like the model
+# forgot them rather than that it was truncated. It retried with a LONGER
+# narrative each time and lost one more field, burning ~60K cost-weighted
+# tokens on three failures that could never have succeeded.
+MAX_OUTPUT_TOKENS = 16_000
+
+_TRUNCATION_NOTICE = (
+    "NOTE: your previous response hit the output length limit and was cut off "
+    "mid-tool-call. Any 'Field required' error above is a symptom of that "
+    "truncation, NOT of a field you forgot -- repeating the same call with a "
+    "longer narrative will fail the same way. Resubmit with a materially "
+    "shorter response: condense the narrative, and keep each "
+    "quote_or_summary to the specific value or sentence that matters rather "
+    "than reproducing a whole document."
+)
+
 # Section 0 of the design doc: this block goes into the cacheable system
 # prompt prefix so the model reads company vocabulary correctly instead of
 # treating it as unusual. Keep this in sync with docs/cy_testing_agent_design.md
@@ -677,7 +698,7 @@ def run_test_step(
         response = _call_model(
             client,
             model=model,
-            max_tokens=4096,
+            max_tokens=MAX_OUTPUT_TOKENS,
             system=system,
             tools=TOOLS,
             messages=messages,
@@ -697,6 +718,8 @@ def run_test_step(
                 turns_used=turn,
             )
 
+        was_truncated = getattr(response, "stop_reason", None) == "max_tokens"
+
         messages.append({"role": "assistant", "content": response.content})
         tool_use_blocks = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 
@@ -705,7 +728,9 @@ def run_test_step(
                 {
                     "role": "user",
                     "content": (
-                        "Every turn must end in a tool call. Use search_cy_support to "
+                        _TRUNCATION_NOTICE
+                        if was_truncated
+                        else "Every turn must end in a tool call. Use search_cy_support to "
                         "keep gathering evidence, or submit_conclusion when ready."
                     ),
                 }
@@ -738,6 +763,14 @@ def run_test_step(
             )
             if conclusion is not None:
                 final_conclusion = conclusion
+
+        if was_truncated and final_conclusion is None:
+            # The tool call itself was cut off mid-JSON, so the validation
+            # error above names whichever schema fields fell off the end.
+            # Say so explicitly -- left to interpret "Field required" alone,
+            # a real run retried three times with an ever-LONGER narrative,
+            # losing one more field each time.
+            tool_results.append({"type": "text", "text": _TRUNCATION_NOTICE})
 
         messages.append({"role": "user", "content": tool_results})
 

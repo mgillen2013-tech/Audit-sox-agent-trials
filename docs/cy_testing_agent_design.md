@@ -161,7 +161,25 @@ stops treating a small-but-intentional sample as a red flag; when it's
 unknown, it explicitly tells the model to use
 `request_additional_support` instead of guessing.
 
-**Sample roster (built, after a 2-sample run exhausted its budget).** The
+**Output truncation (built — the actual cause of a 2-sample run
+exhausting its budget).** `max_tokens` was 4096. A real 2-sample
+`submit_conclusion` — multi-paragraph narrative plus nine evidence
+citations with full quotes — ran past that, so the tool call's JSON was
+cut off mid-object and the fields at the END of the schema (`confidence`,
+`confidence_rationale`, `additional_support_requests`, `exceptions`) never
+arrived. Validation correctly reported "Field required", but that reads
+like the model forgot them; unable to tell it had been truncated, it
+retried with a *longer* narrative and lost one more field each time.
+Three dead submits, ~60K cost-weighted tokens (output bills 5×), no
+conclusion. Fixed two ways: `MAX_OUTPUT_TOKENS` raised to 16,000, and any
+turn ending with `stop_reason == "max_tokens"` now gets an explicit notice
+saying the response was cut off, that the "Field required" error is a
+symptom of truncation rather than a forgotten field, and to resubmit
+something materially shorter. Worth remembering when reading a cost
+number: a verbose conclusion is genuinely expensive, since output is
+weighted 5× — but a truncated one costs the same and yields nothing.
+
+**Sample roster (built, after the same run).** The
 `Sample:` line above gave a bare COUNT and nothing else — the model was
 never shown the `sample_id`s or `identifying_details`, even though the
 manifest carries both for every item. With one sample that was survivable:

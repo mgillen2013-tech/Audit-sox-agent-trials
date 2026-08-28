@@ -191,6 +191,93 @@ def test_run_test_step_puts_inventory_in_first_turn(evidence_items, sample_manif
     assert "[ev_001]" in text
 
 
+def test_truncated_tool_call_is_explained_not_left_as_field_required(
+    evidence_items, sample_manifest, request_
+):
+    # A real run died here: submit_conclusion's JSON was cut off at the
+    # output limit, so the schema's LAST fields (confidence,
+    # confidence_rationale, additional_support_requests, exceptions) never
+    # arrived and validation reported "Field required". Reading that as
+    # forgotten fields, the model retried with a LONGER narrative and lost
+    # one more field each time -- three dead submits, ~60K weighted tokens.
+    truncated_input = {
+        "test_step_id": "TS-4.2",
+        "control_objective_ref": "CO-4",
+        "conclusion": "satisfied",
+        "narrative": "A very long narrative that ran past the output limit...",
+        "evidence_citations": [],
+        "procedures_performed": ["Inspected support."],
+        # confidence / confidence_rationale / exceptions /
+        # additional_support_requests never made it out of the model.
+    }
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "submit_conclusion", truncated_input)], stop_reason="max_tokens"),
+            response(
+                [
+                    tool_use(
+                        "t2",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+
+    conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
+
+    assert audit_log[0].is_error is True
+    # The retry turn must carry an explicit truncation explanation.
+    retry_messages = client.calls[1]["messages"]
+    assert any("hit the output length limit" in _message_text(m["content"]) for m in retry_messages)
+    assert conclusion.conclusion == "insufficient_evidence"
+
+
+def test_no_tool_call_after_truncation_also_explains_it(evidence_items, sample_manifest, request_):
+    client = FakeClient(
+        responses=[
+            response([text("a long partial answer")], stop_reason="max_tokens"),
+            response(
+                [
+                    tool_use(
+                        "t1",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+    run_test_step(request_, evidence_items, sample_manifest, client)
+    assert any(
+        "hit the output length limit" in _message_text(m["content"]) for m in client.calls[1]["messages"]
+    )
+
+
+def test_output_ceiling_is_large_enough_for_a_real_conclusion(evidence_items, sample_manifest, request_):
+    # 4096 could not hold a 2-sample conclusion (multi-paragraph narrative
+    # plus nine cited quotes), which is what caused the truncation above.
+    from agent.loop import MAX_OUTPUT_TOKENS
+
+    client = FakeClient(
+        responses=[
+            response(
+                [
+                    tool_use(
+                        "t1",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            )
+        ]
+    )
+    run_test_step(request_, evidence_items, sample_manifest, client)
+    assert client.calls[0]["max_tokens"] == MAX_OUTPUT_TOKENS
+    assert MAX_OUTPUT_TOKENS >= 16_000
+
+
 def test_sample_roster_names_each_selected_item(request_: TestStepRequest):
     # A real 2-sample run burned its whole budget: the model was told only
     # "2 item(s) selected" and had to discover both the sample_ids and what
