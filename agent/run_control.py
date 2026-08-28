@@ -67,6 +67,7 @@ def iter_control_results(
     on_turn: "Callable[[str, int, int, list], None] | None" = None,
     ocr_scanned_pages: bool = True,
     on_ocr: "Callable[[str, int, bool, int], None] | None" = None,
+    max_run_tokens: int | None = None,
 ) -> Iterator[tuple[str, dict]]:
     """The testable core -- no file writing, no env var reads. Yields
     (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
@@ -93,6 +94,14 @@ def iter_control_results(
     combined file in the clean fixed-column format. Falls back to the
     file-based path when omitted, for the CLI's control.json workflow.
 
+    max_run_tokens: ceiling on cost-weighted tokens for the WHOLE control,
+    counting OCR plus every test step. max_total_tokens is per step and is
+    applied fresh each time, so a 5-step control could otherwise spend 5x
+    it with nothing watching the total. Once the ceiling is passed,
+    remaining steps are not started and are yielded as skipped -- steps
+    already finished keep their conclusions, since those were paid for and
+    are already complete. Defaults to 4x max_total_tokens.
+
     on_turn: forwarded to run_test_step for each test step, called with
     (test_step_id, turn_number, cumulative_tokens_used, audit_log_so_far) so
     a caller can show live progress -- a step can run for a couple of
@@ -106,14 +115,37 @@ def iter_control_results(
     # real run concluded on the approval email alone because the invoice
     # and payment PDFs were image-only and unreadable. One vision call per
     # such page, once per run (not per turn), before the loop starts.
+    run_budget = max_run_tokens if max_run_tokens is not None else 4 * max_total_tokens
+    run_tokens = 0
+
     if ocr_scanned_pages:
-        cy_evidence, _, _ = ocr_image_items(cy_evidence, base_dir, client, model, on_page=on_ocr)
+        cy_evidence, _, run_tokens = ocr_image_items(
+            cy_evidence, base_dir, client, model, on_page=on_ocr
+        )
 
     if sample_manifests is None:
         sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])
 
     for step in spec["test_steps"]:
         test_step_id = step["test_step_id"]
+
+        if run_tokens >= run_budget:
+            # Don't START another step past the control-wide ceiling.
+            # Steps already finished keep their conclusions -- that work is
+            # done and was paid for; this only prevents further spend.
+            yield test_step_id, {
+                "error": (
+                    f"skipped: this control already used ~{run_tokens:,} cost-weighted tokens, "
+                    f"at or over its {run_budget:,} run ceiling. Raise the cap, or run the "
+                    f"remaining steps separately."
+                ),
+                "reason": "run_budget_exceeded",
+                "tokens_used": run_tokens,
+                "turns_used": 0,
+                "audit_log": [],
+            }
+            continue
+
         manifest = sample_manifests.get(test_step_id)
         if manifest is None:
             print(
@@ -133,11 +165,18 @@ def iter_control_results(
             population_size=manifest.population_size if manifest else None,
         )
 
-        step_on_turn = (
-            (lambda turn, tokens, log, _id=test_step_id: on_turn(_id, turn, tokens, log))
-            if on_turn is not None
-            else None
-        )
+        # A step reports its running total each turn; keep the latest so the
+        # run ceiling reflects real spend even when a step ends normally
+        # (a successful step raises nothing, so there is no other hook for
+        # its token count).
+        step_tokens = 0
+
+        def step_on_turn(turn, tokens, log, _id=test_step_id):  # noqa: ANN001
+            nonlocal step_tokens
+            step_tokens = tokens
+            if on_turn is not None:
+                on_turn(_id, turn, tokens, log)
+
         try:
             conclusion, audit_log = run_test_step(
                 request,
@@ -149,6 +188,7 @@ def iter_control_results(
                 on_turn=step_on_turn,
             )
         except IncompleteRunError as exc:
+            run_tokens += exc.tokens_used
             yield test_step_id, {
                 "error": str(exc),
                 "audit_log": exc.audit_log,
@@ -158,8 +198,11 @@ def iter_control_results(
             }
             continue
         except Exception as exc:  # noqa: BLE001 -- one step's failure shouldn't kill the run
+            run_tokens += step_tokens
             yield test_step_id, {"error": str(exc)}
             continue
+
+        run_tokens += step_tokens
 
         yield test_step_id, {"conclusion": conclusion, "audit_log": audit_log}
 
@@ -172,6 +215,7 @@ def run_control(
     sample_manifests: dict[str, SamplePopulationManifest] | None = None,
     max_total_tokens: int = MAX_TOTAL_TOKENS,
     ocr_scanned_pages: bool = True,
+    max_run_tokens: int | None = None,
 ) -> dict[str, dict]:
     """Batch wrapper over iter_control_results() for callers (the CLI, tests)
     that just want the whole set of results at the end.
@@ -185,6 +229,7 @@ def run_control(
             sample_manifests=sample_manifests,
             max_total_tokens=max_total_tokens,
             ocr_scanned_pages=ocr_scanned_pages,
+            max_run_tokens=max_run_tokens,
         )
     )
 

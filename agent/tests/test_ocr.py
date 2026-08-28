@@ -124,6 +124,22 @@ def test_non_image_items_pass_through_untouched(tmp_path: Path):
     assert out[0] == native
 
 
+def test_page_ceiling_stops_unbounded_ocr_spend(scanned_pdf: Path, tmp_path: Path):
+    # OCR runs before the tool loop, so run_test_step's cap cannot see or
+    # stop it -- a 300-page scanned bundle would otherwise spend unbounded
+    # money before testing began. Pages past the ceiling keep their
+    # placeholder, which the agent already handles as unreadable evidence.
+    items = extract(scanned_pdf) * 5  # five image_ocr pages
+    client = _OCRClient()
+    out, count, _tok = ocr_image_items(items, tmp_path, client, "claude-opus-5", max_pages=2)
+
+    assert count == 2
+    assert len(client.calls) == 2, "kept calling the model past the ceiling"
+    assert len(out) == 5, "pages past the ceiling were dropped instead of flagged"
+    assert sum(1 for i in out if i.extracted_text) == 2
+    assert sum(1 for i in out if i.extraction_confidence == 0.0) == 3
+
+
 def test_progress_callback_reports_each_page(scanned_pdf: Path, tmp_path: Path):
     seen: list[tuple] = []
     ocr_image_items(

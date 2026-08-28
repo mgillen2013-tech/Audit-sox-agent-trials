@@ -38,6 +38,15 @@ _MAX_EDGE_PX = 1_600  # keeps one page well under the API's per-image limits
 
 OCR_CONFIDENCE = 0.8
 
+# Ceiling on how many scanned pages one run will transcribe. OCR happens
+# before the tool loop, so run_test_step's spending cap cannot see or stop
+# it -- without this, a control whose support happens to be a 300-page
+# scanned bundle would spend unbounded money before testing even began.
+# Pages past the limit keep their placeholder (flagged unreadable), which
+# is the honest outcome and the one the agent already knows how to handle
+# via request_additional_support.
+MAX_OCR_PAGES = 40
+
 _PROMPT = """\
 Transcribe this document page verbatim for use as audit evidence.
 
@@ -113,6 +122,7 @@ def ocr_image_items(
     client: Any,
     model: str,
     on_page: Any = None,
+    max_pages: int = MAX_OCR_PAGES,
 ) -> tuple[list[EvidenceItem], int, int]:
     """Fills in extracted_text for every image_ocr item by transcribing its
     page. Returns (new item list, count transcribed, cost-weighted tokens
@@ -138,6 +148,13 @@ def ocr_image_items(
 
     for item in items:
         if item.source_type != "image_ocr" or item.extracted_text:
+            out.append(item)
+            continue
+
+        if transcribed >= max_pages:
+            # Past the ceiling: leave the placeholder rather than keep
+            # spending. The page is still visible to the agent as
+            # unreadable evidence, not silently dropped.
             out.append(item)
             continue
 

@@ -215,6 +215,44 @@ def test_run_control_missing_sample_list_row_still_runs(control_dir: tuple[Path,
     assert results["TS-9.9"]["conclusion"].conclusion == "insufficient_evidence"
 
 
+def test_run_ceiling_stops_later_steps_but_keeps_finished_ones(control_dir: tuple[Path, dict]):
+    # The per-step cap resets every step, so a multi-step control could
+    # spend N x that with nothing watching the total. The ceiling watches
+    # the total -- and must not throw away work already paid for.
+    from agent.tests.conftest import fake_usage
+
+    base_dir, spec = control_dir
+    spec["test_steps"].append(
+        {"test_step_id": "TS-9.9", "test_step_text": "Second step.", "py_conclusion_text": "N/A"}
+    )
+    client = FakeClient(
+        responses=[
+            # TS-4.2 completes, spending 60K.
+            response(
+                [tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})],
+                usage=fake_usage(input_tokens=60_000),
+            ),
+            response(
+                [tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
+            ),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+            # TS-9.9 would run next, but the ceiling is already passed.
+            response([tool_use("t4", "submit_conclusion", _submit_conclusion_input(test_step_id="TS-9.9"))]),
+        ]
+    )
+
+    results = run_control(spec, base_dir, client, model="claude-opus-5", max_run_tokens=50_000)
+
+    # Finished step keeps its conclusion -- that work is done and paid for.
+    assert results["TS-4.2"]["conclusion"].conclusion == "satisfied"
+    # Later step is skipped rather than started.
+    assert results["TS-9.9"]["reason"] == "run_budget_exceeded"
+    assert "skipped" in results["TS-9.9"]["error"]
+    # And it really did not call the model for that step -- only TS-4.2's
+    # three turns were spent.
+    assert len(client.calls) == 3
+
+
 def test_run_control_preserves_audit_log_on_incomplete_run(control_dir: tuple[Path, dict]):
     # This is the direct regression test for the real $65 failure: a step
     # that never reaches submit_conclusion must not come back as a bare

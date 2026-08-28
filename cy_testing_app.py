@@ -95,6 +95,20 @@ with st.sidebar:
             "keeps hitting the cap with a conclusion still in reach."
         ),
     )
+    max_run_tokens = st.number_input(
+        "Max cost-weighted tokens for the whole control",
+        min_value=10_000,
+        max_value=8_000_000,
+        value=int(max_total_tokens) * 4,
+        step=50_000,
+        help=(
+            "Ceiling across every test step plus OCR. The per-step cap "
+            "resets each step, so a 5-step control could spend 5x it with "
+            "nothing watching the total -- this is what watches the total. "
+            "Steps already finished keep their conclusions; only the "
+            "remaining ones are skipped."
+        ),
+    )
 
 # ── 1. Control details ───────────────────────────────────────────────────────
 st.header("1. Control details")
@@ -344,6 +358,7 @@ if run_clicked:
                 on_turn=_show_progress,
                 ocr_scanned_pages=ocr_scanned_pages,
                 on_ocr=_show_ocr,
+                max_run_tokens=int(max_run_tokens),
             ):
                 progress.empty()
                 _render_result(test_step_id, result)

@@ -559,6 +559,23 @@ explicitly named as the valid escape. This converts the worst case from
 "abort with only a partial audit log" into "a real, reviewable conclusion,"
 with the hard aborts above still capping spend if the model ignores it.
 
+**Two further ceilings (built, after auditing where tokens are actually
+spent).** There are exactly two places this system calls a model:
+`run_test_step`'s tool loop and `ocr_image_items`. The per-step cap only
+covered the first, and only per step:
+- **OCR page ceiling** (`MAX_OCR_PAGES = 40`): OCR runs before the tool
+  loop, so the spending cap can neither see nor stop it — a control whose
+  support happened to be a 300-page scanned bundle would have spent
+  unbounded money before testing began. Pages past the ceiling keep their
+  placeholder and stay visible to the agent as unreadable evidence, which
+  it already handles via `request_additional_support`.
+- **Run-level ceiling** (`max_run_tokens`, default 4× the per-step cap):
+  `max_total_tokens` is applied *fresh to each step*, so a 5-step control
+  could spend 5× it with nothing watching the total. The run ceiling counts
+  OCR plus every step and refuses to *start* another step past the limit.
+  Steps already finished keep their conclusions — that work is done and was
+  paid for; the ceiling only prevents further spend.
+
 Still a gap, not yet built: real-time *dollar* cost (token counts are a
 proxy — cache reads are billed far cheaper than fresh input tokens, so
 `tokens_used` overstates actual spend on a well-cached run) and a pre-flight
