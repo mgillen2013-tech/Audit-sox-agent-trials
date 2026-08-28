@@ -183,6 +183,33 @@ def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path
     assert "could not be located" in ex_text  # explains a corner-letter exhibit
 
 
+def test_tickmark_boxes_are_padded_off_the_text():
+    # Both the text-layer search and OCR return a box hugging the glyphs, so
+    # drawing it as-is put the stroke ON the characters and made the boxed
+    # value harder to read than the text around it.
+    from agent.workpaper import _pad_rect
+
+    rect = (100.0, 200.0, 160.0, 212.0)  # 12pt-tall line
+    x0, top, x1, bottom = _pad_rect(rect, page_width=612.0, page_height=792.0)
+
+    assert x0 < 100.0 and x1 > 160.0 and top < 200.0 and bottom > 212.0
+
+    # Asymmetric: neighbouring lines sit close above/below, but there is
+    # whitespace left and right. Equal padding wide enough to look right
+    # horizontally struck through the following line on a real invoice.
+    assert (100.0 - x0) > (200.0 - top)
+
+
+def test_padded_box_never_leaves_the_page():
+    from agent.workpaper import _pad_rect
+
+    # A value flush against the page edge must not produce a negative or
+    # overflowing rectangle.
+    x0, top, x1, bottom = _pad_rect((0.0, 0.0, 612.0, 20.0), page_width=612.0, page_height=792.0)
+    assert (x0, top) == (0.0, 0.0)
+    assert x1 == 612.0 and bottom <= 792.0
+
+
 def test_scanned_page_is_ocrd_once_not_once_per_tickmark(annotated_setup, tmp_path, monkeypatch):
     # OCR (~1.3s/page) dwarfs rendering (~0.06s). Calling it per mark made a
     # multi-citation page several times slower for identical output.

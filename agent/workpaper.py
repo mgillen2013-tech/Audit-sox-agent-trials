@@ -97,6 +97,37 @@ def _item_rect(page, item: EvidenceItem) -> list[tuple[float, float, float, floa
     return [(x0, top, x1, bottom)]
 
 
+# Both the text-layer search and local OCR return a box hugging the glyphs
+# exactly. Drawn as-is, the stroke lands ON the characters and makes the
+# boxed value harder to read than the surrounding text -- the opposite of
+# what a tickmark is for. Pad proportionally to the line height so small
+# print and large headings both get sensible room, with a floor for tiny text.
+# Asymmetric on purpose: there is usually whitespace to the left and right
+# of a value, but the next line of text sits close above and below it. Equal
+# padding wide enough to look right horizontally put the box's bottom edge
+# through the following line ("Invoice no.: 2859" struck through "Terms: Net
+# 45" on a real invoice), so vertical padding is roughly half the horizontal.
+_BOX_PAD_X_FRACTION = 0.40
+_BOX_PAD_Y_FRACTION = 0.18
+_BOX_PAD_X_MIN_PT = 2.5
+_BOX_PAD_Y_MIN_PT = 1.5
+
+
+def _pad_rect(
+    rect: tuple[float, float, float, float], page_width: float, page_height: float
+) -> tuple[float, float, float, float]:
+    x0, top, x1, bottom = rect
+    height = bottom - top
+    pad_x = max(_BOX_PAD_X_MIN_PT, height * _BOX_PAD_X_FRACTION)
+    pad_y = max(_BOX_PAD_Y_MIN_PT, height * _BOX_PAD_Y_FRACTION)
+    return (
+        max(x0 - pad_x, 0.0),
+        max(top - pad_y, 0.0),
+        min(x1 + pad_x, page_width),
+        min(bottom + pad_y, page_height),
+    )
+
+
 def _draw_letter(draw, pos: tuple[float, float], letter: str) -> None:
     from PIL import ImageFont
 
@@ -146,9 +177,12 @@ def _render_pdf_exhibit(
                     for x0, y0, x1, y1 in find_text_boxes(ocr_lines, quote)
                 ]
 
-            for r in rects:
+            padded = [_pad_rect(r, page.width, page.height) for r in rects]
+            for r in padded:
                 pim.draw_rect(r, fill=None, stroke="red", stroke_width=3)
-            letter_positions.append((letter, (rects[0][0], rects[0][1]) if rects else None))
+            # Anchor the letter to the PADDED box so it sits beside the
+            # drawn rectangle rather than on top of its new left edge.
+            letter_positions.append((letter, (padded[0][0], padded[0][1]) if padded else None))
 
         pil = pim.annotated.convert("RGB")
         draw = ImageDraw.Draw(pil)
