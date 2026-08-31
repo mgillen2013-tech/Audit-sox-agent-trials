@@ -173,7 +173,17 @@ def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path
     assert "see the 'Summary - Exhibits' sheet" in text
 
     ex_ws = wb["Summary - Exhibits"]
-    assert len(ex_ws._images) == 1
+    # The page plus its marks as SEPARATE pictures: burned-in marks are
+    # final, and a reviewer has to be able to drag a misplaced box onto the
+    # right value rather than redo the exhibit by hand.
+    assert len(ex_ws._images) >= 2
+    offsets = [
+        (im.anchor._from.colOff, im.anchor._from.rowOff)
+        for im in ex_ws._images
+        if hasattr(im.anchor, "_from")
+    ]
+    # At least one mark is pinned at a real pixel offset over the page.
+    assert any(x or y for x, y in offsets), "overlays were not positioned"
     ex_text = " ".join(str(c.value) for r in ex_ws.iter_rows() for c in r if c.value is not None)
     assert "Evidence exhibits" in ex_text
     assert "could not be located" in ex_text  # explains a corner-letter exhibit

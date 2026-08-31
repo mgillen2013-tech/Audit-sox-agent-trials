@@ -24,6 +24,7 @@ prompt).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -129,26 +130,113 @@ def _pad_rect(
     )
 
 
-def _draw_letter(draw, pos: tuple[float, float], letter: str) -> None:
-    from PIL import ImageFont
+# Overlays are placed as SEPARATE pictures over a clean page render rather
+# than burned into its pixels. Burned-in marks are final: if the agent puts
+# a box slightly off, or the tickmark letter needs to sit elsewhere, a
+# reviewer has no recourse short of redoing the exhibit by hand. As
+# individual pictures, each box and each letter can be dragged, resized or
+# deleted in Excel like any other shape -- which is what a preparer does to
+# hand-drawn tickmarks anyway.
+_LETTER_BADGE_PX = 24
+_BOX_STROKE_PX = 3
 
+
+@dataclass
+class _Overlay:
+    """One draggable mark, positioned in the final (post-downscale) pixel
+    space of the page image it belongs to.
+    """
+
+    png: BytesIO
+    x: int
+    y: int
+    w: int
+    h: int
+    name: str
+
+
+def _box_overlay_png(w: int, h: int) -> BytesIO:
+    from PIL import Image as PILImage, ImageDraw
+
+    img = PILImage.new("RGBA", (max(w, 1), max(h, 1)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, max(w, 1) - 1, max(h, 1) - 1], outline=(255, 0, 0, 255), width=_BOX_STROKE_PX)
+    buf = BytesIO()
+    img.save(buf, "PNG")
+    buf.seek(0)
+    return buf
+
+
+def _letter_overlay_png(letter: str) -> BytesIO:
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+
+    size = _LETTER_BADGE_PX
+    img = PILImage.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, size - 1, size - 1], fill=(255, 0, 0, 255))
     try:
-        font = ImageFont.load_default(size=20)
+        font = ImageFont.load_default(size=18)
     except TypeError:  # older Pillow: no size kwarg
         font = ImageFont.load_default()
-    x, y = pos
-    draw.rectangle([x, y, x + 24, y + 24], fill="red")
-    draw.text((x + 6, y + 2), letter, fill="white", font=font)
+    draw.text((6, 2), letter, fill="white", font=font)
+    buf = BytesIO()
+    img.save(buf, "PNG")
+    buf.seek(0)
+    return buf
+
+
+def _flatten(page_png: BytesIO, overlays: list[_Overlay]) -> BytesIO:
+    """Burns the overlays onto the page -- for the PDF output only, where
+    nothing can be movable anyway.
+    """
+    from PIL import Image as PILImage
+
+    page_png.seek(0)
+    page = PILImage.open(page_png).convert("RGBA")
+    for ov in overlays:
+        ov.png.seek(0)
+        mark = PILImage.open(ov.png).convert("RGBA")
+        page.alpha_composite(mark, (ov.x, ov.y))
+    out = BytesIO()
+    page.convert("RGB").save(out, "PNG")
+    out.seek(0)
+    return out
+
+
+def _place_overlay(ws, overlay: _Overlay, anchor_row: int) -> None:
+    """Pins one overlay over the page image using a pixel offset from the
+    same cell the page is anchored to, so it lands exactly on the value it
+    marks -- and stays independently movable.
+    """
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+    from openpyxl.drawing.xdr import XDRPositiveSize2D
+    from openpyxl.utils.units import pixels_to_EMU
+
+    img = XLImage(overlay.png)
+    img.anchor = OneCellAnchor(
+        _from=AnchorMarker(
+            col=0,
+            row=anchor_row - 1,  # AnchorMarker rows are 0-based
+            colOff=pixels_to_EMU(overlay.x),
+            rowOff=pixels_to_EMU(overlay.y),
+        ),
+        ext=XDRPositiveSize2D(pixels_to_EMU(overlay.w), pixels_to_EMU(overlay.h)),
+    )
+    ws.add_image(img)
 
 
 def _render_pdf_exhibit(
     pdf_path: Path, page_num: int, marks: list[tuple[str, EvidenceItem, str]]
-) -> tuple[BytesIO, tuple[int, int]]:
-    """marks: (tickmark letter, evidence item, quote to locate). Returns the
-    annotated page as PNG bytes plus its pixel size.
+) -> tuple[BytesIO, tuple[int, int], list[_Overlay]]:
+    """marks: (tickmark letter, evidence item, quote to locate).
+
+    Returns the CLEAN page render, its pixel size, and the marks as
+    separately-positioned overlays. Nothing is drawn onto the page itself:
+    the caller places each overlay as its own picture so a reviewer can
+    move or delete a misplaced box without touching the page image.
     """
     import pdfplumber
-    from PIL import ImageDraw
 
     from agent.wordboxes import find_text_boxes, ocr_line_boxes
 
@@ -161,7 +249,8 @@ def _render_pdf_exhibit(
         # made a 3-citation page three times slower for identical output.
         ocr_lines: list | None = None
 
-        letter_positions: list[tuple[str, tuple[float, float] | None]] = []
+        # (letter, [padded rects in PDF points])
+        located: list[tuple[str, list[tuple[float, float, float, float]]]] = []
         for letter, item, quote in marks:
             rects = _search_rects(page, quote) or _item_rect(page, item)
 
@@ -170,7 +259,7 @@ def _render_pdf_exhibit(
                 # Local OCR measures where the quoted values actually sit;
                 # without this the letter just parks in the corner pointing
                 # at nothing. Pixel boxes convert back to PDF points so
-                # everything draws through the same path below.
+                # everything is positioned through the same path below.
                 if ocr_lines is None:
                     ocr_lines = ocr_line_boxes(pim.original.convert("RGB"))
                 rects = [
@@ -178,34 +267,44 @@ def _render_pdf_exhibit(
                     for x0, y0, x1, y1 in find_text_boxes(ocr_lines, quote)
                 ]
 
-            padded = [_pad_rect(r, page.width, page.height) for r in rects]
-            for r in padded:
-                pim.draw_rect(r, fill=None, stroke="red", stroke_width=3)
-            # Anchor the letter to the PADDED box so it sits beside the
-            # drawn rectangle rather than on top of its new left edge.
-            letter_positions.append((letter, (padded[0][0], padded[0][1]) if padded else None))
+            located.append((letter, [_pad_rect(r, page.width, page.height) for r in rects]))
 
-        pil = pim.annotated.convert("RGB")
-        draw = ImageDraw.Draw(pil)
-        unanchored = 0
-        for letter, pos in letter_positions:
-            if pos is not None:
-                px = (max(pos[0] * scale - 28, 0), max(pos[1] * scale - 4, 0))
-            else:
-                # No locatable region (e.g. a screenshot page with no text
-                # layer): the whole page is the exhibit -- stack the letters
-                # in the top-left corner.
-                px = (6 + unanchored * 30, 6)
-                unanchored += 1
-            _draw_letter(draw, px, letter)
+        pil = pim.original.convert("RGB")
 
+    ratio = 1.0
     if pil.width > _MAX_EXHIBIT_WIDTH_PX:
         ratio = _MAX_EXHIBIT_WIDTH_PX / pil.width
         pil = pil.resize((_MAX_EXHIBIT_WIDTH_PX, int(pil.height * ratio)))
+
+    # PDF points -> rendered pixels -> final (downscaled) pixels.
+    px = scale * ratio
+    overlays: list[_Overlay] = []
+    unanchored = 0
+    for letter, rects in located:
+        for i, (x0, top, x1, bottom) in enumerate(rects):
+            bx, by = int(x0 * px), int(top * px)
+            bw, bh = max(int((x1 - x0) * px), 1), max(int((bottom - top) * px), 1)
+            overlays.append(_Overlay(_box_overlay_png(bw, bh), bx, by, bw, bh, f"box {letter}{i or ''}"))
+
+        if rects:
+            x0, top = rects[0][0], rects[0][1]
+            lx = max(int(x0 * px) - _LETTER_BADGE_PX - 4, 0)
+            ly = max(int(top * px) - 4, 0)
+        else:
+            # Nothing locatable on the page (an unreadable scan): the whole
+            # page is the exhibit, so stack the letters in the corner.
+            lx, ly = 6 + unanchored * (_LETTER_BADGE_PX + 6), 6
+            unanchored += 1
+        overlays.append(
+            _Overlay(
+                _letter_overlay_png(letter), lx, ly, _LETTER_BADGE_PX, _LETTER_BADGE_PX, f"tickmark {letter}"
+            )
+        )
+
     buf = BytesIO()
     pil.save(buf, "PNG")
     buf.seek(0)
-    return buf, (pil.width, pil.height)
+    return buf, (pil.width, pil.height), overlays
 
 
 def _excerpt_lines(item: EvidenceItem) -> list[str]:
@@ -224,7 +323,7 @@ def _build_step_exhibits(
     citations: list[EvidenceCitation],
     evidence_map: dict[str, EvidenceItem],
     support_dir: Path,
-) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int]]], list[tuple[str, list[str]]]]:
+) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]], list[tuple[str, list[str]]]]:
     """Returns (tickmark letter per citation, PDF exhibit images as
     (caption, png bytes, (w,h)), Excel/text excerpts as (caption, lines)).
     """
@@ -245,14 +344,14 @@ def _build_step_exhibits(
             if lines:
                 excerpts.append((f"Exhibit {letter} — {item.location}", lines))
 
-    images: list[tuple[str, BytesIO, tuple[int, int]]] = []
+    images: list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]] = []
     for (source_file, page_num), marks in pdf_groups.items():
         try:
-            buf, size = _render_pdf_exhibit(support_dir / source_file, page_num, marks)
+            buf, size, overlays = _render_pdf_exhibit(support_dir / source_file, page_num, marks)
         except Exception:  # noqa: BLE001 -- an unrenderable page must not sink the workpaper
             continue
         mark_list = ", ".join(letter for letter, _, _ in marks)
-        images.append((f"Exhibit ({mark_list}) — {source_file} p.{page_num}", buf, size))
+        images.append((f"Exhibit ({mark_list}) — {source_file} p.{page_num}", buf, size, overlays))
 
     return letters, images, excerpts
 
@@ -760,7 +859,7 @@ def _write_evidence_table(
 def _write_exhibit_sheet(
     ws,
     test_step_id: str,
-    images: list[tuple[str, BytesIO, tuple[int, int]]],
+    images: list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]],
     excerpts: list[tuple[str, list[str]]],
     live_buffers: list[BytesIO],
 ) -> None:
@@ -785,13 +884,23 @@ def _write_exhibit_sheet(
     ws.cell(row, 1, "is the exhibit but the specific value could not be located on it.").font = Font(italic=True)
     row += 2
 
-    for caption, buf, (w, h) in images:
+    for caption, buf, (w, h), overlays in images:
         ws.cell(row, 1, caption).font = Font(bold=True)
         row += 1
-        img = XLImage(buf)
-        img.width, img.height = w, h
-        ws.add_image(img, f"A{row}")
+        page_img = XLImage(buf)
+        page_img.width, page_img.height = w, h
+        ws.add_image(page_img, f"A{row}")
         live_buffers.append(buf)
+
+        # Each box and each tickmark letter is its own picture, pinned to
+        # the same cell as the page and offset into place. In Excel they
+        # are ordinary shapes: a reviewer can drag a misplaced box onto the
+        # right value, resize it, or delete it -- none of which is possible
+        # once marks are burned into the page pixels.
+        for ov in overlays:
+            _place_overlay(ws, ov, anchor_row=row)
+            live_buffers.append(ov.png)
+
         row += int(h / 19) + 3  # default row height ~19px at 96dpi
 
     for caption, lines in excerpts:
@@ -815,7 +924,7 @@ def _write_step_sheet(
     spec: dict[str, Any] | None = None,
     results: dict[str, dict] | None = None,
     include_step_detail: bool = True,
-) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int]]], list[tuple[str, list[str]]]]:
+) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]], list[tuple[str, list[str]]]]:
     """Writes one sheet, ordered so a reviewer reads answers first
     (conclusion, coverage, IPE, exceptions, open requests) before the
     supporting detail. Returns the exhibit material for the caller to place
@@ -921,7 +1030,7 @@ def _write_step_sheet(
     # workpaper built without exhibits (no support files to hand) still
     # gets A/B/C rather than a blank column.
     letters: list[str] = _tickmark_letters(len(sheet_citations))
-    exhibit_images: list[tuple[str, BytesIO, tuple[int, int]]] = []
+    exhibit_images: list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]] = []
     excerpts: list[tuple[str, list[str]]] = []
     if sheet_citations and evidence_map and support_dir is not None:
         letters, exhibit_images, excerpts = _build_step_exhibits(
@@ -1086,7 +1195,7 @@ def _build_pdf(
         bullet_list("Procedures performed", conclusion.procedures_performed)
 
         letters: list[str] = []
-        exhibit_images: list[tuple[str, BytesIO, tuple[int, int]]] = []
+        exhibit_images: list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]] = []
         excerpts: list[tuple[str, list[str]]] = []
         if conclusion.evidence_citations and evidence_map and support_dir is not None:
             letters, exhibit_images, excerpts = _build_step_exhibits(
@@ -1121,10 +1230,14 @@ def _build_pdf(
             from reportlab.platypus import Image as RLImage
 
             story.append(Paragraph("<b>Evidence exhibits:</b>", body))
-            for caption, buf, (w, h) in exhibit_images:
+            for caption, buf, (w, h), overlays in exhibit_images:
                 story.append(Paragraph(f"<i>{caption}</i>", body))
                 display_w = min(6.5 * inch, w)
-                story.append(RLImage(buf, width=display_w, height=h * (display_w / w)))
+                # A PDF is a flat rendering by definition -- nothing in it
+                # is movable -- so the marks are composited back onto the
+                # page here. The xlsx output keeps them as separate,
+                # draggable pictures instead.
+                story.append(RLImage(_flatten(buf, overlays), width=display_w, height=h * (display_w / w)))
                 story.append(Spacer(1, 8))
             for caption, lines in excerpts:
                 story.append(Paragraph(f"<i>{caption}</i>", body))
