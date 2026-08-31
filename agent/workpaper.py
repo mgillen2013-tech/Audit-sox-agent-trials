@@ -465,8 +465,8 @@ def _build_xlsx(
 
     for test_step_id, result in results.items():
         citations = [] if "error" in result else list(result["conclusion"].evidence_citations)
-        groups = _sample_groups(citations)
-        per_sample = groups[0][0] is not None
+        step_level, groups = _sample_groups(citations)
+        per_sample = bool(groups)
 
         # Sheet 1 for this step: everything a reviewer reads top-to-bottom
         # -- control header, conclusion, exceptions, open requests,
@@ -482,9 +482,11 @@ def _build_xlsx(
             result,
             evidence_map,
             support_dir,
-            # When nothing is sample-tagged there is nowhere else for the
-            # evidence to go, so it stays here rather than vanishing.
-            citations=[] if per_sample else citations,
+            # Step-wide evidence (population extract, IPE parameters) belongs
+            # here, alongside the IPE attribute it supports. When nothing is
+            # sample-tagged there is nowhere else for evidence to go, so it
+            # all stays here rather than vanishing.
+            citations=step_level if per_sample else citations,
             spec=spec if first_sheet else None,
             results=results if first_sheet else None,
             include_step_detail=True,
@@ -520,16 +522,22 @@ def _build_xlsx(
 
 def _sample_groups(
     citations: list[EvidenceCitation],
-) -> list[tuple[str | None, list[EvidenceCitation]]]:
-    """Splits a step's citations into one group per sampled item, so each
-    selection gets its own sheet, its own exhibits, and tickmarks that
-    restart at A -- a reviewer clearing selection 2 wants selection 2's
-    evidence, not one merged list where its first tickmark happens to be F.
+) -> tuple[list[EvidenceCitation], list[tuple[str, list[EvidenceCitation]]]]:
+    """Splits a step's citations into step-wide evidence and one group per
+    sampled item, so each selection gets its own sheet, its own exhibits,
+    and tickmarks that restart at A -- a reviewer clearing selection 2
+    wants selection 2's evidence, not one merged list where its first
+    tickmark happens to be F.
 
-    Citations with no sample_id are step-wide (a policy, the population
-    extract, IPE parameters) and ride along on the first item's sheet.
-    When nothing is tagged at all -- an older run, or a step with no sample
-    -- everything stays on a single sheet, as before.
+    Step-wide citations (the population extract, IPE parameters, a policy)
+    stay on the summary sheet. They used to ride along on the FIRST item's
+    sheet, which gave that item tickmarks its own attributes never
+    referenced -- a real workpaper had sample 1 carrying B and C for the
+    population and report parameters while its attributes cited only A and
+    D-G. Evidence about the population is not evidence about selection 1.
+
+    Returns ([], []) when nothing is sample-tagged, so the caller keeps
+    everything on one sheet as before.
     """
     by_sample: dict[str, list[EvidenceCitation]] = {}
     for c in citations:
@@ -537,12 +545,10 @@ def _sample_groups(
             by_sample.setdefault(c.sample_id, []).append(c)
 
     if not by_sample:
-        return [(None, citations)]
+        return [], []
 
     step_level = [c for c in citations if not c.sample_id]
-    groups = [(sid, cits) for sid, cits in by_sample.items()]
-    groups[0] = (groups[0][0], step_level + groups[0][1])
-    return groups
+    return step_level, list(by_sample.items())
 
 
 def _unique_sheet_name(wb, desired: str) -> str:
@@ -672,14 +678,37 @@ def _write_control_summary(ws, row: int, results: dict[str, dict]) -> int:
         _link_to_sheet(ws, row, 2 + len(step_ids), sid)
         row += 1
 
+    # IPE gets its own row rather than being buried as one attribute among
+    # many: it is a conclusion about the POPULATION, not about any sampled
+    # item, and a reviewer scanning this table needs to see it at the same
+    # level as the selections.
+    ws.cell(row, 1, "IPE").font = Font(bold=True)
+    for i, step_id in enumerate(step_ids):
+        result = results[step_id]
+        if "error" in result:
+            _styled(ws, row, 2 + i, "INCOMPLETE", (_FILL_BAD, _FONT_BAD))
+            continue
+        status = result["conclusion"].ipe_completeness_accuracy_status
+        _styled(ws, row, 2 + i, status, _IPE_STYLE.get(status))
+    row += 1
+
     ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(headers))}{row - 1}"
     row += 1
-    return _write_step_summary_rows(ws, row, results)
+
+    # The per-step table below is only worth its space on a multi-step
+    # control. With one step every column of it is already stated by the
+    # matrix above or the CONCLUSION section below -- it was pure
+    # duplication, and its "Test step" and "Conclusion" columns in
+    # particular restated the matrix.
+    if len(results) > 1:
+        row = _write_step_summary_rows(ws, row, results)
+    return row
 
 
 def _write_step_summary_rows(ws, row: int, results: dict[str, dict]) -> int:
-    """The step-level facts a per-sample row can't carry: confidence,
-    coverage, IPE status, and the exception / open-request counts.
+    """Per-step overview, for a control with more than one step. On a
+    single-step control this is skipped: the matrix above and the
+    CONCLUSION section below already carry every column of it.
     """
     headers = ["Test step", "Conclusion", "Confidence", "Sample coverage", "IPE status", "Exceptions", "Open requests"]
     for col, name in enumerate(headers, 1):
@@ -983,6 +1012,7 @@ def _write_step_sheet(
     ws.cell(row, 1, _DRAFT_BANNER).font = Font(bold=True, color="9C0006")
     row += 2
 
+    ipe_shown_in_matrix = False
     # Control header, on the workbook's first sheet only -- it used to sit
     # on a separate Summary tab a reviewer had to click away from.
     if spec is not None:
@@ -995,6 +1025,9 @@ def _write_step_sheet(
         # the only place that says how each individual selection came out.
         if results is not None:
             row = _write_control_summary(ws, row, results)
+            # The matrix carries an IPE row whenever it renders, so the
+            # CONCLUSION block below must not restate it.
+            ipe_shown_in_matrix = any(_sample_ids_for(r) for r in results.values())
 
     put("Test step", test_step_id)
     put("Test step text", test_step_text)
@@ -1069,7 +1102,8 @@ def _write_step_sheet(
             f"{sc.total_found} of {sc.total_required} ({sc.coverage_pct}%)"
             + (f"; missing: {', '.join(sc.missing)}" if sc.missing else ""),
         )
-    put("IPE status", conclusion.ipe_completeness_accuracy_status)
+    if not ipe_shown_in_matrix:
+        put("IPE status", conclusion.ipe_completeness_accuracy_status)
     row += 1
 
     section("EXCEPTIONS")

@@ -241,8 +241,12 @@ def test_each_sampled_item_gets_its_own_sheet_and_restarts_tickmarks(
     # Sample 2's evidence must not bleed onto sample 1's sheet.
     assert "ev_0015" not in s1
     assert "ev_0001" not in s2
-    # Step-wide evidence (the population extract) rides with the first item.
-    assert "ev_0018" in s1
+    # Step-wide evidence (the population extract) belongs on the summary,
+    # NOT on the first item. Riding along there gave sample 1 tickmarks its
+    # own attributes never referenced -- a real workpaper had it carrying B
+    # and C for the population and report parameters.
+    assert "ev_0018" not in s1
+    assert "ev_0018" in summary
 
     # Tickmarks restart per sheet: sample 2's single citation is A, not D.
     def tickmarks(name):
@@ -250,7 +254,9 @@ def test_each_sampled_item_gets_its_own_sheet_and_restarts_tickmarks(
         col = [ws.cell(r, 1).value for r in range(1, ws.max_row + 1)]
         return [v for v in col if v in ("A", "B", "C", "D")]
 
-    assert tickmarks("1") == ["A", "B", "C"]
+    # Two citations on sample 1 -- the third was step-wide and moved to the
+    # summary, so no tickmark on this sheet goes unreferenced.
+    assert tickmarks("1") == ["A", "B"]
     assert tickmarks("2") == ["A"]
 
 
@@ -363,6 +369,102 @@ def test_attributes_table_shows_where_the_step_is_satisfied(spec: dict, results:
     assert untested[2].value == "Not tested"
     assert untested[2].fill.start_color.rgb.endswith("FFEB9C")  # amber
     assert not untested[0].value  # nothing cited, so no tickmark to point at
+
+
+def test_summary_has_an_ipe_row_and_no_redundant_step_table(spec: dict, results: dict, tmp_path: Path):
+    # IPE is a conclusion about the POPULATION, not about any sampled item,
+    # so it sits at the same level as the selections rather than buried as
+    # one attribute among many.
+    from agent.schemas import SampleResult
+
+    conclusion = results["TS-4.2"]["conclusion"].model_copy(
+        update={
+            "ipe_completeness_accuracy_status": "not_validated",
+            "sample_results": [SampleResult(sample_id="1", conclusion="satisfied")],
+            "evidence_citations": [
+                EvidenceCitation(
+                    evidence_id="ev_0001",
+                    source_file="s.pdf",
+                    location="p.1",
+                    quote_or_summary="q",
+                    relevance="r",
+                    sample_id="1",
+                )
+            ],
+        }
+    )
+    path = build_workpaper(
+        spec, {"TS-4.2": {"conclusion": conclusion, "audit_log": []}}, "PY.xlsx", tmp_path
+    )
+    ws = openpyxl.load_workbook(path)["Summary"]
+    rows = list(ws.iter_rows())
+
+    ipe_row = next(r for r in rows if r[0].value == "IPE")
+    assert ipe_row[1].value == "not_validated"
+    assert ipe_row[1].fill.start_color.rgb.endswith("FFC7CE")  # red
+
+    # On a single-step control the per-step table restated the matrix above
+    # and the CONCLUSION section below -- every column of it was duplicated.
+    assert not any(r[0].value == "Test step" and r[1].value == "Conclusion" for r in rows)
+
+
+def test_no_sheet_carries_a_tickmark_its_attributes_never_use(spec: dict, results: dict, tmp_path: Path):
+    # The defect class: step-wide evidence placed on a sampled item's sheet
+    # gave it lettered rows nothing on that sheet referenced.
+    from agent.schemas import AttributeResult
+
+    conclusion = results["TS-4.2"]["conclusion"].model_copy(
+        update={
+            "evidence_citations": [
+                EvidenceCitation(
+                    evidence_id="ev_pop",
+                    source_file="s.xlsx",
+                    location="Population!A1",
+                    quote_or_summary="population",
+                    relevance="r",
+                    sample_id=None,
+                ),
+                EvidenceCitation(
+                    evidence_id="ev_inv",
+                    source_file="s.pdf",
+                    location="p.1",
+                    quote_or_summary="invoice",
+                    relevance="r",
+                    sample_id="1",
+                ),
+            ],
+            "attribute_results": [
+                AttributeResult(
+                    attribute="Invoice above threshold",
+                    sample_id="1",
+                    result="satisfied",
+                    value_observed="$30,000",
+                    evidence_ids=["ev_inv"],
+                )
+            ],
+        }
+    )
+    path = build_workpaper(
+        spec, {"TS-4.2": {"conclusion": conclusion, "audit_log": []}}, "PY.xlsx", tmp_path
+    )
+    ws = openpyxl.load_workbook(path)["1"]
+    rows = list(ws.iter_rows())
+
+    used, listed, mode = set(), set(), None
+    for r in rows:
+        first = r[0].value
+        if first == "ATTRIBUTES TESTED":
+            mode = "attr"
+        elif first == "EVIDENCE CITED":
+            mode = "ev"
+        elif first and first != "Tickmark":
+            if mode == "attr":
+                used |= {t.strip() for t in str(first).split(",")}
+            elif mode == "ev" and len(str(first)) == 1:
+                listed.add(str(first))
+
+    assert listed, "no evidence rows rendered"
+    assert listed <= used, f"tickmarks listed but never referenced: {sorted(listed - used)}"
 
 
 def test_untagged_citations_stay_on_one_sheet(spec: dict, results: dict, tmp_path: Path):
