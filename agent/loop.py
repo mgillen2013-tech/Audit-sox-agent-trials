@@ -417,7 +417,11 @@ TOOLS = [
         "call showing complete coverage. Set each citation's sample_id to the "
         "sampled item it supports, so the workpaper can document each selection "
         "separately; leave it null only for evidence covering the step as a "
-        "whole (a policy, the population extract, IPE parameters).",
+        "whole (a policy, the population extract, IPE parameters). Also fill "
+        "sample_results with one entry per sampled item saying how the step "
+        "came out FOR THAT ITEM -- an exception is always about a specific "
+        "selection, and the step-level conclusion alone cannot say which one "
+        "failed.",
         SubmitConclusionInput,
     ),
 ]

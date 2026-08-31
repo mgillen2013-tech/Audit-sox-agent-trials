@@ -153,6 +153,16 @@ class EvidenceCitation(BaseModel):
     sample_id: str | None = None
 
 
+class SampleResult(BaseModel):
+    """How the test step came out for ONE sampled item."""
+
+    sample_id: str
+    conclusion: Literal["satisfied", "not_satisfied", "insufficient_evidence"]
+    # Short -- why this item differs from the others, or what is missing for
+    # it. The full reasoning belongs in the step's narrative.
+    note: str = ""
+
+
 class SampleCoverage(BaseModel):
     total_required: int
     total_found: int
@@ -186,6 +196,12 @@ class _ConclusionCore(BaseModel):
     narrative: str
     evidence_citations: list[EvidenceCitation]
     procedures_performed: list[str]
+    # Per-item verdicts. The step-level `conclusion` above is a roll-up and
+    # cannot say WHICH selection failed -- but an exception is always about
+    # a specific item, and that is the first thing a reviewer asks. A step
+    # can be not_satisfied because one of five items failed while the other
+    # four passed, and only this field can express that.
+    sample_results: list["SampleResult"] = []
     # Tri-state, not a bool + a maybe-empty list. A real run surfaced exactly
     # the case a bool can't express cleanly: the model relied on a
     # system-generated report (E1/BVE1/OneStream) but explicitly could NOT

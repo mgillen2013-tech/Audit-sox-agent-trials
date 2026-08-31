@@ -244,6 +244,54 @@ def test_each_sampled_item_gets_its_own_sheet_and_restarts_tickmarks(
     assert tickmarks("2") == ["A"]
 
 
+def test_summary_matrix_is_one_row_per_sample_with_links_and_colors(
+    spec: dict, results: dict, tmp_path: Path
+):
+    # A row per test step could only say "the step failed" -- never WHICH
+    # selection failed, which is the first thing a reviewer asks.
+    from agent.schemas import SampleResult
+
+    conclusion = results["TS-4.2"]["conclusion"].model_copy(
+        update={
+            "conclusion": "not_satisfied",
+            "sample_results": [
+                SampleResult(sample_id="1", conclusion="satisfied"),
+                SampleResult(sample_id="2", conclusion="not_satisfied", note="No approval evidence."),
+            ],
+            "evidence_citations": [
+                EvidenceCitation(
+                    evidence_id="ev_0001",
+                    source_file="s.pdf",
+                    location="s.pdf p.1",
+                    quote_or_summary="q",
+                    relevance="r",
+                    sample_id=sid,
+                )
+                for sid in ("1", "2")
+            ],
+        }
+    )
+    path = build_workpaper(
+        spec, {"TS-4.2": {"conclusion": conclusion, "audit_log": []}}, "PY.xlsx", tmp_path
+    )
+    ws = openpyxl.load_workbook(path)["Summary"]
+
+    header = next(
+        r for r in ws.iter_rows() if r[0].value == "Sample"
+    )
+    assert [c.value for c in header[:3]] == ["Sample", "Test step TS-4.2", "Detail sheet"]
+
+    rows = {r[0].value: r for r in ws.iter_rows() if r[0].value in ("1", "2")}
+    # Each item's own verdict, not the step roll-up.
+    assert rows["1"][1].value == "Satisfied"
+    assert rows["2"][1].value == "Not satisfied"
+    # Colour-coded so it reads at a glance.
+    assert rows["1"][1].fill.start_color.rgb.endswith("C6EFCE")  # green
+    assert rows["2"][1].fill.start_color.rgb.endswith("FFC7CE")  # red
+    # And clickable through to that item's tab.
+    assert rows["1"][2].hyperlink.target.endswith("'1'!A1") or "1" in str(rows["1"][2].hyperlink)
+
+
 def test_untagged_citations_stay_on_one_sheet(spec: dict, results: dict, tmp_path: Path):
     # An older run (or a step with no sample) has no sample_id anywhere --
     # everything must stay on the summary sheet rather than vanishing.

@@ -30,6 +30,7 @@ from typing import Any
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from agent.schemas import ConclusionOutput, EvidenceCitation, EvidenceItem
 
@@ -460,9 +461,126 @@ def _unique_sheet_name(wb, desired: str) -> str:
     return base[:28] + "(x)"
 
 
+# Conditional fills matching how a reviewer scans a workpaper: green =
+# clear, amber = look at it, red = deal with it.
+_FILL_GOOD = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+_FILL_WARN = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+_FILL_BAD = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_FONT_GOOD = Font(bold=True, color="006100")
+_FONT_WARN = Font(bold=True, color="9C5700")
+_FONT_BAD = Font(bold=True, color="9C0006")
+
+_VERDICT_STYLE = {
+    "satisfied": (_FILL_GOOD, _FONT_GOOD),
+    "not_satisfied": (_FILL_BAD, _FONT_BAD),
+    "insufficient_evidence": (_FILL_WARN, _FONT_WARN),
+}
+_CONFIDENCE_STYLE = {
+    "high": (_FILL_GOOD, _FONT_GOOD),
+    "medium": (_FILL_WARN, _FONT_WARN),
+    "low": (_FILL_BAD, _FONT_BAD),
+}
+_IPE_STYLE = {
+    "validated": (_FILL_GOOD, _FONT_GOOD),
+    "not_validated": (_FILL_BAD, _FONT_BAD),
+    "not_applicable": (None, None),
+}
+
+
+def _styled(ws, row: int, col: int, value: Any, style: tuple | None) -> None:
+    cell = ws.cell(row, col, value)
+    if style and style[0]:
+        cell.fill = style[0]
+    if style and style[1]:
+        cell.font = style[1]
+
+
+def _count_style(n: int) -> tuple:
+    return (_FILL_GOOD, _FONT_GOOD) if n == 0 else (_FILL_WARN, _FONT_WARN)
+
+
+def _link_to_sheet(ws, row: int, col: int, sheet_name: str) -> None:
+    """Clickable jump to that item's own tab."""
+    cell = ws.cell(row, col, sheet_name)
+    cell.hyperlink = f"#'{sheet_name}'!A1"
+    cell.font = Font(color="0563C1", underline="single")
+
+
+def _sample_ids_for(result: dict) -> list[str]:
+    """Sampled items in stable order: the model's own per-item results if it
+    gave them, else whatever the citations were tagged with.
+    """
+    if "error" in result:
+        return []
+    conclusion: ConclusionOutput = result["conclusion"]
+    if conclusion.sample_results:
+        return [r.sample_id for r in conclusion.sample_results]
+    seen: list[str] = []
+    for c in conclusion.evidence_citations:
+        if c.sample_id and c.sample_id not in seen:
+            seen.append(c.sample_id)
+    return seen
+
+
 def _write_control_summary(ws, row: int, results: dict[str, dict]) -> int:
-    """One row per test step -- only worth showing on a multi-step control;
-    with a single step it just restated the sheet below it.
+    """One row per SAMPLED ITEM, one column per test step.
+
+    A row per test step could only ever say "the step failed" -- never
+    which selection failed, which is the first thing a reviewer asks. This
+    is the matrix an auditor actually reads: down the samples, across the
+    steps, with each cell the verdict for that item on that step. Falls
+    back to a row per step when nothing is sample-tagged.
+    """
+    step_ids = list(results)
+    all_samples: list[str] = []
+    for result in results.values():
+        for sid in _sample_ids_for(result):
+            if sid not in all_samples:
+                all_samples.append(sid)
+
+    if not all_samples:
+        return _write_step_summary_rows(ws, row, results)
+
+    headers = ["Sample"] + [f"Test step {s}" for s in step_ids] + ["Detail sheet"]
+    for col, name in enumerate(headers, 1):
+        c = ws.cell(row, col, name)
+        c.font = Font(bold=True)
+        c.fill = _HEADER_FILL
+    header_row = row
+    row += 1
+
+    for sid in all_samples:
+        ws.cell(row, 1, sid).font = Font(bold=True)
+        for i, step_id in enumerate(step_ids):
+            result = results[step_id]
+            if "error" in result:
+                _styled(ws, row, 2 + i, "INCOMPLETE", (_FILL_BAD, _FONT_BAD))
+                continue
+            conclusion: ConclusionOutput = result["conclusion"]
+            per_item = {r.sample_id: r for r in conclusion.sample_results}
+            if sid in per_item:
+                verdict = per_item[sid].conclusion
+            elif sid in _sample_ids_for(result):
+                # Not broken out by the model -- the step's own verdict is
+                # the best available statement for this item.
+                verdict = conclusion.conclusion
+            else:
+                ws.cell(row, 2 + i, "n/a")
+                continue
+            _styled(
+                ws, row, 2 + i, _CONCLUSION_LABELS.get(verdict, verdict), _VERDICT_STYLE.get(verdict)
+            )
+        _link_to_sheet(ws, row, 2 + len(step_ids), sid)
+        row += 1
+
+    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(headers))}{row - 1}"
+    row += 1
+    return _write_step_summary_rows(ws, row, results)
+
+
+def _write_step_summary_rows(ws, row: int, results: dict[str, dict]) -> int:
+    """The step-level facts a per-sample row can't carry: confidence,
+    coverage, IPE status, and the exception / open-request counts.
     """
     headers = ["Test step", "Conclusion", "Confidence", "Sample coverage", "IPE status", "Exceptions", "Open requests"]
     for col, name in enumerate(headers, 1):
@@ -473,19 +591,41 @@ def _write_control_summary(ws, row: int, results: dict[str, dict]) -> int:
     for test_step_id, result in results.items():
         ws.cell(row, 1, test_step_id)
         if "error" in result:
-            ws.cell(row, 2, "INCOMPLETE -- run did not finish").font = Font(bold=True, color="AA0000")
+            _styled(ws, row, 2, "INCOMPLETE -- run did not finish", (_FILL_BAD, _FONT_BAD))
         else:
             c: ConclusionOutput = result["conclusion"]
-            verdict = ws.cell(row, 2, _CONCLUSION_LABELS.get(c.conclusion, c.conclusion))
-            color = _CONCLUSION_COLORS.get(c.conclusion)
-            if color:
-                verdict.font = Font(bold=True, color=color)
-            ws.cell(row, 3, c.confidence)
+            _styled(
+                ws,
+                row,
+                2,
+                _CONCLUSION_LABELS.get(c.conclusion, c.conclusion),
+                _VERDICT_STYLE.get(c.conclusion),
+            )
+            _styled(ws, row, 3, c.confidence, _CONFIDENCE_STYLE.get(c.confidence))
             if c.sample_coverage:
-                ws.cell(row, 4, f"{c.sample_coverage.total_found}/{c.sample_coverage.total_required}")
-            ws.cell(row, 5, c.ipe_completeness_accuracy_status)
-            ws.cell(row, 6, len(c.exceptions))
-            ws.cell(row, 7, len(c.additional_support_requests))
+                sc = c.sample_coverage
+                _styled(
+                    ws,
+                    row,
+                    4,
+                    f"{sc.total_found}/{sc.total_required}",
+                    (_FILL_GOOD, _FONT_GOOD) if sc.complete else (_FILL_BAD, _FONT_BAD),
+                )
+            _styled(
+                ws,
+                row,
+                5,
+                c.ipe_completeness_accuracy_status,
+                _IPE_STYLE.get(c.ipe_completeness_accuracy_status),
+            )
+            _styled(ws, row, 6, len(c.exceptions), _count_style(len(c.exceptions)))
+            _styled(
+                ws,
+                row,
+                7,
+                len(c.additional_support_requests),
+                _count_style(len(c.additional_support_requests)),
+            )
         row += 1
     return row + 1
 
@@ -667,7 +807,10 @@ def _write_step_sheet(
         put("Control objective ref", str(spec.get("control_objective_ref", "")))
         put("Control objective", str(spec.get("control_objective_text", "")))
         row += 1
-        if results is not None and len(results) > 1:
+        # Shown even on a single-step control: with a per-sample matrix
+        # this is no longer a restatement of the sheet below it -- it is
+        # the only place that says how each individual selection came out.
+        if results is not None:
             row = _write_control_summary(ws, row, results)
 
     put("Test step", test_step_id)
