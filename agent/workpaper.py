@@ -1125,6 +1125,19 @@ def _write_step_sheet(
         put("IPE status", conclusion.ipe_completeness_accuracy_status)
     row += 1
 
+    # Attributes sit here, straight after the conclusion, for the same
+    # reason they lead each sampled item's sheet: they are the structured
+    # "where is this satisfied" view. They used to render after
+    # DOCUMENTATION and PROCEDURES, so the summary contradicted the sample
+    # sheets on where a reviewer should look first.
+    summary_attributes = [
+        a
+        for a in conclusion.attribute_results
+        if a.sample_id is None or (sheet_citations and citations is None)
+    ]
+    if summary_attributes:
+        row = _write_attribute_table(ws, row, summary_attributes, sheet_citations, letters)
+
     section("EXCEPTIONS")
     put_list(conclusion.exceptions, empty="None noted.")
 
@@ -1141,17 +1154,6 @@ def _write_step_sheet(
     if conclusion.ipe_completeness_accuracy_evidence:
         section("IPE COMPLETENESS & ACCURACY EVIDENCE")
         put_list(conclusion.ipe_completeness_accuracy_evidence)
-
-    # Attributes shown here are the ones not pinned to a single sampled
-    # item -- plus, when there is no per-sample split, all of them, since
-    # this is then the only sheet there is.
-    summary_attributes = [
-        a
-        for a in conclusion.attribute_results
-        if a.sample_id is None or (sheet_citations and citations is None)
-    ]
-    if summary_attributes:
-        row = _write_attribute_table(ws, row, summary_attributes, sheet_citations, letters)
 
     if sheet_citations:
         section("EVIDENCE CITED")

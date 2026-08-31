@@ -431,7 +431,13 @@ TOOLS = [
         "report each in attribute_results per sampled item, with the value "
         "you observed and the evidence_ids proving it. A reviewer signs off "
         "attribute by attribute; do not make them mine the narrative to find "
-        "where one was satisfied.",
+        "where one was satisfied. State each finding ONCE, in the field that "
+        "owns it: attribute_results carries the observed values and figures; "
+        "exceptions and additional_support_requests are one concise line each "
+        "and should not re-derive that detail; procedures_performed says what "
+        "you DID, not what you found. A real workpaper repeated a single IPE "
+        "break six times across these fields -- that is harder to review, not "
+        "more thorough.",
         SubmitConclusionInput,
     ),
 ]
