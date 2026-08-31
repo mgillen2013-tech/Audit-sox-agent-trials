@@ -39,6 +39,40 @@ def extract_excel(path: str | Path) -> list[EvidenceItem]:
     for ws in wb.worksheets:
         items.extend(_extract_tables(ws, filename, counter))
         items.extend(_extract_annotated_cells(ws, filename, counter))
+        items.extend(_extract_images(ws, filename, counter))
+    return items
+
+
+def _extract_images(
+    ws: Worksheet, filename: str, counter: Iterator[int]
+) -> list[EvidenceItem]:
+    """Pasted screenshots living on a worksheet.
+
+    These were invisible before: extraction read cells only, so a tab whose
+    entire content is a pasted image came through as an EMPTY sheet and
+    never entered the evidence pool at all. That is not a rare shape -- a
+    real IPE "Parameters" tab was exactly this: a screenshot of the report
+    query showing the filters and "Selected rows: 57,039". The agent could
+    not compare that record count against the 30-row population extract
+    because it never saw the tab existed.
+
+    Emitted as image_ocr placeholders, the same shape a scanned PDF page
+    produces, so the existing OCR pass picks them up and transcribes them.
+    """
+    items: list[EvidenceItem] = []
+    for idx, image in enumerate(getattr(ws, "_images", []), start=1):
+        items.append(
+            EvidenceItem(
+                evidence_id=f"ev_{next(counter):04d}",
+                source_file=filename,
+                source_type="image_ocr",
+                location=f"{ws.title}!image{idx}",
+                extracted_text=None,
+                extracted_table=None,
+                extraction_confidence=0.0,
+                preview_ref=f"{filename}!{ws.title}!image{idx}",
+            )
+        )
     return items
 
 

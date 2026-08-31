@@ -358,94 +358,189 @@ def _build_xlsx(
     # Exhibit PNG buffers must stay alive until wb.save() -- openpyxl reads
     # image data at save time, not at add_image time.
     _live_buffers: list[BytesIO] = []
+    wb.remove(wb.active)  # sheets are created explicitly below
 
-    ws = wb.active
-    ws.title = "Summary"
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 90
-
-    next_row = 1
-
-    def kv(label: str, value: str, bold_value: bool = False) -> None:
-        # Explicit counter, not ws.max_row heuristics: a row whose only
-        # content is in column B (like the DRAFT banner, with an empty
-        # label) must still advance the cursor.
-        nonlocal next_row
-        ws.cell(next_row, 1, label).font = Font(bold=True)
-        c = ws.cell(next_row, 2, value)
-        c.alignment = Alignment(wrap_text=True, vertical="top")
-        if bold_value:
-            c.font = Font(bold=True)
-        next_row += 1
-
-    kv("", _DRAFT_BANNER, bold_value=True)
-    kv("Control ID", spec["control_id"])
-    kv("Control objective ref", spec.get("control_objective_ref", ""))
-    kv("Control objective", spec.get("control_objective_text", ""))
-    kv("", "")
-
-    header_row = next_row
-    summary_headers = [
-        "Test step",
-        "Conclusion",
-        "Confidence",
-        "Sample coverage",
-        "IPE status",
-        "Exceptions",
-        "Open requests",
-        "Detail sheet",
-    ]
-    for col, name in enumerate(summary_headers, 1):
-        cell = ws.cell(header_row, col, name)
-        cell.font = Font(bold=True)
-        cell.fill = _HEADER_FILL
-    for col, width in zip("ABCDEFGH", (22, 22, 12, 16, 16, 12, 14, 22)):
-        ws.column_dimensions[col].width = width
+    single_step = len(results) == 1
+    first_sheet = True
 
     for test_step_id, result in results.items():
-        r = ws.max_row + 1
-        ws.cell(r, 1, test_step_id)
-        if "error" in result:
-            ws.cell(r, 2, "INCOMPLETE -- run did not finish").font = Font(bold=True, color="AA0000")
-        else:
-            conclusion: ConclusionOutput = result["conclusion"]
-            verdict = ws.cell(r, 2, _CONCLUSION_LABELS.get(conclusion.conclusion, conclusion.conclusion))
-            color = _CONCLUSION_COLORS.get(conclusion.conclusion)
-            if color:
-                verdict.font = Font(bold=True, color=color)
-            ws.cell(r, 3, conclusion.confidence)
-            if conclusion.sample_coverage:
-                sc = conclusion.sample_coverage
-                ws.cell(r, 4, f"{sc.total_found}/{sc.total_required}")
-            ws.cell(r, 5, conclusion.ipe_completeness_accuracy_status)
-            ws.cell(r, 6, len(conclusion.exceptions))
-            ws.cell(r, 7, len(conclusion.additional_support_requests))
-        ws.cell(r, 8, _sheet_title(test_step_id))
+        citations = [] if "error" in result else list(result["conclusion"].evidence_citations)
+        groups = _sample_groups(citations)
+        per_sample = groups[0][0] is not None
 
-    # Header stays visible and filterable on a control with many steps.
-    last_row = ws.max_row
-    if last_row > header_row:
-        ws.auto_filter.ref = f"A{header_row}:H{last_row}"
-    ws.freeze_panes = ws.cell(header_row + 1, 1)
-
-    for test_step_id, result in results.items():
-        step_ws = wb.create_sheet(_sheet_title(test_step_id))
+        # Sheet 1 for this step: everything a reviewer reads top-to-bottom
+        # -- control header, conclusion, exceptions, open requests,
+        # documentation, procedures. The old layout split this across a
+        # Summary tab and a step tab, so the header lived somewhere you had
+        # to click away from to read anything.
+        summary_name = "Summary" if single_step else f"{test_step_id} Summary"
+        summary_ws = wb.create_sheet(_unique_sheet_name(wb, summary_name))
         letters, images, excerpts = _write_step_sheet(
-            step_ws, test_step_id, step_texts.get(test_step_id, ""), result, evidence_map, support_dir
+            summary_ws,
+            test_step_id,
+            step_texts.get(test_step_id, ""),
+            result,
+            evidence_map,
+            support_dir,
+            # When nothing is sample-tagged there is nowhere else for the
+            # evidence to go, so it stays here rather than vanishing.
+            citations=[] if per_sample else citations,
+            spec=spec if first_sheet else None,
+            results=results if first_sheet else None,
+            include_step_detail=True,
         )
-        citations = [] if "error" in result else result["conclusion"].evidence_citations
-        # Exhibits live on their own sheet: inline, a couple of full-page
-        # renders pushed the conclusion, IPE status, and open requests
-        # ~110 rows down the sheet, so a reviewer had to scroll past the
-        # pictures to reach the answers. The step sheet stays readable
-        # top-to-bottom; this is the appendix.
+        first_sheet = False
         if images or excerpts:
-            ex_ws = wb.create_sheet(_exhibit_sheet_title(test_step_id))
-            _write_exhibit_sheet(
-                ex_ws, test_step_id, images, excerpts, _live_buffers, letters, citations
-            )
+            ex_ws = wb.create_sheet(_unique_sheet_name(wb, f"{summary_ws.title} - Exhibits"))
+            _write_exhibit_sheet(ex_ws, summary_ws.title, images, excerpts, _live_buffers)
+
+        # Then one sheet per sampled item: just that item's evidence, with
+        # tickmarks restarting at A, plus its own exhibits.
+        if per_sample:
+            for sample_id, group in groups:
+                name = _unique_sheet_name(wb, sample_id)
+                ws = wb.create_sheet(name)
+                letters, images, excerpts = _write_step_sheet(
+                    ws,
+                    test_step_id,
+                    step_texts.get(test_step_id, ""),
+                    result,
+                    evidence_map,
+                    support_dir,
+                    citations=group,
+                    sample_id=sample_id,
+                    include_step_detail=False,
+                )
+                if images or excerpts:
+                    ex_ws = wb.create_sheet(_unique_sheet_name(wb, f"{name} - Exhibits"))
+                    _write_exhibit_sheet(ex_ws, name, images, excerpts, _live_buffers)
 
     wb.save(out_path)
+
+
+def _sample_groups(
+    citations: list[EvidenceCitation],
+) -> list[tuple[str | None, list[EvidenceCitation]]]:
+    """Splits a step's citations into one group per sampled item, so each
+    selection gets its own sheet, its own exhibits, and tickmarks that
+    restart at A -- a reviewer clearing selection 2 wants selection 2's
+    evidence, not one merged list where its first tickmark happens to be F.
+
+    Citations with no sample_id are step-wide (a policy, the population
+    extract, IPE parameters) and ride along on the first item's sheet.
+    When nothing is tagged at all -- an older run, or a step with no sample
+    -- everything stays on a single sheet, as before.
+    """
+    by_sample: dict[str, list[EvidenceCitation]] = {}
+    for c in citations:
+        if c.sample_id:
+            by_sample.setdefault(c.sample_id, []).append(c)
+
+    if not by_sample:
+        return [(None, citations)]
+
+    step_level = [c for c in citations if not c.sample_id]
+    groups = [(sid, cits) for sid, cits in by_sample.items()]
+    groups[0] = (groups[0][0], step_level + groups[0][1])
+    return groups
+
+
+def _unique_sheet_name(wb, desired: str) -> str:
+    """Excel sheet names must be unique and <=31 chars. Two test steps can
+    each have a sample called "1", so fall back to a suffix rather than
+    letting openpyxl silently rename or collide.
+    """
+    base = _sheet_title(desired)
+    if base not in wb.sheetnames:
+        return base
+    for n in range(2, 100):
+        candidate = f"{base[:28]}({n})"
+        if candidate not in wb.sheetnames:
+            return candidate
+    return base[:28] + "(x)"
+
+
+def _write_control_summary(ws, row: int, results: dict[str, dict]) -> int:
+    """One row per test step -- only worth showing on a multi-step control;
+    with a single step it just restated the sheet below it.
+    """
+    headers = ["Test step", "Conclusion", "Confidence", "Sample coverage", "IPE status", "Exceptions", "Open requests"]
+    for col, name in enumerate(headers, 1):
+        c = ws.cell(row, col, name)
+        c.font = Font(bold=True)
+        c.fill = _HEADER_FILL
+    row += 1
+    for test_step_id, result in results.items():
+        ws.cell(row, 1, test_step_id)
+        if "error" in result:
+            ws.cell(row, 2, "INCOMPLETE -- run did not finish").font = Font(bold=True, color="AA0000")
+        else:
+            c: ConclusionOutput = result["conclusion"]
+            verdict = ws.cell(row, 2, _CONCLUSION_LABELS.get(c.conclusion, c.conclusion))
+            color = _CONCLUSION_COLORS.get(c.conclusion)
+            if color:
+                verdict.font = Font(bold=True, color=color)
+            ws.cell(row, 3, c.confidence)
+            if c.sample_coverage:
+                ws.cell(row, 4, f"{c.sample_coverage.total_found}/{c.sample_coverage.total_required}")
+            ws.cell(row, 5, c.ipe_completeness_accuracy_status)
+            ws.cell(row, 6, len(c.exceptions))
+            ws.cell(row, 7, len(c.additional_support_requests))
+        row += 1
+    return row + 1
+
+
+def _write_evidence_rows(ws, row: int, citations: list[EvidenceCitation], letters: list[str]) -> int:
+    """The evidence table itself. Returns the next free row."""
+    headers = ["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"]
+    for col, name in enumerate(headers, 1):
+        cell = ws.cell(row, col, name)
+        cell.font = Font(bold=True)
+        cell.fill = _HEADER_FILL
+    row += 1
+    for i, cit in enumerate(citations):
+        letter = letters[i] if i < len(letters) else ""
+        for col, value in enumerate(
+            [letter, cit.evidence_id, cit.source_file, cit.location, cit.quote_or_summary, cit.relevance], 1
+        ):
+            c = ws.cell(row, col, value)
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            if col == 1:
+                c.font = Font(bold=True, color="AA0000")
+        row += 1
+    return row + 1
+
+
+def _write_evidence_table(
+    ws,
+    row: int,
+    citations: list[EvidenceCitation],
+    letters: list[str],
+    sample_id: str | None,
+    sheet_title: str,
+) -> None:
+    """A per-sample sheet: which item this is, then that item's evidence
+    with its own A/B/C tickmarks. The DRAFT banner and test-step header are
+    already on the sheet -- the caller writes them for every sheet before
+    branching here.
+    """
+    ws.cell(row, 1, "Sample").font = Font(bold=True)
+    ws.cell(row, 2, str(sample_id or "")).font = Font(bold=True)
+    row += 2
+
+    for col in range(1, 7):
+        ws.cell(row, col).fill = _SECTION_FILL
+    ws.cell(row, 1, "EVIDENCE CITED").font = _SECTION_FONT
+    row += 2
+
+    if not citations:
+        ws.cell(row, 1, "No evidence was cited for this sampled item.").font = Font(italic=True)
+        return
+
+    row = _write_evidence_rows(ws, row, citations, letters)
+    ws.cell(row, 1, f"Exhibits for these citations: see the '{sheet_title} - Exhibits' sheet.").font = Font(
+        italic=True
+    )
 
 
 def _write_exhibit_sheet(
@@ -454,8 +549,6 @@ def _write_exhibit_sheet(
     images: list[tuple[str, BytesIO, tuple[int, int]]],
     excerpts: list[tuple[str, list[str]]],
     live_buffers: list[BytesIO],
-    letters: list[str],
-    citations: list[EvidenceCitation],
 ) -> None:
     ws.column_dimensions["A"].width = 12
     ws.column_dimensions["B"].width = 40
@@ -468,26 +561,9 @@ def _write_exhibit_sheet(
     ws.cell(row, 1, f"Evidence exhibits — test step {test_step_id}").font = Font(bold=True, size=12)
     row += 2
 
-    # Tickmark legend: a reviewer looking at a red box on a page shouldn't
-    # have to flip back to the step sheet to learn what it marks.
-    if letters and citations:
-        ws.cell(row, 1, "TICKMARK LEGEND").font = Font(bold=True)
-        row += 1
-        for col, name in enumerate(["Tickmark", "Marks", "Source"], 1):
-            c = ws.cell(row, col, name)
-            c.font = Font(bold=True)
-            c.fill = _HEADER_FILL
-        row += 1
-        for letter, cit in zip(letters, citations):
-            c = ws.cell(row, 1, letter)
-            c.font = Font(bold=True, color="AA0000")
-            ws.cell(row, 2, cit.quote_or_summary).alignment = Alignment(wrap_text=True, vertical="top")
-            ws.cell(row, 3, f"{cit.source_file} ({cit.location})").alignment = Alignment(
-                wrap_text=True, vertical="top"
-            )
-            row += 1
-        row += 1
-
+    # No tickmark legend here: it repeated the letter, quote and source
+    # that the Evidence Cited table already carries, so a reviewer read the
+    # same rows twice and had two places to keep in sync.
     ws.cell(row, 1, "Red boxes mark the cited value on the page. A letter in the corner means the page").font = Font(
         italic=True
     )
@@ -520,12 +596,23 @@ def _write_step_sheet(
     result: dict,
     evidence_map: dict[str, EvidenceItem],
     support_dir: Path | None,
+    citations: list[EvidenceCitation] | None = None,
+    sample_id: str | None = None,
+    spec: dict[str, Any] | None = None,
+    results: dict[str, dict] | None = None,
+    include_step_detail: bool = True,
 ) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int]]], list[tuple[str, list[str]]]]:
-    """Writes one test step's sheet, ordered so a reviewer reads answers
-    first (conclusion, coverage, IPE, exceptions, open requests) before the
+    """Writes one sheet, ordered so a reviewer reads answers first
+    (conclusion, coverage, IPE, exceptions, open requests) before the
     supporting detail. Returns the exhibit material for the caller to place
     on a separate sheet -- inline images used to push the conclusion ~110
     rows down the page.
+
+    include_step_detail: True for the step's summary sheet (control header,
+    conclusion, exceptions, open requests, documentation, procedures);
+    False for a per-sample sheet, which carries only that item's evidence.
+    spec/results: passed only for the workbook's first sheet, which carries
+    the control header and the across-steps summary table.
     """
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 100
@@ -572,6 +659,17 @@ def _write_step_sheet(
 
     ws.cell(row, 1, _DRAFT_BANNER).font = Font(bold=True, color="9C0006")
     row += 2
+
+    # Control header, on the workbook's first sheet only -- it used to sit
+    # on a separate Summary tab a reviewer had to click away from.
+    if spec is not None:
+        put("Control ID", str(spec.get("control_id", "")))
+        put("Control objective ref", str(spec.get("control_objective_ref", "")))
+        put("Control objective", str(spec.get("control_objective_text", "")))
+        row += 1
+        if results is not None and len(results) > 1:
+            row = _write_control_summary(ws, row, results)
+
     put("Test step", test_step_id)
     put("Test step text", test_step_text)
     row += 1
@@ -598,14 +696,27 @@ def _write_step_sheet(
         return [], [], []
 
     conclusion: ConclusionOutput = result["conclusion"]
+    sheet_citations = conclusion.evidence_citations if citations is None else citations
 
-    letters: list[str] = []
+    # Tickmarks are lettered per SHEET, so each sampled item starts at A
+    # instead of continuing a running sequence from earlier items. Lettered
+    # unconditionally: they label the rows of the evidence table, so a
+    # workpaper built without exhibits (no support files to hand) still
+    # gets A/B/C rather than a blank column.
+    letters: list[str] = _tickmark_letters(len(sheet_citations))
     exhibit_images: list[tuple[str, BytesIO, tuple[int, int]]] = []
     excerpts: list[tuple[str, list[str]]] = []
-    if conclusion.evidence_citations and evidence_map and support_dir is not None:
+    if sheet_citations and evidence_map and support_dir is not None:
         letters, exhibit_images, excerpts = _build_step_exhibits(
-            conclusion.evidence_citations, evidence_map, support_dir
+            sheet_citations, evidence_map, support_dir
         )
+
+    if not include_step_detail:
+        # Per-sample sheet: this item's evidence only. The conclusion,
+        # narrative and procedures are step-wide and live on the summary
+        # sheet -- repeating them per item is noise, not documentation.
+        _write_evidence_table(ws, row, sheet_citations, letters, sample_id, ws.title)
+        return letters, exhibit_images, excerpts
 
     # ── Answers first ──────────────────────────────────────────────────
     section("CONCLUSION")
@@ -644,27 +755,11 @@ def _write_step_sheet(
         section("IPE COMPLETENESS & ACCURACY EVIDENCE")
         put_list(conclusion.ipe_completeness_accuracy_evidence)
 
-    if conclusion.evidence_citations:
+    if sheet_citations:
         section("EVIDENCE CITED")
-        headers = ["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"]
-        for col, name in enumerate(headers, 1):
-            cell = ws.cell(row, col, name)
-            cell.font = Font(bold=True)
-            cell.fill = _HEADER_FILL
-        row += 1
-        for i, cit in enumerate(conclusion.evidence_citations):
-            letter = letters[i] if i < len(letters) else ""
-            for col, value in enumerate(
-                [letter, cit.evidence_id, cit.source_file, cit.location, cit.quote_or_summary, cit.relevance], 1
-            ):
-                c = ws.cell(row, col, value)
-                c.alignment = Alignment(wrap_text=True, vertical="top")
-                if col == 1:
-                    c.font = Font(bold=True, color="AA0000")
-            row += 1
-        row += 1
+        row = _write_evidence_rows(ws, row, sheet_citations, letters)
         if exhibit_images or excerpts:
-            ws.cell(row, 1, f"Exhibits for these citations: see the '{_exhibit_sheet_title(test_step_id)}' sheet.").font = Font(
+            ws.cell(row, 1, f"Exhibits for these citations: see the '{ws.title} - Exhibits' sheet.").font = Font(
                 italic=True
             )
             row += 2

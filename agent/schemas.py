@@ -144,6 +144,13 @@ class EvidenceCitation(BaseModel):
     location: str
     quote_or_summary: str
     relevance: str
+    # Which sampled item this evidence supports, when the test step has a
+    # sample. This is what lets the workpaper document each selection on its
+    # own sheet with its own tickmarks -- a reviewer clearing selection 2
+    # wants selection 2's evidence, not one merged list. Left None for
+    # evidence that applies to the step as a whole (a policy, the population
+    # extract, IPE parameters) rather than to one item.
+    sample_id: str | None = None
 
 
 class SampleCoverage(BaseModel):

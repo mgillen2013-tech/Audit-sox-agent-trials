@@ -136,6 +136,14 @@ Non-negotiables:
   before concluding anything. When you have enough to conclude -- including
   concluding you don't -- call submit_conclusion. That is the only way this
   conversation ends.
+- IPE: when the evidence includes both a population extract and the report
+  parameters it was produced from (a query/parameters screenshot, report
+  header, or run log), actually reconcile them -- agree the record count in
+  the parameters to the number of rows in the extract, and check the filters
+  match the control's scope and period. A record count that does not tie, or
+  filters that do not match the control, is an exception to flag, not a
+  detail to pass over. Only mark ipe_completeness_accuracy_status
+  "validated" when you have performed that reconciliation and it agrees.
 
 {COMPANY_CONTEXT}"""
 
@@ -406,7 +414,10 @@ TOOLS = [
         "evidence (via search_cy_support) to conclude, including concluding "
         "insufficient_evidence. Note: when the test step has a sample, a "
         "'satisfied' conclusion is only accepted after a check_sample_coverage "
-        "call showing complete coverage.",
+        "call showing complete coverage. Set each citation's sample_id to the "
+        "sampled item it supports, so the workpaper can document each selection "
+        "separately; leave it null only for evidence covering the step as a "
+        "whole (a policy, the population extract, IPE parameters).",
         SubmitConclusionInput,
     ),
 ]

@@ -67,20 +67,45 @@ def _page_number(location: str) -> int:
     return int(m.group(1)) if m else 1
 
 
-def _render_page_png(pdf_path: Path, page_num: int) -> bytes:
+_XL_IMAGE_RE = re.compile(r"^(.*)!image(\d+)$")
+
+
+def _downscale(pil: Any) -> bytes:
+    if max(pil.width, pil.height) > _MAX_EDGE_PX:
+        ratio = _MAX_EDGE_PX / max(pil.width, pil.height)
+        pil = pil.resize((int(pil.width * ratio), int(pil.height * ratio)))
+    buf = BytesIO()
+    pil.convert("RGB").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _render_pdf_page_png(pdf_path: Path, page_num: int) -> bytes:
     import pdfplumber
 
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[page_num - 1]
-        pil = page.to_image(resolution=_OCR_DPI).annotated.convert("RGB")
+        return _downscale(page.to_image(resolution=_OCR_DPI).annotated)
 
-    if max(pil.width, pil.height) > _MAX_EDGE_PX:
-        ratio = _MAX_EDGE_PX / max(pil.width, pil.height)
-        pil = pil.resize((int(pil.width * ratio), int(pil.height * ratio)))
 
-    buf = BytesIO()
-    pil.save(buf, "PNG")
-    return buf.getvalue()
+def _render_excel_image_png(xlsx_path: Path, sheet_name: str, image_idx: int) -> bytes:
+    """Bytes of one image pasted onto a worksheet (1-based index)."""
+    import openpyxl
+    from PIL import Image as PILImage
+
+    wb = openpyxl.load_workbook(xlsx_path)
+    image = wb[sheet_name]._images[image_idx - 1]
+    return _downscale(PILImage.open(BytesIO(image._data())))
+
+
+def _render_source_png(item: EvidenceItem, source_dir: Path) -> bytes:
+    """Dispatch on where the image actually lives: a page of a scanned PDF,
+    or a screenshot pasted onto a worksheet.
+    """
+    path = source_dir / item.source_file
+    m = _XL_IMAGE_RE.match(item.location)
+    if m and path.suffix.lower() in (".xlsx", ".xlsm", ".xls"):
+        return _render_excel_image_png(path, m.group(1), int(m.group(2)))
+    return _render_pdf_page_png(path, _page_number(item.location))
 
 
 def _transcribe(png: bytes, client: Any, model: str) -> tuple[str, int]:
@@ -160,7 +185,7 @@ def ocr_image_items(
 
         page_num = _page_number(item.location)
         try:
-            png = _render_page_png(source_dir / item.source_file, page_num)
+            png = _render_source_png(item, source_dir)
             text, tokens = _transcribe(png, client, model)
             tokens_used += tokens
         except Exception:  # noqa: BLE001 -- a failed OCR degrades to the placeholder, never breaks the run
@@ -175,10 +200,15 @@ def ocr_image_items(
             out.append(item)
             continue
 
+        kind = (
+            "an image pasted into the workbook"
+            if _XL_IMAGE_RE.match(item.location)
+            else "a scanned page"
+        )
         out.append(
             item.model_copy(
                 update={
-                    "extracted_text": f"[OCR transcription of a scanned page]\n{text}",
+                    "extracted_text": f"[OCR transcription of {kind}]\n{text}",
                     "extraction_confidence": OCR_CONFIDENCE,
                 }
             )

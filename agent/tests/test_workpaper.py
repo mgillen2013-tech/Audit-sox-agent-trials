@@ -94,26 +94,26 @@ def test_xlsx_workpaper_contents(spec: dict, results: dict, tmp_path: Path):
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
 
     wb = openpyxl.load_workbook(path)
-    assert set(wb.sheetnames) == {"Summary", "TS-4.2", "TS-9.9"}
+    assert set(wb.sheetnames) == {"TS-4.2 Summary", "TS-9.9 Summary"}
 
     def sheet_text(name: str) -> str:
         return " ".join(
             str(cell.value) for row in wb[name].iter_rows() for cell in row if cell.value is not None
         )
 
-    summary = sheet_text("Summary")
+    summary = sheet_text("TS-4.2 Summary")
     assert "DRAFT" in summary
     assert "C-14" in summary
     assert "Satisfied" in summary
     assert "INCOMPLETE" in summary  # the failed step is visible on the summary, not silently missing
 
-    step = sheet_text("TS-4.2")
+    step = sheet_text("TS-4.2 Summary")
     assert "Recalculated accrual ties to GL with no variance." in step
     assert "ev_0001" in step
     assert "Q4 support for the November accrual" in step
     assert "claude-opus-5" in step
 
-    failed = sheet_text("TS-9.9")
+    failed = sheet_text("TS-9.9 Summary")
     assert "INCOMPLETE" in failed
     assert "token_budget_exceeded" in failed
     assert "november accrual reconciliation" in failed  # searches attempted before the abort are documented
@@ -162,7 +162,7 @@ def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path, support_dir=support)
 
     wb = openpyxl.load_workbook(path)
-    ws = wb["TS-4.2"]
+    ws = wb["Summary"]
     text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
     assert "Tickmark" in text
     assert "approval.pdf p.1" in text
@@ -170,17 +170,90 @@ def test_xlsx_workpaper_embeds_annotated_exhibit(annotated_setup, tmp_path: Path
     # Exhibits live on their own sheet -- inline, full-page renders pushed
     # the conclusion ~110 rows down the step sheet.
     assert len(ws._images) == 0
-    assert "see the 'TS-4.2 - Exhibits' sheet" in text
+    assert "see the 'Summary - Exhibits' sheet" in text
 
-    ex_ws = wb["TS-4.2 - Exhibits"]
+    ex_ws = wb["Summary - Exhibits"]
     assert len(ex_ws._images) == 1
     ex_text = " ".join(str(c.value) for r in ex_ws.iter_rows() for c in r if c.value is not None)
     assert "Evidence exhibits" in ex_text
-    # A reviewer looking at a red box shouldn't have to flip back to the
-    # step sheet to learn what it marks -- the legend travels with the page.
-    assert "TICKMARK LEGEND" in ex_text
-    assert "Vendor Number 21022452" in ex_text
     assert "could not be located" in ex_text  # explains a corner-letter exhibit
+    # No legend here: it repeated the letter/quote/source already in the
+    # Evidence Cited table, so a reviewer read the same rows twice and had
+    # two places to keep in sync.
+    assert "TICKMARK LEGEND" not in ex_text
+    assert "Vendor Number 21022452" not in ex_text
+
+
+def test_each_sampled_item_gets_its_own_sheet_and_restarts_tickmarks(
+    spec: dict, results: dict, tmp_path: Path
+):
+    # A reviewer clearing selection 2 wants selection 2's evidence, not one
+    # merged list where its first tickmark happens to be D.
+    def cite(ev, sid, quote):
+        return EvidenceCitation(
+            evidence_id=ev,
+            source_file="support.pdf",
+            location="support.pdf p.1",
+            quote_or_summary=quote,
+            relevance="r",
+            sample_id=sid,
+        )
+
+    conclusion = results["TS-4.2"]["conclusion"].model_copy(
+        update={
+            "evidence_citations": [
+                cite("ev_0018", None, "Population extract, 30 rows"),  # step-wide
+                cite("ev_0001", "1", "invoice 2859 approved"),
+                cite("ev_0010", "1", "payment 881477"),
+                cite("ev_0015", "2", "invoice 35713082 approved"),
+            ]
+        }
+    )
+    path = build_workpaper(
+        spec, {"TS-4.2": {"conclusion": conclusion, "audit_log": []}}, "PY.xlsx", tmp_path
+    )
+    wb = openpyxl.load_workbook(path)
+
+    assert wb.sheetnames == ["Summary", "1", "2"]
+
+    def text(name):
+        return " ".join(str(c.value) for r in wb[name].iter_rows() for c in r if c.value is not None)
+
+    # Summary carries the narrative and procedures, not the evidence table.
+    summary = text("Summary")
+    assert "Recalculated accrual ties to GL with no variance." in summary
+    assert "PROCEDURES PERFORMED" in summary
+    assert "ev_0001" not in summary
+
+    s1, s2 = text("1"), text("2")
+    assert "ev_0001" in s1 and "ev_0010" in s1
+    assert "ev_0015" in s2
+    # Sample 2's evidence must not bleed onto sample 1's sheet.
+    assert "ev_0015" not in s1
+    assert "ev_0001" not in s2
+    # Step-wide evidence (the population extract) rides with the first item.
+    assert "ev_0018" in s1
+
+    # Tickmarks restart per sheet: sample 2's single citation is A, not D.
+    def tickmarks(name):
+        ws = wb[name]
+        col = [ws.cell(r, 1).value for r in range(1, ws.max_row + 1)]
+        return [v for v in col if v in ("A", "B", "C", "D")]
+
+    assert tickmarks("1") == ["A", "B", "C"]
+    assert tickmarks("2") == ["A"]
+
+
+def test_untagged_citations_stay_on_one_sheet(spec: dict, results: dict, tmp_path: Path):
+    # An older run (or a step with no sample) has no sample_id anywhere --
+    # everything must stay on the summary sheet rather than vanishing.
+    path = build_workpaper(
+        spec, {"TS-4.2": results["TS-4.2"]}, "PY.xlsx", tmp_path
+    )
+    wb = openpyxl.load_workbook(path)
+    assert wb.sheetnames == ["Summary"]
+    text = " ".join(str(c.value) for r in wb["Summary"].iter_rows() for c in r if c.value is not None)
+    assert "ev_0001" in text
 
 
 def test_tickmark_boxes_are_padded_off_the_text():
@@ -263,7 +336,7 @@ def test_workpaper_without_support_dir_is_text_only(annotated_setup, tmp_path: P
     spec, results, _ = annotated_setup
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
     wb = openpyxl.load_workbook(path)
-    assert len(wb["TS-4.2"]._images) == 0
+    assert len(wb["Summary"]._images) == 0
 
 
 def test_excel_cited_evidence_gets_text_excerpt(spec: dict, results: dict, tmp_path: Path):
@@ -280,7 +353,7 @@ def test_excel_cited_evidence_gets_text_excerpt(spec: dict, results: dict, tmp_p
 
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path, support_dir=support)
     out = openpyxl.load_workbook(path)
-    text = " ".join(str(c.value) for r in out["TS-4.2 - Exhibits"].iter_rows() for c in r if c.value is not None)
+    text = " ".join(str(c.value) for r in out["TS-4.2 Summary - Exhibits"].iter_rows() for c in r if c.value is not None)
     assert "Exhibit A" in text
     assert "October accrual | 482110" in text
 
@@ -291,7 +364,7 @@ def test_step_sheet_puts_answers_before_supporting_detail(spec: dict, results: d
     # narrative and evidence table -- inline exhibits previously pushed all
     # of that ~110 rows down the page.
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
-    ws = openpyxl.load_workbook(path)["TS-4.2"]
+    ws = openpyxl.load_workbook(path)["TS-4.2 Summary"]
 
     rows = {}
     for row in ws.iter_rows():
@@ -309,14 +382,14 @@ def test_empty_exceptions_says_none_not_silence(spec: dict, results: dict, tmp_p
     # "no exceptions" and "we didn't look" must not be indistinguishable in
     # a workpaper -- an empty section is a real audit assertion.
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
-    ws = openpyxl.load_workbook(path)["TS-4.2"]
+    ws = openpyxl.load_workbook(path)["TS-4.2 Summary"]
     text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
     assert "None noted." in text
 
 
 def test_summary_sheet_carries_ipe_and_open_request_counts(spec: dict, results: dict, tmp_path: Path):
     path = build_workpaper(spec, results, "PY_Testing_C14.xlsx", tmp_path)
-    ws = openpyxl.load_workbook(path)["Summary"]
+    ws = openpyxl.load_workbook(path)["TS-4.2 Summary"]
     text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
     assert "IPE status" in text
     assert "Open requests" in text
