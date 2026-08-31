@@ -255,6 +255,48 @@ class _ConclusionCore(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _rollup_not_better_than_worst_item(self) -> "_ConclusionCore":
+        """A step cannot be 'satisfied' when one of its sampled items was
+        not. The roll-up and the per-item results are written independently,
+        so nothing otherwise stopped a workpaper whose summary read
+        "Satisfied" while a sample row directly beneath it read "Not
+        satisfied" -- a contradiction a reviewer would catch immediately,
+        and rightly stop trusting the rest of the file over.
+        """
+        if self.conclusion == "satisfied":
+            failed = [r.sample_id for r in self.sample_results if r.conclusion != "satisfied"]
+            if failed:
+                raise ValueError(
+                    f"conclusion is 'satisfied' but sample_results mark {failed} as not satisfied. "
+                    "The step-level conclusion cannot be more favourable than its worst sampled "
+                    "item -- use 'not_satisfied' (or 'insufficient_evidence') and record the "
+                    "exception."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _attribute_results_reference_a_real_sample(self) -> "_ConclusionCore":
+        """An attribute pinned to a sample_id that has no sample_result and
+        no citation would render on a sheet that does not exist, silently
+        dropping the attribute from the workpaper.
+        """
+        known = {r.sample_id for r in self.sample_results}
+        known |= {c.sample_id for c in self.evidence_citations if c.sample_id}
+        if not known:
+            return self
+        stray = sorted(
+            {a.sample_id for a in self.attribute_results if a.sample_id and a.sample_id not in known}
+        )
+        if stray:
+            raise ValueError(
+                f"attribute_results reference sample_id(s) {stray} that appear in no "
+                "sample_results and no evidence_citations -- they would be dropped from the "
+                "workpaper. Use the sample_ids from the sample listing, or null for a "
+                "step-wide attribute."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _ipe_evidence_matches_status(self) -> "_ConclusionCore":
         if self.ipe_completeness_accuracy_status == "validated" and not self.ipe_completeness_accuracy_evidence:
             raise ValueError(

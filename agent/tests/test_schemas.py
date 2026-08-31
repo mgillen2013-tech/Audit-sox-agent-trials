@@ -16,6 +16,7 @@ from agent.schemas import (
     SampleCoverage,
     SampleItem,
     SamplePopulationManifest,
+    SubmitConclusionInput,
     validate_citations_against_transcript,
 )
 
@@ -181,3 +182,104 @@ def test_valid_manifest_round_trips():
         ],
     )
     assert manifest.samples[0].key_fields["branch"] == "35210"
+
+
+# --------------------------------------------------------------------------
+# Cross-field consistency: the summary and the per-item rows are written
+# independently, so nothing else stops them contradicting each other.
+# --------------------------------------------------------------------------
+
+
+def _core(**overrides) -> dict:
+    base = dict(
+        test_step_id="TS-1",
+        control_objective_ref="CO-1",
+        conclusion="satisfied",
+        narrative="n",
+        evidence_citations=[
+            {
+                "evidence_id": "ev_0001",
+                "source_file": "f.pdf",
+                "location": "p.1",
+                "quote_or_summary": "q",
+                "relevance": "r",
+                "sample_id": "1",
+            }
+        ],
+        procedures_performed=["p"],
+        ipe_completeness_accuracy_status="not_applicable",
+        ipe_completeness_accuracy_evidence=[],
+        exceptions=[],
+        additional_support_requests=[],
+        confidence="high",
+        confidence_rationale="r",
+    )
+    base.update(overrides)
+    return base
+
+
+def test_step_cannot_be_satisfied_when_a_sampled_item_failed():
+    # A workpaper whose summary reads "Satisfied" while the sample row
+    # beneath it reads "Not satisfied" is a contradiction a reviewer would
+    # catch -- and then rightly distrust the rest of the file.
+    with pytest.raises(ValidationError, match="cannot be more favourable"):
+        SubmitConclusionInput(
+            **_core(
+                conclusion="satisfied",
+                sample_results=[
+                    {"sample_id": "1", "conclusion": "satisfied"},
+                    {"sample_id": "2", "conclusion": "not_satisfied"},
+                ],
+            )
+        )
+
+
+def test_not_satisfied_rollup_with_a_failed_item_is_fine():
+    c = SubmitConclusionInput(
+        **_core(
+            conclusion="not_satisfied",
+            sample_results=[
+                {"sample_id": "1", "conclusion": "satisfied"},
+                {"sample_id": "2", "conclusion": "not_satisfied"},
+            ],
+        )
+    )
+    assert c.conclusion == "not_satisfied"
+
+
+def test_attribute_pinned_to_an_unknown_sample_is_rejected():
+    # It would render on a sheet that does not exist, silently dropping the
+    # attribute from the workpaper.
+    with pytest.raises(ValidationError, match="appear in no"):
+        SubmitConclusionInput(
+            **_core(
+                sample_results=[{"sample_id": "1", "conclusion": "satisfied"}],
+                attribute_results=[
+                    {
+                        "attribute": "a",
+                        "sample_id": "99",
+                        "result": "satisfied",
+                        "value_observed": "v",
+                        "evidence_ids": [],
+                    }
+                ],
+            )
+        )
+
+
+def test_step_wide_attribute_needs_no_sample():
+    c = SubmitConclusionInput(
+        **_core(
+            sample_results=[{"sample_id": "1", "conclusion": "satisfied"}],
+            attribute_results=[
+                {
+                    "attribute": "IPE reconciles",
+                    "sample_id": None,
+                    "result": "not_satisfied",
+                    "value_observed": "57,039 vs 30",
+                    "evidence_ids": [],
+                }
+            ],
+        )
+    )
+    assert c.attribute_results[0].sample_id is None
