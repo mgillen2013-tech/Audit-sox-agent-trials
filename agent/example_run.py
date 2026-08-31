@@ -22,7 +22,7 @@ Bedrock-only quirk) -- but Foundry only answers for whatever model you
 actually deployed on your resource. Check the exact model ID under
 "Models + endpoints" in the Foundry portal and set it via:
     $env:ANTHROPIC_MODEL="claude-opus-4-8"   # or whatever you deployed
-It defaults to agent.loop.DEFAULT_MODEL (claude-sonnet-5) if unset.
+It defaults to agent.loop.DEFAULT_MODEL (claude-opus-5) if unset.
 
 If you're calling the first-party API directly instead of Foundry, swap
 AnthropicFoundry() below for anthropic.Anthropic() (reads ANTHROPIC_API_KEY

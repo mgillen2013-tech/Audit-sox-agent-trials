@@ -42,7 +42,11 @@ from agent.tools import (
 )
 from agent.schemas import validate_citations_against_transcript
 
-DEFAULT_MODEL = "claude-sonnet-5"
+# Matches the deployment this is actually run against. It must name a model
+# that exists on the Foundry resource -- a default that doesn't just fails
+# the run at the first API call, so "a sensible general default" is worth
+# less here than "the one that works".
+DEFAULT_MODEL = "claude-opus-5"
 PROMPT_VERSION = "v1"
 MAX_TOOL_ITERATIONS = 15
 
