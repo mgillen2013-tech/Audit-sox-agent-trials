@@ -31,6 +31,13 @@ from agent.schemas import (
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
+# Search results are the single largest recurring cost in a run: they land
+# in the conversation and are re-sent (at cache rates) on every subsequent
+# turn. These bound one response as a whole rather than per result.
+_MAX_SEARCH_RESPONSE_CHARS = 6_000
+_MAX_SNIPPET_CHARS = 2_000
+_MIN_SNIPPET_CHARS = 400
+
 
 def _tokenize(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN_RE.findall(text)]
@@ -122,11 +129,21 @@ def search_cy_support(inp: SearchCySupportInput, ctx: ToolContext) -> SearchCySu
     # Per-control evidence pools are kept small by extraction chunking, so
     # returning items nearly-whole is cheap; anything longer than the cap
     # says so explicitly instead of truncating silently.
+    # Budget the WHOLE response, not each result independently. A snippet
+    # cap alone meant top_k=8 could return 8 x 2,000 chars -- roughly 4,000
+    # tokens that then sit in the conversation for every remaining turn.
+    # Allocating a shared budget makes a broad search return shorter
+    # snippets and a targeted one return near-full text, which is the right
+    # incentive: ask precisely, get more.
+    per_item = max(
+        _MIN_SNIPPET_CHARS, min(_MAX_SNIPPET_CHARS, _MAX_SEARCH_RESPONSE_CHARS // max(len(top), 1))
+    )
+
     results = []
     for item, score in top:
         text = _searchable_text(item)
-        if len(text) > 2_000:
-            text = text[:2_000] + f"\n...[truncated -- {len(text):,} chars total; search more specifically to see other parts]"
+        if len(text) > per_item:
+            text = text[:per_item] + f"\n...[truncated -- {len(text):,} chars total; search more specifically to see other parts]"
         results.append(
             SearchResult(
                 evidence_id=item.evidence_id,

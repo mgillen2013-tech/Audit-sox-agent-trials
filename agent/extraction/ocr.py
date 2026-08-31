@@ -44,8 +44,11 @@ OCR_CONFIDENCE = 0.8
 # scanned bundle would spend unbounded money before testing even began.
 # Pages past the limit keep their placeholder (flagged unreadable), which
 # is the honest outcome and the one the agent already knows how to handle
-# via request_additional_support.
-MAX_OCR_PAGES = 40
+# via request_additional_support. At ~1-2K tokens a page this is the
+# largest cost incurred BEFORE any testing starts, so the ceiling sits
+# below what a whole healthy run costs -- 40 pages could add ~80K on its
+# own, more than the run it precedes.
+MAX_OCR_PAGES = 15
 
 _PROMPT = """\
 Transcribe this document page verbatim for use as audit evidence.

@@ -78,7 +78,10 @@ class EvidenceItem(BaseModel):
 class SearchCySupportInput(BaseModel):
     query: str
     evidence_types: list[EvidenceSourceType] | None = None
-    top_k: int = 5
+    # Bounded: results stay in the conversation for the rest of the run, so
+    # an unbounded top_k let one broad search park several thousand tokens
+    # in history permanently. A real run asked for 8.
+    top_k: int = Field(5, ge=1, le=10)
 
 
 class SearchResult(BaseModel):

@@ -115,3 +115,50 @@ def test_request_additional_support_records_and_returns_id(ctx: ToolContext):
     )
     assert out.request_id in ctx.support_requests
     assert ctx.support_requests[out.request_id].reason == "illegible"
+
+
+# --------------------------------------------------------------------------
+# Response size -- the single largest recurring cost in a run, since results
+# land in the conversation and are re-sent on every subsequent turn.
+# --------------------------------------------------------------------------
+
+
+def _big_ctx(n_items: int) -> ToolContext:
+    return ToolContext(
+        evidence_items=[
+            EvidenceItem(
+                evidence_id=f"ev_{i:03d}",
+                source_file="big.xlsx",
+                source_type="excel_table",
+                location=f"Sheet1!A{i}",
+                extracted_text="accrual " + ("x" * 5_000),
+                extraction_confidence=1.0,
+                preview_ref="p",
+            )
+            for i in range(1, n_items + 1)
+        ]
+    )
+
+
+def test_search_response_is_budgeted_as_a_whole_not_per_result():
+    # top_k=8 x a 2,000-char snippet cap was ~4,000 tokens parked in
+    # history permanently. The budget is shared across results instead.
+    ctx = _big_ctx(8)
+    out = search_cy_support(SearchCySupportInput(query="accrual", top_k=8), ctx)
+    total = sum(len(r.snippet) for r in out.results)
+    assert len(out.results) == 8
+    assert total <= 8_000, f"one search returned {total} chars"
+
+
+def test_a_targeted_search_still_returns_near_full_text():
+    # The incentive has to run the right way: ask precisely, get more.
+    ctx = _big_ctx(8)
+    narrow = search_cy_support(SearchCySupportInput(query="accrual", top_k=2), ctx)
+    broad = search_cy_support(SearchCySupportInput(query="accrual", top_k=8), ctx)
+    assert len(narrow.results[0].snippet) > len(broad.results[0].snippet)
+
+
+def test_top_k_is_bounded():
+    # Unbounded, one call could park arbitrarily much in the conversation.
+    with pytest.raises(Exception):
+        SearchCySupportInput(query="accrual", top_k=500)
