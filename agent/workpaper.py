@@ -630,6 +630,75 @@ def _write_step_summary_rows(ws, row: int, results: dict[str, dict]) -> int:
     return row + 1
 
 
+_ATTRIBUTE_STYLE = {
+    "satisfied": (_FILL_GOOD, _FONT_GOOD),
+    "not_satisfied": (_FILL_BAD, _FONT_BAD),
+    "not_tested": (_FILL_WARN, _FONT_WARN),
+}
+_ATTRIBUTE_LABELS = {
+    "satisfied": "Satisfied",
+    "not_satisfied": "Not satisfied",
+    "not_tested": "Not tested",
+}
+
+
+def _write_attribute_table(
+    ws,
+    row: int,
+    attributes: list[Any],
+    citations: list[EvidenceCitation],
+    letters: list[str],
+) -> int:
+    """Attribute-by-attribute: what the step requires, what was observed,
+    which tickmark proves it, and whether it holds.
+
+    The tickmark column is the point of this table -- it chains an
+    attribute to a cited evidence row and, through that letter, to the red
+    box drawn on the exhibit page. Without it a reviewer has to read the
+    whole narrative to find where any one attribute was satisfied.
+    """
+    if not attributes:
+        return row
+
+    # One evidence_id can be cited several times on a sheet -- three
+    # different values quoted off the same invoice page get tickmarks A, B
+    # and C. Keying by id alone silently kept only the last of them and
+    # labelled every attribute "C". Collect them all instead: an attribute
+    # citing that page legitimately points at each marked spot on it.
+    letters_by_evidence: dict[str, list[str]] = {}
+    for i, cit in enumerate(citations):
+        if i < len(letters):
+            letters_by_evidence.setdefault(cit.evidence_id, []).append(letters[i])
+
+    for col in range(1, 7):
+        ws.cell(row, col).fill = _SECTION_FILL
+    ws.cell(row, 1, "ATTRIBUTES TESTED").font = _SECTION_FONT
+    row += 2
+
+    headers = ["Tickmark", "Attribute", "Result", "Value observed", "Evidence"]
+    for col, name in enumerate(headers, 1):
+        c = ws.cell(row, col, name)
+        c.font = Font(bold=True)
+        c.fill = _HEADER_FILL
+    row += 1
+
+    for attr in attributes:
+        marks: list[str] = []
+        for e in attr.evidence_ids:
+            for letter in letters_by_evidence.get(e, []):
+                if letter not in marks:
+                    marks.append(letter)
+        tick = ws.cell(row, 1, ", ".join(marks))
+        tick.font = Font(bold=True, color="AA0000")
+        ws.cell(row, 2, attr.attribute).alignment = Alignment(wrap_text=True, vertical="top")
+        _styled(ws, row, 3, _ATTRIBUTE_LABELS.get(attr.result, attr.result), _ATTRIBUTE_STYLE.get(attr.result))
+        ws.cell(row, 4, attr.value_observed).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(row, 5, ", ".join(attr.evidence_ids)).alignment = Alignment(wrap_text=True, vertical="top")
+        row += 1
+
+    return row + 1
+
+
 def _write_evidence_rows(ws, row: int, citations: list[EvidenceCitation], letters: list[str]) -> int:
     """The evidence table itself. Returns the next free row."""
     headers = ["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"]
@@ -658,6 +727,7 @@ def _write_evidence_table(
     letters: list[str],
     sample_id: str | None,
     sheet_title: str,
+    attributes: list[Any] | None = None,
 ) -> None:
     """A per-sample sheet: which item this is, then that item's evidence
     with its own A/B/C tickmarks. The DRAFT banner and test-step header are
@@ -667,6 +737,10 @@ def _write_evidence_table(
     ws.cell(row, 1, "Sample").font = Font(bold=True)
     ws.cell(row, 2, str(sample_id or "")).font = Font(bold=True)
     row += 2
+
+    # Attributes first: a reviewer signs off attribute by attribute, and
+    # the evidence table below is what backs each one up.
+    row = _write_attribute_table(ws, row, attributes or [], citations, letters)
 
     for col in range(1, 7):
         ws.cell(row, col).fill = _SECTION_FILL
@@ -858,7 +932,15 @@ def _write_step_sheet(
         # Per-sample sheet: this item's evidence only. The conclusion,
         # narrative and procedures are step-wide and live on the summary
         # sheet -- repeating them per item is noise, not documentation.
-        _write_evidence_table(ws, row, sheet_citations, letters, sample_id, ws.title)
+        _write_evidence_table(
+            ws,
+            row,
+            sheet_citations,
+            letters,
+            sample_id,
+            ws.title,
+            attributes=[a for a in conclusion.attribute_results if a.sample_id == sample_id],
+        )
         return letters, exhibit_images, excerpts
 
     # ── Answers first ──────────────────────────────────────────────────
@@ -897,6 +979,17 @@ def _write_step_sheet(
     if conclusion.ipe_completeness_accuracy_evidence:
         section("IPE COMPLETENESS & ACCURACY EVIDENCE")
         put_list(conclusion.ipe_completeness_accuracy_evidence)
+
+    # Attributes shown here are the ones not pinned to a single sampled
+    # item -- plus, when there is no per-sample split, all of them, since
+    # this is then the only sheet there is.
+    summary_attributes = [
+        a
+        for a in conclusion.attribute_results
+        if a.sample_id is None or (sheet_citations and citations is None)
+    ]
+    if summary_attributes:
+        row = _write_attribute_table(ws, row, summary_attributes, sheet_citations, letters)
 
     if sheet_citations:
         section("EVIDENCE CITED")

@@ -153,6 +153,26 @@ class EvidenceCitation(BaseModel):
     sample_id: str | None = None
 
 
+class AttributeResult(BaseModel):
+    """One testable attribute of the test step, for one sampled item.
+
+    A test step is rarely one assertion -- "approved by appropriate
+    personnel prior to payment" is really four: the right approver, their
+    authority, the approval itself, and its date against the payment date.
+    The narrative explains all of it in prose, but a reviewer signing off
+    has to read the whole paragraph to find where any single attribute was
+    satisfied. This is that, one row at a time.
+    """
+
+    attribute: str  # what is being verified, e.g. "Approval prior to payment date"
+    sample_id: str | None = None  # None = holds for the step as a whole
+    result: Literal["satisfied", "not_satisfied", "not_tested"]
+    value_observed: str  # what the evidence actually showed, e.g. "Approved 10/1/2025; paid 11/10/2025"
+    # Which cited evidence proves it -- this is what ties an attribute to a
+    # tickmark and, through it, to the boxed value on the exhibit page.
+    evidence_ids: list[str] = []
+
+
 class SampleResult(BaseModel):
     """How the test step came out for ONE sampled item."""
 
@@ -202,6 +222,10 @@ class _ConclusionCore(BaseModel):
     # can be not_satisfied because one of five items failed while the other
     # four passed, and only this field can express that.
     sample_results: list["SampleResult"] = []
+    # The test step broken into its individual attributes, per sampled item.
+    # This is what lets a reviewer see WHERE the step is satisfied without
+    # reading the whole narrative to find it.
+    attribute_results: list["AttributeResult"] = []
     # Tri-state, not a bool + a maybe-empty list. A real run surfaced exactly
     # the case a bool can't express cleanly: the model relied on a
     # system-generated report (E1/BVE1/OneStream) but explicitly could NOT

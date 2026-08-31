@@ -421,7 +421,13 @@ TOOLS = [
         "sample_results with one entry per sampled item saying how the step "
         "came out FOR THAT ITEM -- an exception is always about a specific "
         "selection, and the step-level conclusion alone cannot say which one "
-        "failed.",
+        "failed. Finally, break the test step into the individual attributes "
+        "it actually requires (e.g. approver is independent, approver has "
+        "authority, approval precedes payment, amount and coding agree) and "
+        "report each in attribute_results per sampled item, with the value "
+        "you observed and the evidence_ids proving it. A reviewer signs off "
+        "attribute by attribute; do not make them mine the narrative to find "
+        "where one was satisfied.",
         SubmitConclusionInput,
     ),
 ]

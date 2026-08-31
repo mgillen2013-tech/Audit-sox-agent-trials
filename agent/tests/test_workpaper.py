@@ -292,6 +292,69 @@ def test_summary_matrix_is_one_row_per_sample_with_links_and_colors(
     assert rows["1"][2].hyperlink.target.endswith("'1'!A1") or "1" in str(rows["1"][2].hyperlink)
 
 
+def test_attributes_table_shows_where_the_step_is_satisfied(spec: dict, results: dict, tmp_path: Path):
+    # A reviewer signs off attribute by attribute. Before this they had to
+    # read the whole narrative to find where any single attribute was met.
+    from agent.schemas import AttributeResult
+
+    cites = [
+        EvidenceCitation(
+            evidence_id=ev,
+            source_file="s.pdf",
+            location="s.pdf p.1",
+            quote_or_summary="q",
+            relevance="r",
+            sample_id="1",
+        )
+        for ev in ("ev_0001", "ev_0010")
+    ]
+    conclusion = results["TS-4.2"]["conclusion"].model_copy(
+        update={
+            "evidence_citations": cites,
+            "attribute_results": [
+                AttributeResult(
+                    attribute="Approval precedes payment",
+                    sample_id="1",
+                    result="satisfied",
+                    value_observed="Approved 10/1/2025; paid 11/10/2025",
+                    evidence_ids=["ev_0001", "ev_0010"],
+                ),
+                AttributeResult(
+                    attribute="Approver has documented authority",
+                    sample_id="1",
+                    result="not_tested",
+                    value_observed="No authority matrix provided",
+                    evidence_ids=[],
+                ),
+            ],
+        }
+    )
+    path = build_workpaper(
+        spec, {"TS-4.2": {"conclusion": conclusion, "audit_log": []}}, "PY.xlsx", tmp_path
+    )
+    ws = openpyxl.load_workbook(path)["1"]
+    rows = list(ws.iter_rows())
+
+    header = next(r for r in rows if r[0].value == "Tickmark" and r[1].value == "Attribute")
+    assert [c.value for c in header[:5]] == ["Tickmark", "Attribute", "Result", "Value observed", "Evidence"]
+
+    by_attr = {r[1].value: r for r in rows if r[1].value in
+               ("Approval precedes payment", "Approver has documented authority")}
+
+    ok = by_attr["Approval precedes payment"]
+    assert ok[2].value == "Satisfied"
+    assert ok[2].fill.start_color.rgb.endswith("C6EFCE")  # green
+    assert ok[3].value == "Approved 10/1/2025; paid 11/10/2025"
+    # The chain that makes this useful: attribute -> tickmark -> the red
+    # box on the exhibit page.
+    assert ok[0].value == "A, B"
+
+    untested = by_attr["Approver has documented authority"]
+    assert untested[2].value == "Not tested"
+    assert untested[2].fill.start_color.rgb.endswith("FFEB9C")  # amber
+    assert not untested[0].value  # nothing cited, so no tickmark to point at
+
+
 def test_untagged_citations_stay_on_one_sheet(spec: dict, results: dict, tmp_path: Path):
     # An older run (or a step with no sample) has no sample_id anywhere --
     # everything must stay on the summary sheet rather than vanishing.
