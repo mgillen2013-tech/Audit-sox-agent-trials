@@ -430,6 +430,15 @@ def _sheet_title(test_step_id: str) -> str:
     return re.sub(r"[:\\/?*\[\]]", "_", test_step_id)[:31] or "step"
 
 
+def _sample_sheet_name(test_step_id: str, sample_id: str, single_step: bool) -> str:
+    """Sample sheets are named for the item alone on a single-step control
+    (tabs "1", "2"). On a multi-step control they must carry the step too:
+    every step has its own sample 1, and bare names collided into "1" and
+    "1(2)", which says nothing about which step it belongs to.
+    """
+    return sample_id if single_step else f"{test_step_id} {sample_id}"
+
+
 def _exhibit_sheet_title(test_step_id: str) -> str:
     # Same sanitizing, but leave room for the " - Exhibits" suffix within
     # Excel's 31-char sheet-name limit.
@@ -500,7 +509,7 @@ def _build_xlsx(
         # tickmarks restarting at A, plus its own exhibits.
         if per_sample:
             for sample_id, group in groups:
-                name = _unique_sheet_name(wb, sample_id)
+                name = _unique_sheet_name(wb, _sample_sheet_name(test_step_id, sample_id, single_step))
                 ws = wb.create_sheet(name)
                 letters, images, excerpts = _write_step_sheet(
                     ws,
@@ -604,11 +613,16 @@ def _count_style(n: int) -> tuple:
     return (_FILL_GOOD, _FONT_GOOD) if n == 0 else (_FILL_WARN, _FONT_WARN)
 
 
-def _link_to_sheet(ws, row: int, col: int, sheet_name: str) -> None:
-    """Clickable jump to that item's own tab."""
-    cell = ws.cell(row, col, sheet_name)
+def _link_cell_to_sheet(ws, row: int, col: int, sheet_name: str) -> None:
+    """Makes an existing cell a clickable jump to a tab, keeping whatever
+    text and colour it already carries -- the verdict cell stays a verdict,
+    it just also navigates.
+    """
+    cell = ws.cell(row, col)
     cell.hyperlink = f"#'{sheet_name}'!A1"
-    cell.font = Font(color="0563C1", underline="single")
+    cell.font = Font(
+        bold=cell.font.bold, color=cell.font.color, underline="single"
+    )
 
 
 def _sample_ids_for(result: dict) -> list[str]:
@@ -646,7 +660,12 @@ def _write_control_summary(ws, row: int, results: dict[str, dict]) -> int:
     if not all_samples:
         return _write_step_summary_rows(ws, row, results)
 
-    headers = ["Sample"] + [f"Test step {s}" for s in step_ids] + ["Detail sheet"]
+    # No separate "Detail sheet" column: with several steps a sample has a
+    # sheet PER STEP, so one link per row could only ever reach the first
+    # of them. The verdict cell is the link instead -- it already
+    # identifies exactly one (sample, step) pair, which is exactly one
+    # sheet, and it is what a reviewer would click anyway.
+    headers = ["Sample"] + [f"Test step {s}" for s in step_ids]
     for col, name in enumerate(headers, 1):
         c = ws.cell(row, col, name)
         c.font = Font(bold=True)
@@ -675,7 +694,7 @@ def _write_control_summary(ws, row: int, results: dict[str, dict]) -> int:
             _styled(
                 ws, row, 2 + i, _CONCLUSION_LABELS.get(verdict, verdict), _VERDICT_STYLE.get(verdict)
             )
-        _link_to_sheet(ws, row, 2 + len(step_ids), sid)
+            _link_cell_to_sheet(ws, row, 2 + i, _sample_sheet_name(step_id, sid, len(step_ids) == 1))
         row += 1
 
     # IPE gets its own row rather than being buried as one attribute among

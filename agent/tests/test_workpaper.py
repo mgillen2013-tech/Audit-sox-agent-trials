@@ -295,7 +295,10 @@ def test_summary_matrix_is_one_row_per_sample_with_links_and_colors(
     header = next(
         r for r in ws.iter_rows() if r[0].value == "Sample"
     )
-    assert [c.value for c in header[:3]] == ["Sample", "Test step TS-4.2", "Detail sheet"]
+    assert [c.value for c in header[:2]] == ["Sample", "Test step TS-4.2"]
+    # No "Detail sheet" column: with several steps a sample has a sheet per
+    # step, so one link per row could only reach the first of them.
+    assert header[2].value is None
 
     rows = {r[0].value: r for r in ws.iter_rows() if r[0].value in ("1", "2")}
     # Each item's own verdict, not the step roll-up.
@@ -304,8 +307,10 @@ def test_summary_matrix_is_one_row_per_sample_with_links_and_colors(
     # Colour-coded so it reads at a glance.
     assert rows["1"][1].fill.start_color.rgb.endswith("C6EFCE")  # green
     assert rows["2"][1].fill.start_color.rgb.endswith("FFC7CE")  # red
-    # And clickable through to that item's tab.
-    assert rows["1"][2].hyperlink.target.endswith("'1'!A1") or "1" in str(rows["1"][2].hyperlink)
+    # The verdict cell IS the link -- it identifies exactly one
+    # (sample, step) pair, which is exactly one sheet.
+    assert "'1'!A1" in str(rows["1"][1].hyperlink.location or rows["1"][1].hyperlink.target)
+    assert "'2'!A1" in str(rows["2"][1].hyperlink.location or rows["2"][1].hyperlink.target)
 
 
 def test_attributes_table_shows_where_the_step_is_satisfied(spec: dict, results: dict, tmp_path: Path):
@@ -465,6 +470,47 @@ def test_no_sheet_carries_a_tickmark_its_attributes_never_use(spec: dict, result
 
     assert listed, "no evidence rows rendered"
     assert listed <= used, f"tickmarks listed but never referenced: {sorted(listed - used)}"
+
+
+def test_multi_step_sample_sheets_name_their_step(spec: dict, results: dict, tmp_path: Path):
+    # Every step has its own sample "1". Bare names collided into "1" and
+    # "1(2)", which says nothing about which step the second belongs to --
+    # and the single per-row link could only ever reach the first of them.
+    from agent.schemas import SampleResult
+
+    def step(step_id: str) -> dict:
+        c = results["TS-4.2"]["conclusion"].model_copy(
+            update={
+                "test_step_id": step_id,
+                "sample_results": [SampleResult(sample_id="1", conclusion="satisfied")],
+                "evidence_citations": [
+                    EvidenceCitation(
+                        evidence_id="ev_1",
+                        source_file="s.pdf",
+                        location="p.1",
+                        quote_or_summary="q",
+                        relevance="r",
+                        sample_id="1",
+                    )
+                ],
+            }
+        )
+        return {"conclusion": c, "audit_log": []}
+
+    path = build_workpaper(
+        spec, {"TS-4.2": step("TS-4.2"), "TS-9.9": step("TS-9.9")}, "PY.xlsx", tmp_path
+    )
+    wb = openpyxl.load_workbook(path)
+
+    assert "TS-4.2 1" in wb.sheetnames
+    assert "TS-9.9 1" in wb.sheetnames
+    assert not any(n.endswith("(2)") for n in wb.sheetnames), wb.sheetnames
+
+    # Each verdict cell links to ITS OWN step's sheet for that sample.
+    ws = wb["TS-4.2 Summary"]
+    row = next(r for r in ws.iter_rows() if r[0].value == "1")
+    assert "TS-4.2 1" in str(row[1].hyperlink.location or row[1].hyperlink.target)
+    assert "TS-9.9 1" in str(row[2].hyperlink.location or row[2].hyperlink.target)
 
 
 def test_untagged_citations_stay_on_one_sheet(spec: dict, results: dict, tmp_path: Path):
