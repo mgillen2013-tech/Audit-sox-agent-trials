@@ -849,6 +849,8 @@ def _write_attribute_table(
         if i < len(letters):
             letters_by_evidence.setdefault(cit.evidence_id, []).append(letters[i])
 
+    labels = _evidence_labels(citations)
+
     for col in range(1, 7):
         ws.cell(row, col).fill = _SECTION_FILL
     ws.cell(row, 1, "ATTRIBUTES TESTED").font = _SECTION_FONT
@@ -872,7 +874,9 @@ def _write_attribute_table(
         ws.cell(row, 2, attr.attribute).alignment = Alignment(wrap_text=True, vertical="top")
         _styled(ws, row, 3, _ATTRIBUTE_LABELS.get(attr.result, attr.result), _ATTRIBUTE_STYLE.get(attr.result))
         ws.cell(row, 4, attr.value_observed).alignment = Alignment(wrap_text=True, vertical="top")
-        ws.cell(row, 5, ", ".join(attr.evidence_ids)).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(row, 5, ", ".join(labels.get(e, e) for e in attr.evidence_ids)).alignment = Alignment(
+            wrap_text=True, vertical="top"
+        )
         row += 1
 
     return row + 1
@@ -920,9 +924,79 @@ def _copy_source_sheets(wb, source_path: Path) -> list[str]:
     return copied
 
 
+# What a document IS, in the words an auditor uses, ordered most-specific
+# first: "invoice 2859 approval.pdf" is the APPROVAL, not the invoice, so
+# "approval" has to win over "invoice" when a filename contains both.
+_DOC_KINDS = (
+    "approval",
+    "authorization",
+    "payment",
+    "remittance",
+    "voucher",
+    "check",
+    "purchase order",
+    "invoice",
+    "receipt",
+    "contract",
+    "policy",
+    "matrix",
+    "parameters",
+    "population",
+    "sample",
+    "listing",
+    "reconciliation",
+    "recon",
+    "screenshot",
+    "email",
+    "report",
+)
+
+
+def _evidence_labels(citations: list[EvidenceCitation]) -> dict[str, str]:
+    """Maps each cited evidence_id to a plain-English name.
+
+    "ev_0004" tells a reviewer nothing; "Approval p.1" tells them what they
+    are about to look at. The internal ids stay untouched -- they are what
+    the fabrication guard checks citations against and what the exhibit
+    renderer looks up -- this is purely how they are LABELLED in the file.
+
+    For a workbook the sheet name is used verbatim: "Population",
+    "Parameters", "Sample Selections" are already the right words and come
+    from the preparer, not from a guess. For a PDF the kind is read off the
+    filename, with the page number appended so several pages of one
+    document stay distinguishable.
+    """
+    labels: dict[str, str] = {}
+    for cit in citations:
+        if cit.evidence_id in labels:
+            continue
+
+        sheet = re.match(r"([^!]+)!", cit.location)
+        if sheet:
+            label = sheet.group(1).strip()
+        else:
+            stem = Path(cit.source_file).stem.lower()
+            kind = next((k for k in _DOC_KINDS if k in stem), None)
+            label = kind.title() if kind else Path(cit.source_file).stem
+            page = re.search(r"p\.(\d+)", cit.location)
+            if page:
+                label = f"{label} p.{page.group(1)}"
+
+        # Two different documents can reduce to the same words; keep them
+        # distinguishable rather than silently merging them.
+        if label in labels.values():
+            n = 2
+            while f"{label} ({n})" in labels.values():
+                n += 1
+            label = f"{label} ({n})"
+        labels[cit.evidence_id] = label
+    return labels
+
+
 def _write_evidence_rows(ws, row: int, citations: list[EvidenceCitation], letters: list[str]) -> int:
     """The evidence table itself. Returns the next free row."""
-    headers = ["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"]
+    labels = _evidence_labels(citations)
+    headers = ["Tickmark", "Evidence", "Source file", "Location", "Quote / summary", "Relevance"]
     for col, name in enumerate(headers, 1):
         cell = ws.cell(row, col, name)
         cell.font = Font(bold=True)
@@ -931,7 +1005,7 @@ def _write_evidence_rows(ws, row: int, citations: list[EvidenceCitation], letter
     for i, cit in enumerate(citations):
         letter = letters[i] if i < len(letters) else ""
         for col, value in enumerate(
-            [letter, cit.evidence_id, cit.source_file, cit.location, cit.quote_or_summary, cit.relevance], 1
+            [letter, labels[cit.evidence_id], cit.source_file, cit.location, cit.quote_or_summary, cit.relevance], 1
         ):
             c = ws.cell(row, col, value)
             c.alignment = Alignment(wrap_text=True, vertical="top")

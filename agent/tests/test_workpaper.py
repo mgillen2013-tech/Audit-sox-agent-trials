@@ -109,7 +109,11 @@ def test_xlsx_workpaper_contents(spec: dict, results: dict, tmp_path: Path):
 
     step = sheet_text("TS-4.2 Summary")
     assert "Recalculated accrual ties to GL with no variance." in step
-    assert "ev_0001" in step
+    # Evidence is named in plain English, not by internal id -- "ev_0001"
+    # tells a reviewer nothing about what they are looking at.
+    assert "ev_0001" not in step
+    assert "Sheet1" in step  # the cited sheet name
+    assert "Recon_Oct2026.xlsx" in step
     assert "Q4 support for the November accrual" in step
     assert "claude-opus-5" in step
 
@@ -236,17 +240,21 @@ def test_each_sampled_item_gets_its_own_sheet_and_restarts_tickmarks(
     assert "ev_0001" not in summary
 
     s1, s2 = text("1"), text("2")
-    assert "ev_0001" in s1 and "ev_0010" in s1
-    assert "ev_0015" in s2
-    # Sample 2's evidence must not bleed onto sample 1's sheet.
-    assert "ev_0015" not in s1
-    assert "ev_0001" not in s2
+    # Each item's own evidence, identified by its quote rather than an
+    # internal id -- and sample 2's must not bleed onto sample 1's sheet.
+    assert "invoice 2859 approved" in s1
+    assert "payment 881477" in s1
+    assert "invoice 35713082 approved" in s2
+    assert "invoice 35713082 approved" not in s1
+    assert "invoice 2859 approved" not in s2
+    # Internal ids never surface in the workpaper.
+    assert "ev_00" not in s1 and "ev_00" not in s2
     # Step-wide evidence (the population extract) belongs on the summary,
     # NOT on the first item. Riding along there gave sample 1 tickmarks its
     # own attributes never referenced -- a real workpaper had it carrying B
     # and C for the population and report parameters.
-    assert "ev_0018" not in s1
-    assert "ev_0018" in summary
+    assert "Population extract, 30 rows" not in s1
+    assert "Population extract, 30 rows" in summary
 
     # Tickmarks restart per sheet: sample 2's single citation is A, not D.
     def tickmarks(name):
@@ -522,7 +530,7 @@ def test_untagged_citations_stay_on_one_sheet(spec: dict, results: dict, tmp_pat
     wb = openpyxl.load_workbook(path)
     assert wb.sheetnames == ["Summary"]
     text = " ".join(str(c.value) for r in wb["Summary"].iter_rows() for c in r if c.value is not None)
-    assert "ev_0001" in text
+    assert "Recon_Oct2026.xlsx" in text
 
 
 def test_tickmark_boxes_are_padded_off_the_text():
@@ -773,3 +781,56 @@ def test_source_tabs_do_not_collide_with_generated_sheets(spec: dict, results: d
     text = " ".join(str(c.value) for r in wb["Summary"].iter_rows() for c in r if c.value is not None)
     assert "DRAFT" in text
     assert len([n for n in wb.sheetnames if n.startswith("Summary")]) >= 2
+
+
+def test_evidence_is_labelled_in_plain_english():
+    # "ev_0004" tells a reviewer nothing about what they are looking at.
+    from agent.workpaper import _evidence_labels
+
+    cits = [
+        EvidenceCitation(
+            evidence_id=ev,
+            source_file=f,
+            location=loc,
+            quote_or_summary="q",
+            relevance="r",
+        )
+        for ev, f, loc in [
+            # A workbook: the preparer's own sheet name is already the right
+            # word -- better than anything derived from the filename.
+            ("ev_0018", "SS.156 Sample listing upload.xlsx", "Population!A1:T31"),
+            ("ev_0022", "SS.156 Sample listing upload.xlsx", "Parameters!image1"),
+            ("ev_0017", "SS.156 Sample listing upload.xlsx", "Sample Selections!A1:U3"),
+            # A PDF: read the kind off the filename. This one names both
+            # "invoice" and "approval" -- the document IS the approval.
+            ("ev_0008", "SS.156 selection 1 - invoice 2859 approval.pdf", "p.1"),
+            ("ev_0007", "SS.156 selection 1 invoice 2859.pdf", "p.1"),
+            ("ev_0006", "Selection 1 Payment.pdf", "p.1"),
+        ]
+    ]
+    labels = _evidence_labels(cits)
+
+    assert labels["ev_0018"] == "Population"
+    assert labels["ev_0022"] == "Parameters"
+    assert labels["ev_0017"] == "Sample Selections"
+    assert labels["ev_0008"] == "Approval p.1"
+    assert labels["ev_0007"] == "Invoice p.1"
+    assert labels["ev_0006"] == "Payment p.1"
+
+
+def test_same_document_cited_twice_stays_distinguishable():
+    from agent.workpaper import _evidence_labels
+
+    cits = [
+        EvidenceCitation(
+            evidence_id=ev,
+            source_file="approval.pdf",
+            location="approval.pdf p.1",
+            quote_or_summary="q",
+            relevance="r",
+        )
+        for ev in ("ev_0001", "ev_0002")
+    ]
+    labels = _evidence_labels(cits)
+    assert labels["ev_0001"] == "Approval p.1"
+    assert labels["ev_0002"] == "Approval p.1 (2)"
