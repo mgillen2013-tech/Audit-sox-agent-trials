@@ -700,3 +700,76 @@ def test_every_box_carries_its_tickmark_letter(annotated_setup, tmp_path: Path):
     assert len(letters) == len(boxes), "some boxes have no tickmark letter"
     # Each letter sits beside its own box, not stacked on the first one.
     assert len({(o.x, o.y) for o in letters}) == len(letters)
+
+
+def test_source_workbook_is_attached_as_real_tabs(spec: dict, results: dict, tmp_path: Path):
+    # A rendered excerpt of the population is a worse artefact than the
+    # population itself -- a reviewer wants to filter it, tie it out, and
+    # see the Parameters screenshot at full size.
+    from openpyxl.drawing.image import Image as XLImage
+    from PIL import Image as PILImage
+    from io import BytesIO
+
+    support = tmp_path / "support"
+    support.mkdir()
+    src = openpyxl.Workbook()
+    sel = src.active
+    sel.title = "Sample Selections"
+    sel.append(["Sample #", "Invoice"])
+    sel.append([1, "2859"])
+    pop = src.create_sheet("Population")
+    pop.append(["Invoice", "Amount"])
+    for i in range(30):
+        pop.append([f"INV-{i}", i * 100])
+    params = src.create_sheet("Parameters")
+    buf = BytesIO()
+    PILImage.new("RGB", (80, 40), "white").save(buf, "PNG")
+    buf.seek(0)
+    params.add_image(XLImage(buf), "A1")
+    src.save(support / "listing.xlsx")
+
+    spec = {**spec, "cy_support_files": ["listing.xlsx"]}
+    path = build_workpaper(
+        spec,
+        {"TS-4.2": results["TS-4.2"]},
+        "PY.xlsx",
+        tmp_path,
+        support_dir=support,
+        source_workbook="listing.xlsx",
+    )
+    wb = openpyxl.load_workbook(path)
+
+    for name in ("Sample Selections", "Population", "Parameters"):
+        assert name in wb.sheetnames, wb.sheetnames
+
+    # Real data, not a picture of it.
+    assert wb["Population"].max_row == 31
+    assert wb["Population"]["A2"].value == "INV-0"
+    # A tab whose whole content is a pasted screenshot keeps the screenshot.
+    assert len(wb["Parameters"]._images) == 1
+
+
+def test_source_tabs_do_not_collide_with_generated_sheets(spec: dict, results: dict, tmp_path: Path):
+    # An uploaded tab named "Summary" must not overwrite the workpaper's own.
+    support = tmp_path / "support"
+    support.mkdir()
+    src = openpyxl.Workbook()
+    src.active.title = "Summary"
+    src.active.append(["uploaded", "data"])
+    src.save(support / "listing.xlsx")
+
+    spec = {**spec, "cy_support_files": ["listing.xlsx"]}
+    path = build_workpaper(
+        spec,
+        {"TS-4.2": results["TS-4.2"]},
+        "PY.xlsx",
+        tmp_path,
+        support_dir=support,
+        source_workbook="listing.xlsx",
+    )
+    wb = openpyxl.load_workbook(path)
+    assert "Summary" in wb.sheetnames
+    # The generated Summary still holds the conclusion, not the upload.
+    text = " ".join(str(c.value) for r in wb["Summary"].iter_rows() for c in r if c.value is not None)
+    assert "DRAFT" in text
+    assert len([n for n in wb.sheetnames if n.startswith("Summary")]) >= 2

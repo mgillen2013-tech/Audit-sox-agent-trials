@@ -335,6 +335,7 @@ def _build_step_exhibits(
     citations: list[EvidenceCitation],
     evidence_map: dict[str, EvidenceItem],
     support_dir: Path,
+    skip_excel_excerpts: bool = False,
 ) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]], list[tuple[str, list[str]]]]:
     """Returns (tickmark letter per citation, PDF exhibit images as
     (caption, png bytes, (w,h)), Excel/text excerpts as (caption, lines)).
@@ -351,7 +352,9 @@ def _build_step_exhibits(
         if item.source_type in ("pdf_text", "pdf_table", "image_ocr") and m:
             key = (item.source_file, int(m.group(1)))
             pdf_groups.setdefault(key, []).append((letter, item, cit.quote_or_summary))
-        else:
+        elif not skip_excel_excerpts:
+            # Only when the source workbook is NOT attached as real tabs --
+            # otherwise this is a worse copy of a sheet already in the file.
             lines = _excerpt_lines(item)
             if lines:
                 excerpts.append((f"Exhibit {letter} — {item.location}", lines))
@@ -387,6 +390,7 @@ def build_workpaper(
     out_dir: Path,
     support_dir: Path | None = None,
     fmt: str = "xlsx",
+    source_workbook: str | None = None,
 ) -> Path:
     """Writes the control's CY workpaper and returns the written path.
 
@@ -426,7 +430,9 @@ def build_workpaper(
     if out_path.suffix == ".pdf":
         _build_pdf(spec, results, step_texts, out_path, evidence_map, support_dir)
     else:
-        _build_xlsx(spec, results, step_texts, out_path, evidence_map, support_dir)
+        _build_xlsx(
+            spec, results, step_texts, out_path, evidence_map, support_dir, source_workbook
+        )
     return out_path
 
 
@@ -474,6 +480,7 @@ def _build_xlsx(
     out_path: Path,
     evidence_map: dict[str, EvidenceItem],
     support_dir: Path | None,
+    source_workbook: str | None = None,
 ) -> None:
     wb = openpyxl.Workbook()
     # Exhibit PNG buffers must stay alive until wb.save() -- openpyxl reads
@@ -511,6 +518,7 @@ def _build_xlsx(
             spec=spec if first_sheet else None,
             results=results if first_sheet else None,
             include_step_detail=True,
+            skip_excel_excerpts=bool(source_workbook),
         )
         first_sheet = False
         if images or excerpts:
@@ -533,10 +541,22 @@ def _build_xlsx(
                     citations=group,
                     sample_id=sample_id,
                     include_step_detail=False,
+                    skip_excel_excerpts=bool(source_workbook),
                 )
                 if images or excerpts:
                     ex_ws = wb.create_sheet(_unique_sheet_name(wb, f"{name} - Exhibits"))
                     _write_exhibit_sheet(ex_ws, name, images, excerpts, _live_buffers)
+
+    # The uploaded population/sample workbook goes in as REAL tabs
+    # (Sample Selections, Population, Parameters) rather than a rendered
+    # excerpt of it. A reviewer wants to filter the population, tie it out,
+    # and see the Parameters screenshot at full size -- none of which a
+    # picture of a few rows allows.
+    if source_workbook and support_dir is not None:
+        try:
+            _copy_source_sheets(wb, support_dir / source_workbook)
+        except Exception:  # noqa: BLE001 -- the workpaper stands without the source tabs
+            pass
 
     wb.save(out_path)
 
@@ -858,6 +878,48 @@ def _write_attribute_table(
     return row + 1
 
 
+def _copy_source_sheets(wb, source_path: Path) -> list[str]:
+    """Copies the uploaded population/sample workbook's tabs into the
+    workpaper as real sheets.
+
+    A rendered excerpt of the population is a worse artefact than the
+    population itself: a reviewer wants to filter it, tie it out, and see
+    the Parameters screenshot at full size. Values, column widths and
+    embedded images come across (the Parameters tab is typically nothing
+    BUT a pasted screenshot). Formulas are copied as their cached values --
+    the workpaper documents what the data WAS at testing, and a live
+    formula pointing at a workbook that no longer exists would be worse
+    than a number.
+    """
+    from openpyxl.drawing.image import Image as XLImage
+
+    copied: list[str] = []
+    src = openpyxl.load_workbook(source_path, data_only=True)
+    try:
+        for src_ws in src.worksheets:
+            name = _unique_sheet_name(wb, src_ws.title)
+            dest = wb.create_sheet(name)
+            for row in src_ws.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        dest.cell(cell.row, cell.column, cell.value)
+            for letter, dim in src_ws.column_dimensions.items():
+                if dim.width:
+                    dest.column_dimensions[letter].width = dim.width
+            for image in getattr(src_ws, "_images", []):
+                try:
+                    buf = BytesIO(image._data())
+                    copy = XLImage(buf)
+                    copy.anchor = image.anchor
+                    dest.add_image(copy)
+                except Exception:  # noqa: BLE001 -- a sheet is still worth copying without its picture
+                    pass
+            copied.append(name)
+    finally:
+        src.close()
+    return copied
+
+
 def _write_evidence_rows(ws, row: int, citations: list[EvidenceCitation], letters: list[str]) -> int:
     """The evidence table itself. Returns the next free row."""
     headers = ["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary", "Relevance"]
@@ -984,6 +1046,7 @@ def _write_step_sheet(
     spec: dict[str, Any] | None = None,
     results: dict[str, dict] | None = None,
     include_step_detail: bool = True,
+    skip_excel_excerpts: bool = False,
 ) -> tuple[list[str], list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]], list[tuple[str, list[str]]]]:
     """Writes one sheet, ordered so a reviewer reads answers first
     (conclusion, coverage, IPE, exceptions, open requests) before the
@@ -1100,7 +1163,7 @@ def _write_step_sheet(
     excerpts: list[tuple[str, list[str]]] = []
     if sheet_citations and evidence_map and support_dir is not None:
         letters, exhibit_images, excerpts = _build_step_exhibits(
-            sheet_citations, evidence_map, support_dir
+            sheet_citations, evidence_map, support_dir, skip_excel_excerpts
         )
 
     if not include_step_detail:
