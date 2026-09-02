@@ -683,7 +683,9 @@ def test_pdf_workpaper_contents(spec: dict, results: dict, tmp_path: Path):
     assert "C-14" in text
     assert "Satisfied" in text
     assert "INCOMPLETE" in text
-    assert "ev_0001" in text
+    # Internal ids never surface; the xlsx citation is labelled by its sheet.
+    assert "ev_00" not in text
+    assert "Sheet1" in text
 
 
 def test_every_box_carries_its_tickmark_letter(annotated_setup, tmp_path: Path):
@@ -834,3 +836,47 @@ def test_same_document_cited_twice_stays_distinguishable():
     labels = _evidence_labels(cits)
     assert labels["ev_0001"] == "Approval p.1"
     assert labels["ev_0002"] == "Approval p.1 (2)"
+
+
+def test_pdf_output_matches_xlsx_features(spec: dict, results: dict, tmp_path: Path):
+    # The PDF builder had lagged the xlsx by several features: it printed
+    # raw evidence ids and had no attributes table at all. Anything a
+    # reviewer relies on in the xlsx must survive the flat rendering.
+    from agent.schemas import AttributeResult, SampleResult
+
+    conclusion = results["TS-4.2"]["conclusion"].model_copy(
+        update={
+            "conclusion": "not_satisfied",
+            "sample_results": [
+                SampleResult(sample_id="1", conclusion="satisfied"),
+                SampleResult(sample_id="2", conclusion="not_satisfied"),
+            ],
+            "attribute_results": [
+                AttributeResult(
+                    attribute="Approval precedes payment",
+                    sample_id="1",
+                    result="satisfied",
+                    value_observed="Approved 10/1; paid 11/10",
+                    evidence_ids=["ev_0001"],
+                )
+            ],
+        }
+    )
+    path = build_workpaper(
+        spec, {"TS-4.2": {"conclusion": conclusion, "audit_log": []}}, "PY.pdf", tmp_path, fmt="pdf"
+    )
+    with pdfplumber.open(path) as pdf:
+        raw = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    # reportlab wraps narrow table cells across lines, so compare on
+    # whitespace-normalised text rather than raw substrings.
+    text = " ".join(raw.split())
+
+    assert "ev_00" not in text, "internal evidence ids leaked into the PDF"
+    assert "Attributes tested" in text
+    # pdfplumber extracts a wrapped multi-column table row column-interleaved,
+    # so a long cell's words can be split by neighbouring cells' text. The
+    # PDF renders correctly; assert the words, not the phrase.
+    for word in ("Approval", "precedes", "payment"):
+        assert word in text
+    assert "Approved 10/1; paid 11/10" in text
+    assert "By sampled item" in text and "2: Not satisfied" in text

@@ -1396,23 +1396,83 @@ def _build_pdf(
                 body,
             )
         )
-        story.append(Paragraph(f"<b>Documentation:</b> {conclusion.narrative}", body))
+        # Per-item verdicts -- the PDF equivalent of the summary matrix.
+        if conclusion.sample_results:
+            story.append(
+                Paragraph(
+                    "<b>By sampled item:</b> "
+                    + "; ".join(
+                        f"{r.sample_id}: {_CONCLUSION_LABELS.get(r.conclusion, r.conclusion)}"
+                        for r in conclusion.sample_results
+                    ),
+                    body,
+                )
+            )
+        story.append(Paragraph(f"<b>IPE status:</b> {conclusion.ipe_completeness_accuracy_status}", body))
         story.append(Spacer(1, 6))
-        bullet_list("Procedures performed", conclusion.procedures_performed)
 
-        letters: list[str] = []
+        # Tickmarks are lettered unconditionally, as on the sheets: they
+        # label the evidence rows whether or not an exhibit could be built.
+        letters: list[str] = _tickmark_letters(len(conclusion.evidence_citations))
         exhibit_images: list[tuple[str, BytesIO, tuple[int, int], list[_Overlay]]] = []
         excerpts: list[tuple[str, list[str]]] = []
         if conclusion.evidence_citations and evidence_map and support_dir is not None:
             letters, exhibit_images, excerpts = _build_step_exhibits(
                 conclusion.evidence_citations, evidence_map, support_dir
             )
+        labels = _evidence_labels(conclusion.evidence_citations)
+        letters_by_evidence: dict[str, list[str]] = {}
+        for i, cit in enumerate(conclusion.evidence_citations):
+            if i < len(letters):
+                letters_by_evidence.setdefault(cit.evidence_id, []).append(letters[i])
+
+        # Attributes BEFORE the narrative, matching the xlsx sheets: this
+        # is the structured "where is the step satisfied" view. The PDF
+        # had lagged the xlsx by several features here -- it printed raw
+        # evidence ids and had no attributes table at all.
+        if conclusion.attribute_results:
+            rows = [["Tickmark", "Attribute", "Result", "Value observed", "Evidence"]]
+            for a in conclusion.attribute_results:
+                marks: list[str] = []
+                for e in a.evidence_ids:
+                    # Not named `letter`: that is the imported page size
+                    # in this scope, and shadowing it handed a string to
+                    # SimpleDocTemplate(pagesize=...) at the end.
+                    for tm in letters_by_evidence.get(e, []):
+                        if tm not in marks:
+                            marks.append(tm)
+                rows.append(
+                    [
+                        Paragraph(f"<b><font color='red'>{', '.join(marks)}</font></b>", body),
+                        Paragraph((f"[{a.sample_id}] " if a.sample_id else "") + a.attribute, body),
+                        Paragraph(_ATTRIBUTE_LABELS.get(a.result, a.result), body),
+                        Paragraph(a.value_observed, body),
+                        Paragraph(", ".join(labels.get(e, e) for e in a.evidence_ids), body),
+                    ]
+                )
+            table = Table(rows, colWidths=[0.7 * inch, 2.0 * inch, 0.9 * inch, 2.0 * inch, 1.4 * inch])
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ]
+                )
+            )
+            story.append(Paragraph("<b>Attributes tested:</b>", body))
+            story.append(table)
+            story.append(Spacer(1, 6))
+
+        story.append(Paragraph(f"<b>Documentation:</b> {conclusion.narrative}", body))
+        story.append(Spacer(1, 6))
+        bullet_list("Procedures performed", conclusion.procedures_performed)
 
         if conclusion.evidence_citations:
-            rows = [["Tickmark", "Evidence ID", "Source file", "Location", "Quote / summary"]] + [
+            rows = [["Tickmark", "Evidence", "Source file", "Location", "Quote / summary"]] + [
                 [
                     Paragraph(f"<b><font color='red'>{letters[i] if i < len(letters) else ''}</font></b>", body),
-                    Paragraph(cit.evidence_id, body),
+                    Paragraph(labels[cit.evidence_id], body),
                     Paragraph(cit.source_file, body),
                     Paragraph(cit.location, body),
                     Paragraph(cit.quote_or_summary, body),
