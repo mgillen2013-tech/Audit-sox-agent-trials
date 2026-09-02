@@ -255,6 +255,8 @@ def _render_token_burn(ledger: TokenLedger) -> None:
         # unreadable upload). Nothing was billed, and empty tables would
         # read as a reporting bug rather than as "this cost nothing".
         st.info("No API calls were billed on this run.")
+        if ledger.ocr_status:
+            st.caption(f"OCR: {ledger.ocr_status}")
         return
 
     family, fresh, cw, cr, out = prices_for(ledger.model)
@@ -284,10 +286,13 @@ def _render_token_burn(ledger: TokenLedger) -> None:
         ],
         hide_index=True,
     )
-    st.caption(
+    ocr_note = (
         "OCR is its own row because it runs before the tool loop starts — the "
         "per-step cap can neither see it nor stop it."
     )
+    if ledger.ocr_status:
+        ocr_note += f" **This run: {ledger.ocr_status}.**"
+    st.caption(ocr_note)
 
     st.markdown("**What kind of tokens**")
     st.dataframe(

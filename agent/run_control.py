@@ -53,6 +53,7 @@ from typing import Any
 
 from agent.costs import TokenLedger
 from agent.extraction import extract, extract_many, ocr_image_items
+from agent.extraction.ocr import MAX_OCR_PAGES
 from agent.intake import parse_sample_list
 from agent.loop import DEFAULT_MODEL, MAX_TOTAL_TOKENS, IncompleteRunError, TestStepRequest, run_test_step
 from agent.schemas import ConclusionOutput, SamplePopulationManifest
@@ -127,9 +128,31 @@ def iter_control_results(
     run_tokens = 0
 
     if ocr_scanned_pages:
-        cy_evidence, _, run_tokens = ocr_image_items(
+        cy_evidence, transcribed, run_tokens = ocr_image_items(
             cy_evidence, base_dir, client, model, on_page=on_ocr, ledger=ledger
         )
+        if ledger is not None:
+            # Say what OCR did even when it did nothing. Without this, a
+            # missing OCR row is ambiguous -- "no scanned pages" and "the
+            # checkbox was off" look identical -- and pages left unread
+            # (past the MAX_OCR_PAGES ceiling, or a failed transcription)
+            # are invisible, which is the worst case of the three: the
+            # conclusion rests on less evidence than it appears to.
+            unread = sum(
+                1 for i in cy_evidence if i.source_type == "image_ocr" and not i.extracted_text
+            )
+            ledger.ocr_status = (
+                f"{transcribed} scanned page(s) transcribed"
+                if transcribed
+                else "no scanned pages found -- nothing needed transcribing"
+            )
+            if unread:
+                ledger.ocr_status += (
+                    f", {unread} still unread (past the {MAX_OCR_PAGES}-page ceiling, "
+                    f"or the page could not be transcribed)"
+                )
+    elif ledger is not None:
+        ledger.ocr_status = "turned off for this run -- scanned pages were left unread"
 
     if sample_manifests is None:
         sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])

@@ -315,3 +315,80 @@ def test_the_ledger_captures_a_whole_control_run(control_dir: tuple[Path, dict])
     # is answerable without re-running anything.
     sections = {name for name, *_ in ledger.prompt_mix_rows("TS-4.2")}
     assert {"System prompt", "Tool schemas", "PY support excerpts"} <= sections
+
+
+def test_ocr_says_what_it_did_even_when_it_did_nothing(control_dir: tuple[Path, dict]):
+    # An absent OCR row is ambiguous on its own: "no scanned pages" and
+    # "the checkbox was off" look identical, and either way the reader is
+    # left guessing whether the evidence they can see is all of it.
+    from agent.costs import TokenLedger
+
+    base_dir, spec = control_dir
+    responses = [
+        response([tool_use("t1", "search_cy_support", {"query": "accrual recalculation GL", "top_k": 5})]),
+        response([tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]),
+        response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+    ]
+
+    on_ledger = TokenLedger("claude-opus-5")
+    run_control(spec, base_dir, FakeClient(responses=list(responses)), model="claude-opus-5", ledger=on_ledger)
+    # The fixture's support is a native-text workbook, so OCR correctly has
+    # nothing to do -- and says so rather than staying silent.
+    assert "no scanned pages found" in on_ledger.ocr_status
+
+    off_ledger = TokenLedger("claude-opus-5")
+    run_control(
+        spec,
+        base_dir,
+        FakeClient(responses=list(responses)),
+        model="claude-opus-5",
+        ocr_scanned_pages=False,
+        ledger=off_ledger,
+    )
+    assert "turned off" in off_ledger.ocr_status
+
+
+def test_pages_left_unread_by_the_ocr_ceiling_are_reported(monkeypatch, control_dir: tuple[Path, dict]):
+    # The worst of the three cases: pages past the MAX_OCR_PAGES ceiling
+    # cost nothing, so they appear nowhere in a spend breakdown -- while
+    # being exactly the pages that make a conclusion rest on less evidence
+    # than it looks like it does.
+    from agent.costs import TokenLedger
+    from agent.schemas import EvidenceItem
+
+    base_dir, spec = control_dir
+
+    def fake_extract_many(paths):
+        return [
+            EvidenceItem(
+                evidence_id=f"ev_{i:04d}",
+                source_file="scanned.pdf",
+                source_type="image_ocr",
+                location=f"scanned.pdf p.{i} (image-only)",
+                extraction_confidence=0.0,
+                preview_ref=f"p{i}",
+            )
+            for i in range(1, 4)
+        ]
+
+    monkeypatch.setattr("agent.run_control.extract_many", fake_extract_many)
+    # Ceiling of 1: one page transcribed, two left unread.
+    monkeypatch.setattr("agent.run_control.MAX_OCR_PAGES", 1)
+    def fake_ocr(items, *a, **kw):
+        # Honour the ceiling the way the real one does: transcribe the
+        # first page, leave the rest as unread placeholders.
+        done = items[0].model_copy(update={"extracted_text": "[OCR] invoice", "extraction_confidence": 0.8})
+        return [done, *items[1:]], 1, 0
+
+    monkeypatch.setattr("agent.run_control.ocr_image_items", fake_ocr)
+
+    ledger = TokenLedger("claude-opus-5")
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "submit_conclusion", _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]))]),
+        ]
+    )
+    run_control(spec, base_dir, client, model="claude-opus-5", ledger=ledger)
+
+    assert "1 scanned page(s) transcribed" in ledger.ocr_status
+    assert "2 still unread" in ledger.ocr_status

@@ -142,6 +142,11 @@ class TokenLedger:
         self.records: list[UsageRecord] = []
         # {group: {section name: characters}} -- see note_prompt_mix.
         self.prompt_mix: dict[str, dict[str, int]] = {}
+        # What OCR did, in words. An absent OCR row is ambiguous on its own
+        # ("no scanned pages" and "the checkbox was off" look the same),
+        # and pages left unread do not appear as spend at all -- yet those
+        # are the ones that change what the conclusion could rest on.
+        self.ocr_status: str = ""
 
     # -- recording ---------------------------------------------------------
 
@@ -293,6 +298,8 @@ class TokenLedger:
         lines += ["", "  By token kind:"]
         for name, tok, usd, pct in self.kind_rows():
             lines.append(f"    {name:<28} {tok:>10,} tok  ${usd:>8,.2f}  {pct:>5.1f}%")
+        if self.ocr_status:
+            lines += ["", f"  OCR: {self.ocr_status}"]
         return lines
 
     def report_lines(self) -> list[str]:
