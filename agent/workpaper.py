@@ -281,25 +281,37 @@ def _render_pdf_exhibit(
     overlays: list[_Overlay] = []
     unanchored = 0
     for letter, rects in located:
+        # A letter badge on EVERY box, not just the first. One citation can
+        # legitimately mark several values on a page (an invoice number AND
+        # its amount), and labelling only the first left the others as
+        # unattributed red rectangles -- which reads as the tool having
+        # boxed the wrong thing. A preparer marks the same tickmark symbol
+        # at every place it applies; this does the same.
         for i, (x0, top, x1, bottom) in enumerate(rects):
             bx, by = int(x0 * px), int(top * px)
             bw, bh = max(int((x1 - x0) * px), 1), max(int((bottom - top) * px), 1)
             overlays.append(_Overlay(_box_overlay_png(bw, bh), bx, by, bw, bh, f"box {letter}{i or ''}"))
+            overlays.append(
+                _Overlay(
+                    _letter_overlay_png(letter),
+                    max(bx - _LETTER_BADGE_PX - 4, 0),
+                    max(by - 4, 0),
+                    _LETTER_BADGE_PX,
+                    _LETTER_BADGE_PX,
+                    f"tickmark {letter}{i or ''}",
+                )
+            )
 
-        if rects:
-            x0, top = rects[0][0], rects[0][1]
-            lx = max(int(x0 * px) - _LETTER_BADGE_PX - 4, 0)
-            ly = max(int(top * px) - 4, 0)
-        else:
+        if not rects:
             # Nothing locatable on the page (an unreadable scan): the whole
             # page is the exhibit, so stack the letters in the corner.
             lx, ly = 6 + unanchored * (_LETTER_BADGE_PX + 6), 6
             unanchored += 1
-        overlays.append(
-            _Overlay(
-                _letter_overlay_png(letter), lx, ly, _LETTER_BADGE_PX, _LETTER_BADGE_PX, f"tickmark {letter}"
+            overlays.append(
+                _Overlay(
+                    _letter_overlay_png(letter), lx, ly, _LETTER_BADGE_PX, _LETTER_BADGE_PX, f"tickmark {letter}"
+                )
             )
-        )
 
     buf = BytesIO()
     pil.save(buf, "PNG")
@@ -1035,9 +1047,11 @@ def _write_step_sheet(
     # Control header, on the workbook's first sheet only -- it used to sit
     # on a separate Summary tab a reviewer had to click away from.
     if spec is not None:
-        put("Control ID", str(spec.get("control_id", "")))
-        put("Control objective ref", str(spec.get("control_objective_ref", "")))
-        put("Control objective", str(spec.get("control_objective_text", "")))
+        # Stripped: values come straight off a web form, and trailing
+        # spaces show up as ragged cells in the finished workpaper.
+        put("Control ID", str(spec.get("control_id", "")).strip())
+        put("Control objective ref", str(spec.get("control_objective_ref", "")).strip())
+        put("Control objective", str(spec.get("control_objective_text", "")).strip())
         row += 1
         # Shown even on a single-step control: with a per-sample matrix
         # this is no longer a restatement of the sheet below it -- it is

@@ -676,3 +676,27 @@ def test_pdf_workpaper_contents(spec: dict, results: dict, tmp_path: Path):
     assert "Satisfied" in text
     assert "INCOMPLETE" in text
     assert "ev_0001" in text
+
+
+def test_every_box_carries_its_tickmark_letter(annotated_setup, tmp_path: Path):
+    # One citation can legitimately mark several values on a page (an
+    # invoice number AND its amount). Labelling only the first left the
+    # others as unattributed red rectangles, which reads as the tool having
+    # boxed the wrong thing -- the first reaction a real reviewer had.
+    from agent.workpaper import _render_pdf_exhibit
+    from agent.extraction import extract
+
+    _spec, _results, support = annotated_setup
+    item = extract(support / "approval.pdf")[0]
+    buf, _size, overlays = _render_pdf_exhibit(
+        support / "approval.pdf",
+        1,
+        [("A", item, "Approved / Vendor Number 21022452 / Cost Center 0510")],
+    )
+
+    boxes = [o for o in overlays if o.name.startswith("box")]
+    letters = [o for o in overlays if o.name.startswith("tickmark")]
+    assert boxes, "nothing was located to box"
+    assert len(letters) == len(boxes), "some boxes have no tickmark letter"
+    # Each letter sits beside its own box, not stacked on the first one.
+    assert len({(o.x, o.y) for o in letters}) == len(letters)
