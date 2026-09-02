@@ -276,3 +276,42 @@ def test_run_control_preserves_audit_log_on_incomplete_run(control_dir: tuple[Pa
     assert len(result["audit_log"]) == 15
     assert all(entry.tool_name == "search_cy_support" for entry in result["audit_log"])
     assert "tokens_used" in result and "turns_used" in result
+
+
+def test_the_ledger_captures_a_whole_control_run(control_dir: tuple[Path, dict]):
+    # The ledger is threaded through iter_control_results into both OCR and
+    # every test step. A ledger that only ever sees the tool loop would
+    # under-report a scanned-support control by exactly the amount that
+    # runs outside the per-step cap -- which is the spend hardest to
+    # explain after the fact and the whole reason for the breakdown.
+    from agent.costs import TokenLedger
+    from agent.tests.conftest import fake_usage
+
+    base_dir, spec = control_dir
+    client = FakeClient(
+        responses=[
+            response(
+                [tool_use("t1", "search_cy_support", {"query": "accrual recalculation GL", "top_k": 5})],
+                usage=fake_usage(input_tokens=8_000, output_tokens=300),
+            ),
+            response(
+                [tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})],
+                usage=fake_usage(input_tokens=200, cache_read_input_tokens=8_200, output_tokens=150),
+            ),
+            response(
+                [tool_use("t3", "submit_conclusion", _submit_conclusion_input())],
+                usage=fake_usage(input_tokens=250, cache_read_input_tokens=8_600, output_tokens=1_400),
+            ),
+        ]
+    )
+
+    ledger = TokenLedger("claude-opus-5")
+    run_control(spec, base_dir, client, model="claude-opus-5", ledger=ledger)
+
+    assert [g.group for g in ledger.group_rows()] == ["TS-4.2"]
+    assert len(ledger.records) == 3
+    assert ledger.dollars > 0
+    # The step's first prompt was itemised, so "why was turn 1 expensive"
+    # is answerable without re-running anything.
+    sections = {name for name, *_ in ledger.prompt_mix_rows("TS-4.2")}
+    assert {"System prompt", "Tool schemas", "PY support excerpts"} <= sections

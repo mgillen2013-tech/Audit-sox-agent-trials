@@ -45,6 +45,7 @@ import openpyxl
 import streamlit as st
 from anthropic import AnthropicFoundry
 
+from agent.costs import TokenLedger, prices_for
 from agent.intake import build_manifest_from_any_columns, read_excel_rows
 from agent.loop import DEFAULT_MODEL, MAX_TOOL_ITERATIONS, MAX_TOTAL_TOKENS
 from agent.run_control import iter_control_results
@@ -228,6 +229,131 @@ def _render_conclusion(conclusion: ConclusionOutput) -> None:
         st.json(conclusion.model_dump())
 
 
+def _usd(amount: float) -> str:
+    """Cents are the natural unit for a single turn but the wrong one for a
+    run, so scale the precision instead of rounding a real cost to $0.00 --
+    a per-turn row reading zero is exactly the kind of thing that makes a
+    breakdown untrustworthy.
+    """
+    if amount and abs(amount) < 0.10:
+        return f"${amount:,.4f}"
+    return f"${amount:,.2f}"
+
+
+def _render_token_burn(ledger: TokenLedger) -> None:
+    """What the run cost and where it went.
+
+    The spending caps run on ONE cost-weighted number, which is the right
+    shape for a circuit breaker and the wrong shape for understanding a
+    bill: it cannot say whether OCR or testing spent it, which step ran
+    away, or whether the context is being re-read at full price every turn.
+    This is that same spend, itemised.
+    """
+    st.header("6. Token burn")
+    if not ledger.records:
+        # Every step failed before its first API call (bad credentials, an
+        # unreadable upload). Nothing was billed, and empty tables would
+        # read as a reporting bug rather than as "this cost nothing".
+        st.info("No API calls were billed on this run.")
+        return
+
+    family, fresh, cw, cr, out = prices_for(ledger.model)
+    total = ledger.dollars
+
+    a, b, c = st.columns(3)
+    a.metric("Estimated cost", _usd(total))
+    b.metric("Tokens billed", f"{ledger.raw_tokens:,}")
+    c.metric("API calls", f"{len(ledger.records):,}")
+    st.caption(
+        f"Priced as **{family}** at ${fresh:.2f} in / ${out:.2f} out per million tokens, "
+        f"cache writes ${cw:.2f}, cache reads ${cr:.2f}. List prices — Foundry bills Claude "
+        "at standard API rates, but treat this as an estimate, not an invoice."
+    )
+
+    st.markdown("**Where it went**")
+    st.dataframe(
+        [
+            {
+                "Phase": g.group,
+                "Cost": _usd(g.dollars),
+                "% of run": f"{(100.0 * g.dollars / total if total else 0):.1f}%",
+                "API calls": g.calls,
+                "Tokens": f"{g.raw_tokens:,}",
+            }
+            for g in ledger.group_rows()
+        ],
+        hide_index=True,
+    )
+    st.caption(
+        "OCR is its own row because it runs before the tool loop starts — the "
+        "per-step cap can neither see it nor stop it."
+    )
+
+    st.markdown("**What kind of tokens**")
+    st.dataframe(
+        [
+            {"Token kind": name, "Tokens": f"{tok:,}", "Cost": _usd(usd), "% of run": f"{pct:.1f}%"}
+            for name, tok, usd, pct in ledger.kind_rows()
+        ],
+        hide_index=True,
+    )
+    st.caption(
+        "This is the cache-health check. On a healthy multi-turn run, **cache reads "
+        "are the largest token count and one of the smallest costs** — they bill at "
+        "1/10th. If fresh input is large on every turn instead, the cache is being "
+        "invalidated and the run is paying full price to re-read its own context."
+    )
+
+    for g in ledger.group_rows():
+        with st.expander(f"{g.group} — turn by turn ({_usd(g.dollars)})"):
+            st.dataframe(
+                [
+                    {
+                        "Turn": rec.turn or "—",
+                        "What it did": rec.label,
+                        "Fresh in": f"{rec.input_tokens:,}",
+                        "Cache write": f"{rec.cache_write_tokens:,}",
+                        "Cache read": f"{rec.cache_read_tokens:,}",
+                        "Output": f"{rec.output_tokens:,}",
+                        "Cost": _usd(usd),
+                    }
+                    for rec, usd in ledger.call_rows(g.group)
+                ],
+                hide_index=True,
+            )
+            mix = ledger.prompt_mix_rows(g.group)
+            if mix:
+                st.markdown("**What filled this step's first prompt**")
+                st.dataframe(
+                    [
+                        {
+                            "Section": name,
+                            "Characters": f"{chars:,}",
+                            "≈ Tokens": f"{tokens:,}",
+                            "≈ Cost": _usd(usd),
+                        }
+                        for name, chars, tokens, usd in mix
+                    ],
+                    hide_index=True,
+                )
+                st.caption(
+                    "Turn 1 is the expensive turn, and this is what we chose to put "
+                    "in it. Apportioned across the measured turn-1 input, so the rows "
+                    "sum to what was actually billed; the split between them is "
+                    "proportional to length and therefore approximate."
+                )
+
+    # Deliberately NOT a tab in the workpaper: that file goes to external
+    # audit, and what the draft cost to produce is internal. It is still
+    # worth keeping, so it downloads on its own.
+    st.download_button(
+        "⬇️ Download this cost breakdown (.txt)",
+        data="\n".join(ledger.report_lines()) + "\n",
+        file_name="token_burn.txt",
+        mime="text/plain",
+    )
+
+
 def _render_result(test_step_id: str, result: dict) -> None:
     """One test step's outcome -- success or preserved failure. Used both
     for live rendering during a run and for re-rendering from
@@ -347,6 +473,7 @@ if run_clicked:
                     f"tokens used so far, {len(log)} tool call(s) made. (Cap: {int(max_total_tokens):,})"
                 )
 
+            ledger = TokenLedger(model)
             all_results = {}
             for test_step_id, result in iter_control_results(
                 spec,
@@ -359,6 +486,7 @@ if run_clicked:
                 ocr_scanned_pages=ocr_scanned_pages,
                 on_ocr=_show_ocr,
                 max_run_tokens=int(max_run_tokens),
+                ledger=ledger,
             ):
                 progress.empty()
                 _render_result(test_step_id, result)
@@ -387,8 +515,14 @@ if run_clicked:
             except Exception as exc:  # noqa: BLE001 -- the run's results must still show even if the file build breaks
                 st.warning(f"Couldn't generate the workpaper file: {exc}")
 
-        st.session_state["run_output"] = {"results": all_results, "wp_bytes": wp_bytes, "wp_name": wp_name}
+        st.session_state["run_output"] = {
+            "results": all_results,
+            "wp_bytes": wp_bytes,
+            "wp_name": wp_name,
+            "ledger": ledger,
+        }
         st.success("Done.")
+        _render_token_burn(ledger)
 
 # Rendered OUTSIDE the run-click block so results and the download button
 # survive Streamlit's script reruns (every widget click is a rerun -- without
@@ -399,6 +533,8 @@ if _out:
         st.header("Results (last run)")
         for _tsid, _result in _out["results"].items():
             _render_result(_tsid, _result)
+        if _out.get("ledger") is not None:
+            _render_token_burn(_out["ledger"])
     if _out["wp_bytes"]:
         st.download_button(
             "⬇️ Download CY workpaper (DRAFT)",

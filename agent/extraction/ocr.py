@@ -111,7 +111,7 @@ def _render_source_png(item: EvidenceItem, source_dir: Path) -> bytes:
     return _render_pdf_page_png(path, _page_number(item.location))
 
 
-def _transcribe(png: bytes, client: Any, model: str) -> tuple[str, int]:
+def _transcribe(png: bytes, client: Any, model: str) -> tuple[str, int, Any]:
     message = {
         "role": "user",
         "content": [
@@ -141,7 +141,11 @@ def _transcribe(png: bytes, client: Any, model: str) -> tuple[str, int]:
     # a second, incomparable currency.
     from agent.loop import _usage_tokens
 
-    return text, _usage_tokens(getattr(response, "usage", None))
+    usage = getattr(response, "usage", None)
+    # The raw usage object rides along too, so the cost ledger can break
+    # OCR down into the same four token kinds as everything else instead of
+    # OCR being one opaque lump next to an itemised testing phase.
+    return text, _usage_tokens(usage), usage
 
 
 def ocr_image_items(
@@ -151,6 +155,7 @@ def ocr_image_items(
     model: str,
     on_page: Any = None,
     max_pages: int = MAX_OCR_PAGES,
+    ledger: Any = None,
 ) -> tuple[list[EvidenceItem], int, int]:
     """Fills in extracted_text for every image_ocr item by transcribing its
     page. Returns (new item list, count transcribed, cost-weighted tokens
@@ -189,8 +194,12 @@ def ocr_image_items(
         page_num = _page_number(item.location)
         try:
             png = _render_source_png(item, source_dir)
-            text, tokens = _transcribe(png, client, model)
+            text, tokens, usage = _transcribe(png, client, model)
             tokens_used += tokens
+            if ledger is not None:
+                ledger.record(
+                    usage, group="OCR", label=f"{item.source_file} p.{page_num}", turn=0
+                )
         except Exception:  # noqa: BLE001 -- a failed OCR degrades to the placeholder, never breaks the run
             if on_page is not None:
                 on_page(item.source_file, page_num, False, tokens_used)

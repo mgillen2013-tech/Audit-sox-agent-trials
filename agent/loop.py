@@ -19,6 +19,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from agent.costs import TokenLedger
 from agent.schemas import (
     CheckSampleCoverageError,
     CheckSampleCoverageInput,
@@ -252,14 +253,23 @@ def _render_cy_inventory(items: list[EvidenceItem]) -> str:
     return text
 
 
-def build_user_turn(request: TestStepRequest, cy_evidence: list[EvidenceItem] | None = None) -> str:
+def user_turn_sections(
+    request: TestStepRequest, cy_evidence: list[EvidenceItem] | None = None
+) -> dict[str, str]:
+    """The first user turn as its named pieces, in render order.
+
+    build_user_turn() is just "".join() of these -- they are split out so
+    the cost ledger can report which section of the prompt the turn-1 input
+    bill actually went to (agent/costs.py's prompt_mix_rows). Turn 1 is the
+    expensive turn of a step, and "why" is answerable only if the prompt's
+    parts are separable rather than one f-string.
+    """
     py_excerpts = _render_py_excerpts(request.py_support_excerpts)
     py_conclusion_line = (
         f"PY conclusion: {request.py_conclusion_text}\n\n"
         if request.py_conclusion_text
         else "PY conclusion: not separately provided -- read it from the PY support excerpts below if relevant.\n\n"
     )
-    sample_line = _render_sample_line(request.sample_size, request.population_size, request.samples)
     inventory_block = ""
     if cy_evidence is not None:
         inventory_block = f"""\
@@ -272,19 +282,35 @@ it; this inventory is a map, not retrieved evidence.
 {_render_cy_inventory(cy_evidence)}
 
 """
-    return f"""\
-Control objective ({request.control_objective_ref}): {request.control_objective_text}
+    return {
+        "Control objective + test step": (
+            f"Control objective ({request.control_objective_ref}): {request.control_objective_text}\n"
+            f"\n"
+            f"Test step ({request.test_step_id}): {request.test_step_text}\n"
+            f"\n"
+        ),
+        "Sample roster": _render_sample_line(
+            request.sample_size, request.population_size, request.samples
+        ),
+        "CY evidence inventory": inventory_block,
+        "PY conclusion": py_conclusion_line,
+        "PY support excerpts": (
+            "PY support excerpts (format/approach precedent only -- not evidence for this\n"
+            "year's conclusion):\n"
+            f"{py_excerpts}\n"
+            "\n"
+        ),
+        "Closing instructions": (
+            "Use search_cy_support to find this year's evidence for this test step before\n"
+            "concluding anything. Be efficient: searches return items nearly in full, so\n"
+            "a handful of searches should cover a small evidence pool -- do not re-query\n"
+            "the same document for different fields."
+        ),
+    }
 
-Test step ({request.test_step_id}): {request.test_step_text}
 
-{sample_line}{inventory_block}{py_conclusion_line}PY support excerpts (format/approach precedent only -- not evidence for this
-year's conclusion):
-{py_excerpts}
-
-Use search_cy_support to find this year's evidence for this test step before
-concluding anything. Be efficient: searches return items nearly in full, so
-a handful of searches should cover a small evidence pool -- do not re-query
-the same document for different fields."""
+def build_user_turn(request: TestStepRequest, cy_evidence: list[EvidenceItem] | None = None) -> str:
+    return "".join(user_turn_sections(request, cy_evidence).values())
 
 
 _MAX_ROSTER_ITEMS = 25
@@ -710,6 +736,7 @@ def run_test_step(
     max_iterations: int = MAX_TOOL_ITERATIONS,
     max_total_tokens: int = MAX_TOTAL_TOKENS,
     on_turn: "Callable[[int, int, list[AuditLogEntry]], None] | None" = None,
+    ledger: "TokenLedger | None" = None,
 ) -> tuple[ConclusionOutput, list[AuditLogEntry]]:
     """on_turn, if given, is called once per completed turn with
     (turn_number, cumulative_tokens_used, audit_log_so_far) -- purely for a
@@ -717,6 +744,11 @@ def run_test_step(
     running. It sees the same audit_log list this function keeps appending
     to, so a caller that only reads it (rather than mutating it) is safe;
     nothing here depends on its return value.
+
+    ledger, if given, gets one entry per API call with the four token kinds
+    kept separate, for the after-the-run cost breakdown. It is observation
+    only: the spending cap runs off this function's own tokens_used, never
+    off the ledger, so nothing about cost REPORTING can abort a run.
     """
     ctx = ToolContext(
         evidence_items=evidence_items,
@@ -728,7 +760,22 @@ def run_test_step(
     tokens_used = 0
     wrapup_warned = False
     system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
-    messages: list[dict] = [{"role": "user", "content": build_user_turn(request, cy_evidence=evidence_items)}]
+    sections = user_turn_sections(request, cy_evidence=evidence_items)
+    messages: list[dict] = [{"role": "user", "content": "".join(sections.values())}]
+
+    if ledger is not None:
+        # Everything sent on turn 1, by piece -- the system prompt and the
+        # tool schemas included, since both are billed and both are things
+        # we chose to send. Recorded before the call so it is present even
+        # if the very first request fails.
+        ledger.note_prompt_mix(
+            request.test_step_id,
+            {
+                **{k: len(v) for k, v in sections.items() if v},
+                "System prompt": len(SYSTEM_PROMPT),
+                "Tool schemas": len(json.dumps(TOOLS)),
+            },
+        )
 
     def _maybe_warn_wrapup(turn: int) -> None:
         # The $65 failure mode was the model grinding through every allowed
@@ -764,6 +811,20 @@ def run_test_step(
         )
 
         tokens_used += _usage_tokens(getattr(response, "usage", None))
+
+        if ledger is not None:
+            # Label the turn by what it actually did, so a turn-by-turn
+            # readout says "searched twice" or "submitted the conclusion"
+            # rather than just naming a number.
+            called = [
+                b.name for b in response.content if getattr(b, "type", None) == "tool_use"
+            ]
+            ledger.record(
+                getattr(response, "usage", None),
+                group=request.test_step_id,
+                label=", ".join(called) if called else "no tool call (prose only)",
+                turn=turn,
+            )
 
         if getattr(response, "stop_reason", None) == "refusal":
             # Same preserve-paid-work rule as the budget/iteration aborts: a

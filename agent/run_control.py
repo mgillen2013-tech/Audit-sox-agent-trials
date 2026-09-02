@@ -51,6 +51,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+from agent.costs import TokenLedger
 from agent.extraction import extract, extract_many, ocr_image_items
 from agent.intake import parse_sample_list
 from agent.loop import DEFAULT_MODEL, MAX_TOTAL_TOKENS, IncompleteRunError, TestStepRequest, run_test_step
@@ -68,6 +69,7 @@ def iter_control_results(
     ocr_scanned_pages: bool = True,
     on_ocr: "Callable[[str, int, bool, int], None] | None" = None,
     max_run_tokens: int | None = None,
+    ledger: "TokenLedger | None" = None,
 ) -> Iterator[tuple[str, dict]]:
     """The testable core -- no file writing, no env var reads. Yields
     (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
@@ -107,6 +109,12 @@ def iter_control_results(
     a caller can show live progress -- a step can run for a couple of
     minutes with several tool calls, and iter_control_results only yields
     once a step is fully done or aborted.
+
+    ledger: an agent.costs.TokenLedger to itemise the run into. Every API
+    call this control makes -- OCR pages included -- lands in it with its
+    four token kinds kept apart, which is what turns the single
+    cost-weighted number the caps run on into an answer to "where did the
+    money go". Purely observational; the caps do not consult it.
     """
     py_evidence = extract(base_dir / spec["py_testing_file"])
     cy_evidence = extract_many([base_dir / f for f in spec["cy_support_files"]])
@@ -120,7 +128,7 @@ def iter_control_results(
 
     if ocr_scanned_pages:
         cy_evidence, _, run_tokens = ocr_image_items(
-            cy_evidence, base_dir, client, model, on_page=on_ocr
+            cy_evidence, base_dir, client, model, on_page=on_ocr, ledger=ledger
         )
 
     if sample_manifests is None:
@@ -187,6 +195,7 @@ def iter_control_results(
                 model=model,
                 max_total_tokens=max_total_tokens,
                 on_turn=step_on_turn,
+                ledger=ledger,
             )
         except IncompleteRunError as exc:
             run_tokens += exc.tokens_used
@@ -217,6 +226,7 @@ def run_control(
     max_total_tokens: int = MAX_TOTAL_TOKENS,
     ocr_scanned_pages: bool = True,
     max_run_tokens: int | None = None,
+    ledger: TokenLedger | None = None,
 ) -> dict[str, dict]:
     """Batch wrapper over iter_control_results() for callers (the CLI, tests)
     that just want the whole set of results at the end.
@@ -231,6 +241,7 @@ def run_control(
             max_total_tokens=max_total_tokens,
             ocr_scanned_pages=ocr_scanned_pages,
             max_run_tokens=max_run_tokens,
+            ledger=ledger,
         )
     )
 
@@ -250,7 +261,8 @@ def main() -> None:
     model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
     print(f"Using model: {model}\n")
 
-    results = run_control(spec, base_dir, client, model)
+    ledger = TokenLedger(model)
+    results = run_control(spec, base_dir, client, model, ledger=ledger)
 
     output_dir = base_dir / "output" / spec["control_id"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -296,6 +308,14 @@ def main() -> None:
         print(f"WARNING: workpaper file generation failed: {exc}")
 
     print(f"\nWrote results to {output_dir}")
+
+    # What the run cost, and where -- printed after the results rather than
+    # buried in them, and written alongside them so a control that looked
+    # expensive can be explained later rather than re-run to find out why.
+    print()
+    for line in ledger.summary_lines():
+        print(line)
+    (output_dir / "token_burn.txt").write_text("\n".join(ledger.report_lines()) + "\n")
 
 
 if __name__ == "__main__":
