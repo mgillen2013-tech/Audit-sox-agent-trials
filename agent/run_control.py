@@ -1,0 +1,345 @@
+"""Run every test step of one control against real files.
+
+This is what section 1 of the design doc's intake describes, wired up:
+a PY testing file, a CY sample list, and one or more CY support files go in;
+one draft conclusion per test step comes out.
+
+Still NOT built: an upload form (you hand it file paths in a JSON spec
+instead), and per-test-step slicing of the PY testing file -- the PY
+excerpts shown to the model are the entire extracted PY testing file for
+every test step, not just the portion relevant to that step. That's a
+known simplification, not an oversight: splitting a workpaper into
+per-step sections is a real sub-problem on its own (see the design doc's
+"confirm/edit step" note in section 1), and passing the whole thing is
+harmless (just extra tokens) given the model already treats PY as
+format/approach precedent, not evidence.
+
+Usage:
+    python3 -m agent.run_control path/to/control.json
+
+control.json shape -- see control.example.json alongside this file. File
+paths inside it are resolved relative to the JSON file's own directory, so
+a whole control's files can live together in one folder and move as a unit.
+
+{
+  "control_id": "C-14",
+  "control_objective_ref": "CO-4",
+  "control_objective_text": "...",
+  "py_testing_file": "PY_Testing_C14.pdf",
+  "sample_list_file": "samples_C14.xlsx",
+  "cy_support_files": ["Recon_Oct2026.xlsx", "GL_Export_Oct2026.pdf"],
+  "test_steps": [
+    {"test_step_id": "TS-4.2", "test_step_text": "..."}
+  ]
+}
+
+test_steps[].py_conclusion_text is optional -- if omitted, the model reads
+the PY conclusion from py_testing_file's extracted content itself instead
+of a human retyping it.
+
+Requires the same environment variables as agent/example_run.py
+(ANTHROPIC_FOUNDRY_API_KEY, ANTHROPIC_FOUNDRY_RESOURCE, optionally
+ANTHROPIC_MODEL).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
+
+from agent.costs import TokenLedger
+from agent.extraction import extract, extract_many, ocr_image_items
+from agent.extraction.ocr import MAX_OCR_PAGES
+from agent.intake import parse_sample_list
+from agent.loop import DEFAULT_MODEL, MAX_TOTAL_TOKENS, IncompleteRunError, TestStepRequest, run_test_step
+from agent.schemas import ConclusionOutput, SamplePopulationManifest
+
+
+def iter_control_results(
+    spec: dict[str, Any],
+    base_dir: Path,
+    client: Any,
+    model: str,
+    sample_manifests: dict[str, SamplePopulationManifest] | None = None,
+    max_total_tokens: int = MAX_TOTAL_TOKENS,
+    on_turn: "Callable[[str, int, int, list], None] | None" = None,
+    ocr_scanned_pages: bool = True,
+    on_ocr: "Callable[[str, int, bool, int], None] | None" = None,
+    max_run_tokens: int | None = None,
+    ledger: "TokenLedger | None" = None,
+) -> Iterator[tuple[str, dict]]:
+    """The testable core -- no file writing, no env var reads. Yields
+    (test_step_id, {"conclusion": ConclusionOutput, "audit_log": [...]})
+    on success, or (test_step_id, {"error": str, ...}) on failure, as each
+    test step finishes, rather than blocking silently until the whole
+    control is done -- a control with several steps can take minutes, and a
+    caller (the Streamlit app) that wants to show progress per step needs
+    results as they land, not a batch dump at the end.
+
+    A failure that aborted via run_test_step's token-budget or
+    max-iterations circuit breaker (agent.loop.IncompleteRunError) still
+    yields everything already paid for: the error dict also carries
+    "audit_log" (every tool call made before the abort), "reason"
+    ("token_budget_exceeded", "max_iterations", or "model_refusal"),
+    "tokens_used", and "turns_used". A run that already spent real money before
+    failing should never come back as a bare error string with nothing to
+    show for it -- see the design doc's note on this circuit breaker.
+
+    sample_manifests: pass already-built manifests to skip
+    spec["sample_list_file"] / parse_sample_list() entirely -- used by the
+    Streamlit app, which builds one manifest per test step directly from
+    whatever columns that step's uploaded file actually has (see
+    agent.intake.build_manifest_from_any_columns) rather than requiring one
+    combined file in the clean fixed-column format. Falls back to the
+    file-based path when omitted, for the CLI's control.json workflow.
+
+    max_run_tokens: ceiling on cost-weighted tokens for the WHOLE control,
+    counting OCR plus every test step. max_total_tokens is per step and is
+    applied fresh each time, so a 5-step control could otherwise spend 5x
+    it with nothing watching the total. Once the ceiling is passed,
+    remaining steps are not started and are yielded as skipped -- steps
+    already finished keep their conclusions, since those were paid for and
+    are already complete. Defaults to 4x max_total_tokens.
+
+    on_turn: forwarded to run_test_step for each test step, called with
+    (test_step_id, turn_number, cumulative_tokens_used, audit_log_so_far) so
+    a caller can show live progress -- a step can run for a couple of
+    minutes with several tool calls, and iter_control_results only yields
+    once a step is fully done or aborted.
+
+    ledger: an agent.costs.TokenLedger to itemise the run into. Every API
+    call this control makes -- OCR pages included -- lands in it with its
+    four token kinds kept apart, which is what turns the single
+    cost-weighted number the caps run on into an answer to "where did the
+    money go". Purely observational; the caps do not consult it.
+    """
+    py_evidence = extract(base_dir / spec["py_testing_file"])
+    cy_evidence = extract_many([base_dir / f for f in spec["cy_support_files"]])
+
+    # Scanned/image-only pages carry no text at all until this runs -- a
+    # real run concluded on the approval email alone because the invoice
+    # and payment PDFs were image-only and unreadable. One vision call per
+    # such page, once per run (not per turn), before the loop starts.
+    run_budget = max_run_tokens if max_run_tokens is not None else 4 * max_total_tokens
+    run_tokens = 0
+
+    if ocr_scanned_pages:
+        cy_evidence, transcribed, run_tokens = ocr_image_items(
+            cy_evidence, base_dir, client, model, on_page=on_ocr, ledger=ledger
+        )
+        if ledger is not None:
+            # Say what OCR did even when it did nothing. Without this, a
+            # missing OCR row is ambiguous -- "no scanned pages" and "the
+            # checkbox was off" look identical -- and pages left unread
+            # (past the MAX_OCR_PAGES ceiling, or a failed transcription)
+            # are invisible, which is the worst case of the three: the
+            # conclusion rests on less evidence than it appears to.
+            unread = sum(
+                1 for i in cy_evidence if i.source_type == "image_ocr" and not i.extracted_text
+            )
+            ledger.ocr_status = (
+                f"{transcribed} scanned page(s) transcribed"
+                if transcribed
+                else "no scanned pages found -- nothing needed transcribing"
+            )
+            if unread:
+                ledger.ocr_status += (
+                    f", {unread} still unread (past the {MAX_OCR_PAGES}-page ceiling, "
+                    f"or the page could not be transcribed)"
+                )
+    elif ledger is not None:
+        ledger.ocr_status = "turned off for this run -- scanned pages were left unread"
+
+    if sample_manifests is None:
+        sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"])
+
+    for step in spec["test_steps"]:
+        test_step_id = step["test_step_id"]
+
+        if run_tokens >= run_budget:
+            # Don't START another step past the control-wide ceiling.
+            # Steps already finished keep their conclusions -- that work is
+            # done and was paid for; this only prevents further spend.
+            yield test_step_id, {
+                "error": (
+                    f"skipped: this control already used ~{run_tokens:,} cost-weighted tokens, "
+                    f"at or over its {run_budget:,} run ceiling. Raise the cap, or run the "
+                    f"remaining steps separately."
+                ),
+                "reason": "run_budget_exceeded",
+                "tokens_used": run_tokens,
+                "turns_used": 0,
+                "audit_log": [],
+            }
+            continue
+
+        manifest = sample_manifests.get(test_step_id)
+        if manifest is None:
+            print(
+                f"  WARNING: no sample list rows found for {test_step_id!r} -- "
+                f"running with an empty sample (check_sample_coverage will error)"
+            )
+
+        request = TestStepRequest(
+            test_step_id=test_step_id,
+            control_id=spec["control_id"],
+            control_objective_ref=spec["control_objective_ref"],
+            control_objective_text=spec["control_objective_text"],
+            test_step_text=step["test_step_text"],
+            py_conclusion_text=step.get("py_conclusion_text", ""),
+            py_support_excerpts=py_evidence,
+            sample_size=manifest.sample_size if manifest else None,
+            population_size=manifest.population_size if manifest else None,
+            samples=list(manifest.samples) if manifest else [],
+        )
+
+        # A step reports its running total each turn; keep the latest so the
+        # run ceiling reflects real spend even when a step ends normally
+        # (a successful step raises nothing, so there is no other hook for
+        # its token count).
+        step_tokens = 0
+
+        def step_on_turn(turn, tokens, log, _id=test_step_id):  # noqa: ANN001
+            nonlocal step_tokens
+            step_tokens = tokens
+            if on_turn is not None:
+                on_turn(_id, turn, tokens, log)
+
+        try:
+            conclusion, audit_log = run_test_step(
+                request,
+                cy_evidence,
+                manifest,
+                client,
+                model=model,
+                max_total_tokens=max_total_tokens,
+                on_turn=step_on_turn,
+                ledger=ledger,
+            )
+        except IncompleteRunError as exc:
+            run_tokens += exc.tokens_used
+            yield test_step_id, {
+                "error": str(exc),
+                "audit_log": exc.audit_log,
+                "reason": exc.reason,
+                "tokens_used": exc.tokens_used,
+                "turns_used": exc.turns_used,
+            }
+            continue
+        except Exception as exc:  # noqa: BLE001 -- one step's failure shouldn't kill the run
+            run_tokens += step_tokens
+            yield test_step_id, {"error": str(exc)}
+            continue
+
+        run_tokens += step_tokens
+
+        yield test_step_id, {"conclusion": conclusion, "audit_log": audit_log}
+
+
+def run_control(
+    spec: dict[str, Any],
+    base_dir: Path,
+    client: Any,
+    model: str,
+    sample_manifests: dict[str, SamplePopulationManifest] | None = None,
+    max_total_tokens: int = MAX_TOTAL_TOKENS,
+    ocr_scanned_pages: bool = True,
+    max_run_tokens: int | None = None,
+    ledger: TokenLedger | None = None,
+) -> dict[str, dict]:
+    """Batch wrapper over iter_control_results() for callers (the CLI, tests)
+    that just want the whole set of results at the end.
+    """
+    return dict(
+        iter_control_results(
+            spec,
+            base_dir,
+            client,
+            model,
+            sample_manifests=sample_manifests,
+            max_total_tokens=max_total_tokens,
+            ocr_scanned_pages=ocr_scanned_pages,
+            max_run_tokens=max_run_tokens,
+            ledger=ledger,
+        )
+    )
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        print("Usage: python3 -m agent.run_control path/to/control.json")
+        sys.exit(1)
+
+    spec_path = Path(sys.argv[1])
+    base_dir = spec_path.parent
+    spec = json.loads(spec_path.read_text())
+
+    from anthropic import AnthropicFoundry  # imported here so tests don't need Foundry creds to import this module
+
+    client = AnthropicFoundry()
+    model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    print(f"Using model: {model}\n")
+
+    ledger = TokenLedger(model)
+    results = run_control(spec, base_dir, client, model, ledger=ledger)
+
+    output_dir = base_dir / "output" / spec["control_id"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for test_step_id, result in results.items():
+        out_path = output_dir / f"{test_step_id}.json"
+        if "error" in result:
+            print(f"[{test_step_id}] FAILED: {result['error']}")
+            error_payload: dict[str, Any] = {"error": result["error"]}
+            if "audit_log" in result:
+                error_payload["reason"] = result["reason"]
+                error_payload["tokens_used"] = result["tokens_used"]
+                error_payload["turns_used"] = result["turns_used"]
+                error_payload["audit_log"] = [entry.__dict__ for entry in result["audit_log"]]
+                print(
+                    f"  ({result['reason']}, {result['tokens_used']:,} tokens used, "
+                    f"{len(result['audit_log'])} tool call(s) preserved)"
+                )
+            out_path.write_text(json.dumps(error_payload, indent=2))
+            continue
+
+        conclusion: ConclusionOutput = result["conclusion"]
+        print(
+            f"[{test_step_id}] {conclusion.conclusion} "
+            f"(confidence: {conclusion.confidence}, tool calls: {conclusion.model_metadata.tool_call_count})"
+        )
+        out_path.write_text(
+            json.dumps(
+                {
+                    "conclusion": conclusion.model_dump(),
+                    "audit_log": [entry.__dict__ for entry in result["audit_log"]],
+                },
+                indent=2,
+            )
+        )
+
+    try:
+        from agent.workpaper import build_workpaper
+
+        wp_path = build_workpaper(spec, results, spec["py_testing_file"], output_dir, support_dir=base_dir)
+        print(f"Wrote CY workpaper (DRAFT): {wp_path}")
+    except Exception as exc:  # noqa: BLE001 -- the JSON results above are already written; don't lose them over the file build
+        print(f"WARNING: workpaper file generation failed: {exc}")
+
+    print(f"\nWrote results to {output_dir}")
+
+    # What the run cost, and where -- printed after the results rather than
+    # buried in them, and written alongside them so a control that looked
+    # expensive can be explained later rather than re-run to find out why.
+    print()
+    for line in ledger.summary_lines():
+        print(line)
+    (output_dir / "token_burn.txt").write_text("\n".join(ledger.report_lines()) + "\n")
+
+
+if __name__ == "__main__":
+    main()

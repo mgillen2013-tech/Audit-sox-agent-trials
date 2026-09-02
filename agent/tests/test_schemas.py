@@ -1,0 +1,285 @@
+"""Validation-rule tests for the schemas -- these are the mechanical checks
+the design doc calls "a hard, mechanical check rather than a hope": citation
+requirements, the IPE-evidence requirement, the fabrication guard, and the
+sample-list self-consistency check.
+"""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+
+from agent.schemas import (
+    ConclusionOutput,
+    EvidenceCitation,
+    ModelMetadata,
+    SampleCoverage,
+    SampleItem,
+    SamplePopulationManifest,
+    SubmitConclusionInput,
+    validate_citations_against_transcript,
+)
+
+
+def _base_conclusion(**overrides) -> dict:
+    base = dict(
+        test_step_id="TS-4.2",
+        control_objective_ref="CO-4",
+        conclusion="satisfied",
+        narrative="Recalculated accrual ties to GL with no variance.",
+        evidence_citations=[
+            EvidenceCitation(
+                evidence_id="ev_012",
+                source_file="Recon.xlsx",
+                location="Sheet1!C4:C18",
+                quote_or_summary="Accrual recalculation, ending balance $482,110",
+                relevance="Recalculated figure used to test the accrual",
+            )
+        ],
+        procedures_performed=["recalculation"],
+        ipe_completeness_accuracy_status="not_applicable",
+        ipe_completeness_accuracy_evidence=[],
+        exceptions=[],
+        additional_support_requests=[],
+        confidence="high",
+        confidence_rationale="Native-text source, full coverage.",
+        sample_coverage=SampleCoverage(
+            total_required=25, total_found=25, missing=[], coverage_pct=100.0, complete=True
+        ),
+        model_metadata=ModelMetadata(
+            model="claude-sonnet-5", prompt_version="v3", timestamp="2026-08-12T00:00:00Z", tool_call_count=6
+        ),
+    )
+    base.update(overrides)
+    return base
+
+
+# --------------------------------------------------------------------------
+# ConclusionOutput
+# --------------------------------------------------------------------------
+
+
+def test_satisfied_conclusion_requires_citations():
+    with pytest.raises(ValidationError, match="evidence_citations must be non-empty"):
+        ConclusionOutput(**_base_conclusion(evidence_citations=[]))
+
+
+def test_insufficient_evidence_allows_empty_citations():
+    conclusion = ConclusionOutput(
+        **_base_conclusion(conclusion="insufficient_evidence", evidence_citations=[], sample_coverage=None)
+    )
+    assert conclusion.evidence_citations == []
+
+
+def test_ipe_validated_requires_evidence():
+    with pytest.raises(ValidationError, match="ipe_completeness_accuracy_evidence must be non-empty"):
+        ConclusionOutput(
+            **_base_conclusion(
+                ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=[]
+            )
+        )
+
+
+def test_ipe_validated_with_evidence_is_valid():
+    conclusion = ConclusionOutput(
+        **_base_conclusion(
+            ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=["ev_009"]
+        )
+    )
+    assert conclusion.ipe_completeness_accuracy_evidence == ["ev_009"]
+
+
+def test_ipe_not_validated_needs_no_citation():
+    # The case a bool + maybe-empty-list couldn't express: reliance exists,
+    # but completeness/accuracy was NOT obtained. This must be sayable
+    # without citing anything, and without being forced to cite the report
+    # itself as a workaround.
+    conclusion = ConclusionOutput(
+        **_base_conclusion(
+            ipe_completeness_accuracy_status="not_validated", ipe_completeness_accuracy_evidence=[]
+        )
+    )
+    assert conclusion.ipe_completeness_accuracy_status == "not_validated"
+
+
+def test_ipe_evidence_rejected_unless_validated():
+    with pytest.raises(ValidationError, match="must be empty when"):
+        ConclusionOutput(
+            **_base_conclusion(
+                ipe_completeness_accuracy_status="not_validated",
+                ipe_completeness_accuracy_evidence=["ev_002"],
+            )
+        )
+
+
+def test_fabricated_citation_rejected():
+    conclusion = ConclusionOutput(**_base_conclusion())
+    with pytest.raises(ValueError, match="never returned by search_cy_support"):
+        validate_citations_against_transcript(conclusion, evidence_ids_returned_by_search=set())
+
+
+def test_citation_returned_by_search_passes():
+    conclusion = ConclusionOutput(**_base_conclusion())
+    # Should not raise.
+    validate_citations_against_transcript(conclusion, evidence_ids_returned_by_search={"ev_012"})
+
+
+def test_fabricated_ipe_citation_rejected():
+    conclusion = ConclusionOutput(
+        **_base_conclusion(
+            ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=["ev_999"]
+        )
+    )
+    with pytest.raises(ValueError, match="ev_999"):
+        validate_citations_against_transcript(conclusion, evidence_ids_returned_by_search={"ev_012"})
+
+
+# --------------------------------------------------------------------------
+# SamplePopulationManifest
+# --------------------------------------------------------------------------
+
+
+def test_sample_size_must_match_sample_list_length():
+    with pytest.raises(ValidationError, match="does not match"):
+        SamplePopulationManifest(
+            test_step_id="TS-4.2",
+            population_description="All POs > $5,000 issued Oct 2025-Sep 2026",
+            sample_size=2,
+            selection_method="random",
+            samples=[
+                SampleItem(sample_id="S01", test_step_id="TS-4.2", identifying_details="PO-48213"),
+            ],
+        )
+
+
+def test_sample_item_test_step_id_must_match_manifest():
+    with pytest.raises(ValidationError, match="expected 'TS-4.2'"):
+        SamplePopulationManifest(
+            test_step_id="TS-4.2",
+            population_description="All POs > $5,000 issued Oct 2025-Sep 2026",
+            sample_size=1,
+            selection_method="random",
+            samples=[
+                SampleItem(sample_id="S01", test_step_id="TS-4.3", identifying_details="PO-48213"),
+            ],
+        )
+
+
+def test_valid_manifest_round_trips():
+    manifest = SamplePopulationManifest(
+        test_step_id="TS-4.2",
+        population_description="All POs > $5,000 issued Oct 2025-Sep 2026",
+        population_size=340,
+        sample_size=1,
+        selection_method="random",
+        samples=[
+            SampleItem(
+                sample_id="S01",
+                test_step_id="TS-4.2",
+                identifying_details="PO #48213, Branch 35210, $12,450, 3/14/2026",
+                key_fields={"po_number": "48213", "branch": "35210"},
+            ),
+        ],
+    )
+    assert manifest.samples[0].key_fields["branch"] == "35210"
+
+
+# --------------------------------------------------------------------------
+# Cross-field consistency: the summary and the per-item rows are written
+# independently, so nothing else stops them contradicting each other.
+# --------------------------------------------------------------------------
+
+
+def _core(**overrides) -> dict:
+    base = dict(
+        test_step_id="TS-1",
+        control_objective_ref="CO-1",
+        conclusion="satisfied",
+        narrative="n",
+        evidence_citations=[
+            {
+                "evidence_id": "ev_0001",
+                "source_file": "f.pdf",
+                "location": "p.1",
+                "quote_or_summary": "q",
+                "relevance": "r",
+                "sample_id": "1",
+            }
+        ],
+        procedures_performed=["p"],
+        ipe_completeness_accuracy_status="not_applicable",
+        ipe_completeness_accuracy_evidence=[],
+        exceptions=[],
+        additional_support_requests=[],
+        confidence="high",
+        confidence_rationale="r",
+    )
+    base.update(overrides)
+    return base
+
+
+def test_step_cannot_be_satisfied_when_a_sampled_item_failed():
+    # A workpaper whose summary reads "Satisfied" while the sample row
+    # beneath it reads "Not satisfied" is a contradiction a reviewer would
+    # catch -- and then rightly distrust the rest of the file.
+    with pytest.raises(ValidationError, match="cannot be more favourable"):
+        SubmitConclusionInput(
+            **_core(
+                conclusion="satisfied",
+                sample_results=[
+                    {"sample_id": "1", "conclusion": "satisfied"},
+                    {"sample_id": "2", "conclusion": "not_satisfied"},
+                ],
+            )
+        )
+
+
+def test_not_satisfied_rollup_with_a_failed_item_is_fine():
+    c = SubmitConclusionInput(
+        **_core(
+            conclusion="not_satisfied",
+            sample_results=[
+                {"sample_id": "1", "conclusion": "satisfied"},
+                {"sample_id": "2", "conclusion": "not_satisfied"},
+            ],
+        )
+    )
+    assert c.conclusion == "not_satisfied"
+
+
+def test_attribute_pinned_to_an_unknown_sample_is_rejected():
+    # It would render on a sheet that does not exist, silently dropping the
+    # attribute from the workpaper.
+    with pytest.raises(ValidationError, match="appear in no"):
+        SubmitConclusionInput(
+            **_core(
+                sample_results=[{"sample_id": "1", "conclusion": "satisfied"}],
+                attribute_results=[
+                    {
+                        "attribute": "a",
+                        "sample_id": "99",
+                        "result": "satisfied",
+                        "value_observed": "v",
+                        "evidence_ids": [],
+                    }
+                ],
+            )
+        )
+
+
+def test_step_wide_attribute_needs_no_sample():
+    c = SubmitConclusionInput(
+        **_core(
+            sample_results=[{"sample_id": "1", "conclusion": "satisfied"}],
+            attribute_results=[
+                {
+                    "attribute": "IPE reconciles",
+                    "sample_id": None,
+                    "result": "not_satisfied",
+                    "value_observed": "57,039 vs 30",
+                    "evidence_ids": [],
+                }
+            ],
+        )
+    )
+    assert c.attribute_results[0].sample_id is None

@@ -1,0 +1,14 @@
+{
+  "control_id": "C-14",
+  "control_objective_ref": "CO-4",
+  "control_objective_text": "Accruals are recorded completely and accurately each month-end.",
+  "py_testing_file": "PY_Testing_C14.pdf",
+  "sample_list_file": "samples_C14.xlsx",
+  "cy_support_files": ["Recon_Oct2026.xlsx", "GL_Export_Oct2026.pdf"],
+  "test_steps": [
+    {
+      "test_step_id": "TS-4.2",
+      "test_step_text": "Recalculate the month-end accrual and agree the recalculated amount to the GL."
+    }
+  ]
+}
