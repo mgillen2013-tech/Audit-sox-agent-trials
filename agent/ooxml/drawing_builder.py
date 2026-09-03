@@ -259,13 +259,25 @@ def build_sample_drawing(
             if img_spec.tie_outs:
                 words = ocr_utils.ocr_words(im)
                 for tie_out in img_spec.tie_outs:
-                    try:
-                        px, py, pw, ph = ocr_utils.find_anchor_box(
-                            words, tie_out.anchor_text,
-                            occurrence=tie_out.occurrence,
-                            extra_words=tie_out.extra_words,
-                        )
-                    except ValueError as exc:
+                    # Try the preferred anchor, then each fallback. The same
+                    # value is written differently on different documents, so
+                    # one unfindable form does not mean the value is absent.
+                    located = None
+                    last_error = ""
+                    for candidate in [tie_out.anchor_text, *tie_out.fallback_anchors]:
+                        try:
+                            located = ocr_utils.find_anchor_box(
+                                words, candidate,
+                                occurrence=tie_out.occurrence,
+                                extra_words=tie_out.extra_words,
+                            )
+                            break
+                        except ValueError as exc:
+                            last_error = str(exc)
+                    if located is not None:
+                        px, py, pw, ph = located
+                    else:
+                        exc = last_error
                         # Originally this propagated, reasoning that a missing
                         # anchor should fail loudly rather than box the wrong
                         # value. That is right for a human building one file by

@@ -168,7 +168,21 @@ def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingRe
 
 def build_workpaper(request: WorkpaperRequest,
                      *, sample_sheet_num: int = 2, population_sheet_num: int = 3,
-                     parameters_sheet_num: int = 4) -> str:
+                     parameters_sheet_num: int = 4,
+                     on_unplaced=None) -> str:
+    """Writes the workpaper and returns its path.
+
+    on_unplaced, if given, is called once with the list of callouts whose
+    anchor could not be located on its evidence image, as
+    (image name, letter, anchor_text, reason) tuples.
+
+    Passing it is close to mandatory for any caller that cares whether the
+    file is right. An unlocatable callout is DROPPED rather than failing the
+    build, and its legend entry is still written -- so without this signal
+    the workpaper ships claiming a tickmark it does not have, and the
+    reviewer goes hunting for a red box that was never drawn. That is worse
+    than either extreme the drop was chosen between.
+    """
     work_dir = request.output_path + ".workdir"
     ox.extract_template(request.template_path, work_dir)
 
@@ -188,6 +202,9 @@ def build_workpaper(request: WorkpaperRequest,
     if request.parameters is not None:
         params_drawing = db.build_parameters_drawing(request.parameters)
         _write_drawing_and_media(work_dir, parameters_sheet_num, params_drawing)
+
+    if on_unplaced is not None:
+        on_unplaced(sample_drawing.unplaced_callouts)
 
     ox.remove_calc_chain(work_dir)
     ox.repackage(work_dir, request.output_path)

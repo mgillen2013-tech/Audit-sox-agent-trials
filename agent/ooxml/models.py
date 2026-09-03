@@ -60,6 +60,17 @@ class EvidenceTieOut(BaseModel):
                     "image, e.g. '21022452' or '30,000.00'. Must be copyable "
                     "verbatim from the source document — do not paraphrase."
     )
+    fallback_anchors: list[str] = Field(
+        default_factory=list,
+        description="Other verbatim tokens identifying the SAME value, tried "
+                    "in order when anchor_text is not found. The same fact is "
+                    "written differently on different documents: an approval "
+                    "email says 'February 9, 2026' where the payment screen "
+                    "says '02/09/2026', so a callout anchored on the numeric "
+                    "date is unfindable on the email even though the invoice "
+                    "number beside it would have matched. Same rules as "
+                    "anchor_text: verbatim, no spaces."
+    )
     occurrence: int = Field(
         default=0,
         description="If anchor_text appears more than once on the image, which "

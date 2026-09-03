@@ -79,7 +79,24 @@ def anchor_candidates(text: str) -> list[str]:
     """
     found: list[str] = []
 
-    def add(raw: str) -> None:
+    # Order is by RELIABILITY ACROSS DOCUMENTS, not by length. A real run
+    # made that distinction concrete: an attribute observed as "Approved Inv
+    # #35713082 on 02/09/2026" ranked the date first because it is two
+    # characters longer -- but the approval email writes that date as
+    # "February 9, 2026", so the anchor was unfindable and the tickmark was
+    # dropped, while the invoice number sitting beside it was right there on
+    # the page and would have matched.
+    #
+    # Amounts and identifiers are printed the same way wherever they appear;
+    # DATE FORMATS are re-rendered by every system that touches them
+    # (02/09/2026, February 9 2026, 9-Feb-26). So dates go last -- still
+    # offered, because on a screenshot of a payment screen the numeric form
+    # is often exactly right, but never preferred over a stable identifier.
+    amounts: list[str] = []
+    identifiers: list[str] = []
+    dates: list[str] = []
+
+    def add(raw: str, bucket: list[str]) -> None:
         token = raw.strip().strip(".,;:")
         if (
             len(token) >= _MIN_ANCHOR_LEN
@@ -88,22 +105,24 @@ def anchor_candidates(text: str) -> list[str]:
             and not _YEAR_RE.match(token)
         ):
             found.append(token)
+            bucket.append(token)
 
     for m in _AMOUNT_RE.findall(text):
-        add(m)
+        add(m, amounts)
     # Blank the amounts before scanning for plain numbers so their digit
     # groups cannot come back as separate, far less specific anchors.
     remainder = _AMOUNT_RE.sub(" ", text)
     for m in _DATE_RE.findall(remainder):
-        add(m)
+        add(m, dates)
     remainder = _DATE_RE.sub(" ", remainder)
     for pattern in (_LONG_NUM_RE, _ALNUM_ID_RE):
         for m in pattern.findall(remainder):
-            add(m)
+            add(m, identifiers)
 
-    # Longest first: a longer token is more likely to identify one place on
-    # the page, which is the only property that matters here.
-    return sorted(found, key=len, reverse=True)
+    # Within a bucket, longest first -- a longer token identifies one place
+    # on the page more often than a short one.
+    by_length = lambda xs: sorted(xs, key=len, reverse=True)  # noqa: E731
+    return by_length(amounts) + by_length(identifiers) + by_length(dates)
 
 
 def _page_of(location: str) -> int:
@@ -133,6 +152,68 @@ def _legend_line(letter: str, label: str) -> NarrativeParagraph:
     )
 
 
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T].*)?$")
+_US_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+# A number as it comes out of a spreadsheet read: optional sign, optional
+# thousands separators, optional decimals. Deliberately NOT a general numeric
+# match -- an invoice number ("35713082") is a numeric STRING and must stay
+# one, or it renders right-aligned and comma-grouped where the prior-year
+# workpaper shows it as plain text.
+_MONEY_RE = re.compile(r"^-?\d{1,3}(,\d{3})*\.\d{1,2}$|^-?\d+\.\d{1,2}$")
+
+
+def _coerce(key: str, value: str) -> object:
+    """Restore the type a spreadsheet value lost on the way in.
+
+    agent.schemas.SampleItem.key_fields is dict[str, str] -- intake reads a
+    sample tab into text, which is right for searching and matching. The
+    OOXML builder does the opposite: it picks the cell's Excel type from the
+    PYTHON type it is handed, so a float writes a right-aligned number and a
+    date writes a real date serial, while a str writes a shared-string text
+    cell.
+
+    Passing "32677.00" straight through therefore produces a left-aligned
+    text cell that will not sum and does not match the prior-year workpaper
+    beside it. That is invisible in any unit test built from typed
+    fixtures and showed up the moment real intake data was used.
+
+    Conservative on purpose: only what is unambiguously a money amount or a
+    date converts. Bare digit strings stay strings, because in this extract
+    they are identifiers -- invoice number, payee number, document number,
+    cost centre -- and formatting an invoice number as "35,713,082" would be
+    a visible defect in an audit deliverable.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    m = _ISO_DATE_RE.match(text)
+    if m:
+        from datetime import date
+
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = _US_DATE_RE.match(text)
+    if m:
+        from datetime import date
+
+        return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+
+    if _MONEY_RE.match(text):
+        return float(text.replace(",", ""))
+
+    # "0" appears in Discount Available/Taken, which ARE numeric columns in
+    # the template. Bare integers convert only when the column name says
+    # money -- otherwise an identifier would be caught here.
+    if text.lstrip("-").isdigit() and any(
+        word in key.lower() for word in ("amount", "discount", "total")
+    ):
+        return int(text)
+
+    return text
+
+
 def _raw_data_row(manifest: SamplePopulationManifest, sample_id: str) -> RawDataRow:
     """The sampled item's own fields, keyed by template column letter.
 
@@ -147,7 +228,11 @@ def _raw_data_row(manifest: SamplePopulationManifest, sample_id: str) -> RawData
     if item is None or not item.key_fields:
         return RawDataRow(values={})
     return RawDataRow(
-        values={_LETTERS[i]: v for i, (_k, v) in enumerate(item.key_fields.items()) if i < 26}
+        values={
+            _LETTERS[i]: _coerce(k, v)
+            for i, (k, v) in enumerate(item.key_fields.items())
+            if i < 26
+        }
     )
 
 
@@ -234,7 +319,11 @@ def sample_items_from_conclusion(
                 # cannot find, so a second box "just in case" would just be
                 # a second box in the wrong place when the first was right.
                 by_image.setdefault(key, []).append(
-                    EvidenceTieOut(letter=letter, anchor_text=anchors[0])
+                    EvidenceTieOut(
+                        letter=letter,
+                        anchor_text=anchors[0],
+                        fallback_anchors=anchors[1:],
+                    )
                 )
 
         evidence_images: list[EvidenceImage] = []
