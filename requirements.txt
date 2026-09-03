@@ -6,3 +6,4 @@ anthropic
 streamlit
 reportlab
 rapidocr-onnxruntime
+Pillow
