@@ -57,11 +57,42 @@ layout needs per-control tuning that nobody will do 172 times. A mirrored
 layout needs none: the spec arrives with the input, and a control whose PY
 looks nothing like this one still comes out right.
 
-## The one thing to watch
+## Missing evidence is a finding, not a layout event
 
-Slots are only meaningful if this year's evidence maps onto last year's in
-count and kind. It usually will — the same control tested the same way
-gathers the same documents — but when it does not, the extra exhibits are
-the case above, and MISSING exhibits should leave a slot visibly empty
-rather than reflowing everything, so a reviewer can see that something the
-prior year had is absent this year. An empty slot is information.
+Slots only line up when this year's evidence matches last year's in count
+and kind. It usually will -- the same control tested the same way gathers
+the same documents -- but when it does not, the two cases are NOT
+symmetric:
+
+**More exhibits than PY had slots** is a layout question, and the layout
+answers it: continue the template's own grid rhythm (same widths, next row
+band). No judgment required.
+
+**Fewer** is not a layout question at all. If the prior year had an
+approval email and this year does not, that is a gap in the evidence, and
+the agent should say so -- via `request_additional_support`, or as an
+exception if the control cannot be concluded without it. It then appears
+on the Summary tab where a reviewer is already looking.
+
+An earlier draft of this document proposed leaving the slot visibly empty
+"so a reviewer can see something is missing". That was wrong, for two
+reasons:
+
+1. **A blank rectangle is a weak and ambiguous signal.** A reviewer
+   reasonably reads whitespace as a rendering glitch, not as a finding.
+   Missing support is one of the most consequential things a test can
+   surface and it should not be communicated by an absence.
+2. **It puts judgment in the renderer.** The whole architecture rests on
+   the agent deciding and the builder drawing. Having the builder
+   communicate "evidence is missing" through empty space is the renderer
+   making an audit assertion by implication -- and it would do so even
+   when the agent had a perfectly good reason for the difference (the
+   control changed, the vendor moved to a portal, the document was merged
+   into another).
+
+So: the layout mirrors PY, and any DIFFERENCE between what PY had and what
+CY produced is reported by the agent. There is a useful consequence -- the
+slot inventory is a list of the document types the prior year relied on,
+which is exactly the checklist an agent should test its own evidence
+against before concluding. Handing it that list turns a layout detail into
+a real completeness procedure.
