@@ -2,3 +2,21 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+
+# Real audit evidence must never be committed. This repository is PUBLIC,
+# and the files this tool consumes are live BrightView AP records -- vendor
+# names, payee numbers, invoice numbers, payment amounts. A workpaper or a
+# support PDF dropped in the working directory for a test run is one
+# `git add -A` away from being published permanently.
+#
+# Test fixtures are BUILT (see agent/tests/, which generates its own PDFs and
+# workbooks with reportlab/openpyxl), never copied from a real engagement, so
+# nothing legitimate needs these extensions tracked.
+*.xlsx
+*.xlsm
+*.xls
+*.pdf
+*.csv
+# ...with the deliberate exception of the PowerPoint template the original
+# report generator ships with, which contains no client data.
+!template.pptx
