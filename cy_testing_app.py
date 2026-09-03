@@ -50,7 +50,7 @@ from agent.intake import build_manifest_from_any_columns, read_excel_rows
 from agent.loop import DEFAULT_MODEL, MAX_TOOL_ITERATIONS, MAX_TOTAL_TOKENS
 from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
-from agent.workpaper import build_workpaper
+from agent.build_cy_workpaper import build_cy_workpaper
 
 st.set_page_config(page_title="CY Testing Agent", page_icon="🧾", layout="wide")
 st.title("🧾 CY Testing Agent")
@@ -503,20 +503,26 @@ if run_clicked:
             # with-block closes, and the download button must survive
             # Streamlit's reruns.
             wp_bytes = wp_name = None
+            wp_mirrored = False
+            wp_warnings: list[str] = []
             try:
-                wp_path = build_workpaper(
+                outcome = build_cy_workpaper(
                     spec,
                     all_results,
                     py_testing_file.name,
                     tmp_dir,
                     support_dir=tmp_dir,
-                    # The population/sample workbook is carried into the
-                    # workpaper as its own tabs, so a reviewer gets the real
-                    # Sample Selections / Population / Parameters sheets
-                    # rather than a rendered excerpt of them.
-                    source_workbook=pop_sample_file.name,
+                    sample_manifests=sample_manifests,
+                    population_workbook=pop_sample_file.name,
+                    population_sheet=population_tab,
                 )
-                wp_bytes, wp_name = wp_path.read_bytes(), wp_path.name
+                wp_bytes, wp_name = outcome.path.read_bytes(), outcome.path.name
+                wp_mirrored = outcome.mirrored_py
+                wp_warnings = list(outcome.warnings) + [
+                    f"Tickmark {letter} on {name}: {anchor!r} could not be located on the page, "
+                    f"so no box was drawn (the legend still lists it)."
+                    for name, letter, anchor, _reason in outcome.unplaced_callouts
+                ]
             except Exception as exc:  # noqa: BLE001 -- the run's results must still show even if the file build breaks
                 st.warning(f"Couldn't generate the workpaper file: {exc}")
 
@@ -525,6 +531,8 @@ if run_clicked:
             "wp_bytes": wp_bytes,
             "wp_name": wp_name,
             "ledger": ledger,
+            "wp_mirrored": wp_mirrored,
+            "wp_warnings": wp_warnings,
         }
         st.success("Done.")
         _render_token_burn(ledger)
@@ -551,8 +559,22 @@ if _out:
                 else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             ),
         )
-        st.caption(
-            "Excel workbook: a Summary tab, one tab per test step, and an exhibits "
-            "tab per step with the cited evidence boxed and tickmarked. Stamped "
-            "DRAFT -- review and approve before it goes anywhere."
-        )
+        if _out.get("wp_mirrored"):
+            st.caption(
+                "Built on the prior-year workpaper: same tabs and layout, with this "
+                "year's sample, evidence and tickmarks written in, plus a Summary tab "
+                "in front. Stamped DRAFT -- review and approve before it goes anywhere."
+            )
+        else:
+            st.caption(
+                "Built with the standalone layout -- the prior-year workpaper could "
+                "not be used as a template, so this does NOT match last year's format. "
+                "See the notes below. Stamped DRAFT."
+            )
+        # Everything the finished file cannot show: evidence that was not
+        # attached, and tickmarks whose anchor was never found. A legend entry
+        # pointing at a box that does not exist sends a reviewer hunting.
+        if _out.get("wp_warnings"):
+            with st.expander(f"⚠️ {len(_out['wp_warnings'])} note(s) about what is NOT in this workpaper"):
+                for w in _out["wp_warnings"]:
+                    st.markdown(f"- {w}")

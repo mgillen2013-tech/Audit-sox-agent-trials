@@ -321,7 +321,25 @@ def build_sample_drawing(
         image_y = y_cursor
 
         for img_spec in sample.evidence_images:
-            im, dpi = ocr_utils.load_and_prepare(img_spec.source_path, img_spec.pdf_page)
+            try:
+                im, dpi = ocr_utils.load_and_prepare(img_spec.source_path, img_spec.pdf_page)
+            except Exception as exc:  # noqa: BLE001
+                # A corrupt, encrypted, truncated or simply exotic evidence
+                # file used to take the whole workpaper down with it. Across
+                # a real population of controls that will happen -- support
+                # arrives from scanners, mail clients and portals, and some
+                # of it is broken. Losing one exhibit is recoverable; losing
+                # the workpaper (and with it every conclusion the run paid
+                # for) is not. Report the exhibit and its callouts as
+                # unplaced and carry on.
+                for tie_out in img_spec.tie_outs or [None]:
+                    unplaced.append((
+                        img_spec.name,
+                        tie_out.letter if tie_out else "-",
+                        tie_out.anchor_text if tie_out else "",
+                        f"the evidence file could not be read: {exc}",
+                    ))
+                continue
             scale = img_spec.display_width_emu / im.width
             cx = img_spec.display_width_emu
             cy = int(im.height * scale)

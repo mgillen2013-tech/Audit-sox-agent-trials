@@ -69,8 +69,8 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
             continue
         divider_row = next_row
         rows.append(
-            f'<row r="{divider_row}" spans="2:6" ht="15.75" thickBot="1" '
-            f'x14ac:dyDescent="0.3"><c r="B{divider_row}" s="{STYLE_IA_DIVIDER}"/></row>'
+            f'<row r="{divider_row}" spans="2:6" ht="15.75" thickBot="1">'
+            f'<c r="B{divider_row}" s="{STYLE_IA_DIVIDER}"/></row>'
         )
         header_row = divider_row + 1
         rows.append(ox.row_xml(
@@ -96,8 +96,7 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
         last_line_row = line_row - 1
         formula = f"SUM(C{first_line_row}:C{last_line_row})"
         rows.append(
-            f'<row r="{total_row}" spans="2:6" ht="15.75" thickBot="1" '
-            f'x14ac:dyDescent="0.3">'
+            f'<row r="{total_row}" spans="2:6" ht="15.75" thickBot="1">'
             f'{ox.cell_xml(f"B{total_row}", sample.ia_calculation.total_label, style=STYLE_IA_TOTAL_LABEL, sst=sst)}'
             f'{ox.cell_xml(f"C{total_row}", sample.ia_calculation.total, style=STYLE_IA_TOTAL_AMOUNT, formula=formula)}'
             f'</row>'
@@ -164,14 +163,95 @@ def build_population_sheet_xml(sheet_xml_path: str, population_rows: list[Popula
     open(sheet_xml_path, "w", encoding="utf-8").write(data)
 
 
+def _drawing_for_sheet(work_dir: str, sheet_num: int) -> str:
+    """Name of the drawing part this sheet uses, creating the link if absent.
+
+    Two assumptions used to live here, both invisible when wrong:
+
+    1. that xl/drawings/ exists. On a template whose sheet carries no
+       shapes it does not, and writing into it raised FileNotFoundError
+       partway through a build.
+    2. that drawingN.xml pairs with sheetN.xml. That holds for the template
+       this was built from and is a coincidence -- the pairing lives in the
+       sheet's own .rels. Guessing produces an ORPHANED drawing part: the
+       file is written, the sheet never references it, and the workpaper
+       opens with no exhibits and no tickmarks at all. Silent and total.
+
+    So: use the target the sheet already points at, and when it points at
+    nothing, create one and register it (part + sheet rel + <drawing>
+    element + content type) the way Excel expects.
+    """
+    import re as _re
+
+    os.makedirs(os.path.join(work_dir, "xl", "drawings", "_rels"), exist_ok=True)
+    sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{sheet_num}.xml")
+    rels_path = os.path.join(work_dir, "xl", "worksheets", "_rels", f"sheet{sheet_num}.xml.rels")
+
+    with open(sheet_path, encoding="utf-8") as fh:
+        sheet = fh.read()
+    existing_rid = _re.search(r'<drawing r:id="([^"]+)"', sheet)
+    if existing_rid and os.path.exists(rels_path):
+        with open(rels_path, encoding="utf-8") as fh:
+            rels = fh.read()
+        target = _re.search(
+            rf'<Relationship[^>]*Id="{_re.escape(existing_rid.group(1))}"[^>]*Target="([^"]*drawing[^"]+)"',
+            rels,
+        ) or _re.search(
+            rf'<Relationship[^>]*Target="([^"]*drawing[^"]+)"[^>]*Id="{_re.escape(existing_rid.group(1))}"',
+            rels,
+        )
+        if target:
+            return os.path.basename(target.group(1))
+
+    name = f"drawing{sheet_num}.xml"
+    rid = "rIdDrawingCY"
+    os.makedirs(os.path.dirname(rels_path), exist_ok=True)
+    rels = (
+        open(rels_path, encoding="utf-8").read()
+        if os.path.exists(rels_path)
+        else '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+             "</Relationships>"
+    )
+    rels = rels.replace(
+        "</Relationships>",
+        f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+        f'officeDocument/2006/relationships/drawing" Target="../drawings/{name}"/>'
+        "</Relationships>",
+        1,
+    )
+    open(rels_path, "w", encoding="utf-8").write(rels)
+
+    if "xmlns:r=" not in sheet:
+        sheet = sheet.replace(
+            "<worksheet ",
+            '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ',
+            1,
+        )
+    sheet = sheet.replace("</worksheet>", f'<drawing r:id="{rid}"/></worksheet>', 1)
+    open(sheet_path, "w", encoding="utf-8").write(sheet)
+
+    ct_path = os.path.join(work_dir, "[Content_Types].xml")
+    ct = open(ct_path, encoding="utf-8").read()
+    if f"/xl/drawings/{name}" not in ct:
+        ct = ct.replace(
+            "</Types>",
+            f'<Override PartName="/xl/drawings/{name}" ContentType="application/'
+            f'vnd.openxmlformats-officedocument.drawing+xml"/></Types>',
+            1,
+        )
+        open(ct_path, "w", encoding="utf-8").write(ct)
+    return name
+
+
 def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingResult) -> None:
-    drawing_path = os.path.join(work_dir, "xl", "drawings", f"drawing{sheet_num}.xml")
+    name = _drawing_for_sheet(work_dir, sheet_num)
+    drawing_path = os.path.join(work_dir, "xl", "drawings", name)
     open(drawing_path, "w", encoding="utf-8").write(result.xml)
 
     rels_dir = os.path.join(work_dir, "xl", "drawings", "_rels")
     os.makedirs(rels_dir, exist_ok=True)
-    rels_path = os.path.join(rels_dir, f"drawing{sheet_num}.xml.rels")
-    open(rels_path, "w", encoding="utf-8").write(result.rels_xml())
+    open(os.path.join(rels_dir, f"{name}.rels"), "w", encoding="utf-8").write(result.rels_xml())
 
     media_dir = os.path.join(work_dir, "xl", "media")
     os.makedirs(media_dir, exist_ok=True)

@@ -129,7 +129,51 @@ class SharedStrings:
         self._index[key] = idx
         return idx
 
+    def _register_part(self) -> None:
+        """Make sure the workbook actually points at sharedStrings.xml.
+
+        Writing the file is not enough. A part that nothing references is
+        invisible: the workbook has no relationship to it and
+        [Content_Types].xml has no override, so a reader finds an EMPTY
+        string table and every t="s" cell resolves out of range. The file
+        opens to an IndexError in openpyxl and a repair prompt in Excel.
+
+        This is not hypothetical for a population of templates. A workbook
+        written by openpyxl uses INLINE strings and ships no
+        sharedStrings.xml at all, so every cell this builder writes into
+        such a template referenced a table that was never wired up. Excel
+        -authored templates happen to carry one, which is why it went
+        unnoticed against the single template this was built from.
+        """
+        work_dir = os.path.dirname(os.path.dirname(self.path))
+        rels_path = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
+        if os.path.exists(rels_path):
+            rels = open(rels_path, encoding="utf-8").read()
+            if "sharedStrings.xml" not in rels:
+                rels = rels.replace(
+                    "</Relationships>",
+                    '<Relationship Id="rIdSharedStringsCY" Type="http://schemas.'
+                    'openxmlformats.org/officeDocument/2006/relationships/sharedStrings" '
+                    'Target="sharedStrings.xml"/></Relationships>',
+                    1,
+                )
+                open(rels_path, "w", encoding="utf-8").write(rels)
+
+        ct_path = os.path.join(work_dir, "[Content_Types].xml")
+        if os.path.exists(ct_path):
+            ct = open(ct_path, encoding="utf-8").read()
+            if "/xl/sharedStrings.xml" not in ct:
+                ct = ct.replace(
+                    "</Types>",
+                    '<Override PartName="/xl/sharedStrings.xml" ContentType="application/'
+                    'vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
+                    "</Types>",
+                    1,
+                )
+                open(ct_path, "w", encoding="utf-8").write(ct)
+
     def write(self) -> None:
+        self._register_part()
         items = []
         for s in self.strings:
             if s is None or s == "":
@@ -176,8 +220,15 @@ def cell_xml(ref: str, value, *, style: int | None = None,
 
 def row_xml(row_num: int, cells: list[str], *, spans: str = "1:20",
             extra_attrs: str = "") -> str:
-    return (f'<row r="{row_num}" spans="{spans}" '
-            f'x14ac:dyDescent="0.25"{extra_attrs}>' + "".join(cells) + "</row>")
+    # No x14ac:dyDescent. It is a cosmetic row-height hint that Excel
+    # recomputes anyway, and emitting it requires the sheet's root element
+    # to declare xmlns:x14ac. Excel-authored workbooks usually do; others
+    # do not -- and writing a prefixed attribute into a sheet that has not
+    # bound the prefix produces XML Excel refuses to open. Across 172
+    # templates of unknown provenance that is not a risk worth running for
+    # a hint.
+    return (f'<row r="{row_num}" spans="{spans}"{extra_attrs}>'
+            + "".join(cells) + "</row>")
 
 
 def replace_sheet_rows(sheet_xml_path: str, start_marker: str, end_marker: str,

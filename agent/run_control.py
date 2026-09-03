@@ -285,7 +285,8 @@ def main() -> None:
     print(f"Using model: {model}\n")
 
     ledger = TokenLedger(model)
-    results = run_control(spec, base_dir, client, model, ledger=ledger)
+    sample_manifests = parse_sample_list(base_dir / spec["sample_list_file"]) if "sample_list_file" in spec else None
+    results = run_control(spec, base_dir, client, model, sample_manifests=sample_manifests, ledger=ledger)
 
     output_dir = base_dir / "output" / spec["control_id"]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -323,10 +324,20 @@ def main() -> None:
         )
 
     try:
-        from agent.workpaper import build_workpaper
+        from agent.build_cy_workpaper import build_cy_workpaper
 
-        wp_path = build_workpaper(spec, results, spec["py_testing_file"], output_dir, support_dir=base_dir)
-        print(f"Wrote CY workpaper (DRAFT): {wp_path}")
+        outcome = build_cy_workpaper(
+            spec, results, spec["py_testing_file"], output_dir,
+            support_dir=base_dir, sample_manifests=sample_manifests,
+        )
+        print(f"CY workpaper (DRAFT): {outcome.summary_line}")
+        # Warnings name what is NOT in the file -- evidence that could not be
+        # attached, tickmarks that could not be placed. Printing the path
+        # without them would present an incomplete workpaper as a finished one.
+        for w in outcome.warnings:
+            print(f"  ! {w}")
+        for name, letter, anchor, reason in outcome.unplaced_callouts:
+            print(f"  ! tickmark {letter} on {name}: {anchor!r} not found -- {reason[:80]}")
     except Exception as exc:  # noqa: BLE001 -- the JSON results above are already written; don't lose them over the file build
         print(f"WARNING: workpaper file generation failed: {exc}")
 

@@ -219,11 +219,10 @@ def _sheet_xml(rows: list[SummaryRow], sst: ox.SharedStrings, styles: _Styles) -
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
-        'xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac">'
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         f'<dimension ref="A1:E{len(rows) + 1}"/>'
         '<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>'
-        '<sheetFormatPr defaultRowHeight="15" x14ac:dyDescent="0.25"/>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
         f"<cols>{cols}</cols>"
         f"<sheetData>{''.join(body)}</sheetData>"
         f"{links_xml}"
