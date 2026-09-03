@@ -160,7 +160,11 @@ num_steps = st.number_input("How many test steps does this control have?", min_v
 test_steps = []
 for i in range(int(num_steps)):
     with st.expander(f"Test step {i + 1}", expanded=(i == 0)):
-        tsid = st.text_input("Test step ID", key=f"tsid_{i}", placeholder=f"TS-{i + 1}")
+        # The id is derived from position, not typed. It was a required
+        # field whose value the user never chose anything meaningful for --
+        # everything downstream only needs it to be unique and stable
+        # within the run, and "TS-1" is what everyone typed anyway.
+        tsid = f"TS-{i + 1}"
         tstext = st.text_area("Test step text", key=f"tstext_{i}", placeholder="What this step requires you to test.")
 
         sample_tab = None
@@ -396,10 +400,10 @@ if run_clicked:
     if pop_sample_file is None:
         errors.append("Upload the population & sample workbook.")
     for s in test_steps:
-        if not s["test_step_id"] or not s["test_step_text"]:
-            errors.append(f"Fill in every field for test step {s['test_step_id'] or '(unnamed)'}.")
+        if not s["test_step_text"]:
+            errors.append(f"Fill in the test step text for test step {s['test_step_id']}.")
         if pop_sample_file is not None and not s["sample_tab"]:
-            errors.append(f"Pick a sample tab for test step {s['test_step_id'] or '(unnamed)'}.")
+            errors.append(f"Pick a sample tab for test step {s['test_step_id']}.")
     if py_testing_file is None:
         errors.append("Upload a PY testing workpaper.")
     if not cy_support_files:
