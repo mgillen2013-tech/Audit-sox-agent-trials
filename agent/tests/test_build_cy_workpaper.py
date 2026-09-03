@@ -207,3 +207,97 @@ def test_a_corrupt_evidence_file_loses_one_exhibit_not_the_workpaper(tmp_path: P
     assert outcome.path.exists() and outcome.mirrored_py
     assert any("could not be read" in reason for *_x, reason in outcome.unplaced_callouts)
     assert "Wrote" in outcome.summary_line
+
+
+# --------------------------------------------------------------------------
+# One tab per sampled item
+# --------------------------------------------------------------------------
+
+
+def _two_sample_results():
+    r = _results(
+        conclusion="not_satisfied",
+        sample_results=[
+            {"sample_id": "1", "conclusion": "satisfied"},
+            {"sample_id": "2", "conclusion": "not_satisfied", "note": "no approval"},
+        ],
+        attribute_results=[
+            {"attribute": "Invoice agrees", "sample_id": "1", "result": "satisfied",
+             "value_observed": "21022452", "evidence_ids": ["ev_0001"]},
+            {"attribute": "Invoice agrees", "sample_id": "2", "result": "satisfied",
+             "value_observed": "21022453", "evidence_ids": ["ev_0001"]},
+        ],
+    )
+    return r
+
+
+def _two_manifests():
+    return {
+        "TS-1": SamplePopulationManifest(
+            test_step_id="TS-1", sample_size=2,
+            samples=[
+                SampleItem(sample_id="1", test_step_id="TS-1", identifying_details="a",
+                           key_fields={"Invoice Number": "21022452"}),
+                SampleItem(sample_id="2", test_step_id="TS-1", identifying_details="b",
+                           key_fields={"Invoice Number": "21022453"}),
+            ],
+        )
+    }
+
+
+def test_each_sampled_item_gets_its_own_tab(tmp_path: Path):
+    # The prior-year workpaper documents ONE selection per Sample tab, so
+    # two selections mean two tabs shaped like that one -- not two rows
+    # crammed onto it, which is what stacked their exhibits and produced
+    # the large empty regions a reviewer flagged.
+    _template(tmp_path / "PY.xlsx")
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _two_sample_results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    wb = openpyxl.load_workbook(outcome.path)
+    assert "Sample 1" in wb.sheetnames and "Sample 2" in wb.sheetnames
+    # Sibling tabs stay adjacent. Appending clones at the end scattered them
+    # after Population and Parameters, which reads as a mistake in a
+    # workpaper a reviewer pages through in order.
+    names = wb.sheetnames
+    assert names.index("Sample 2") == names.index("Sample 1") + 1
+    wb.close()
+
+
+def test_a_single_sample_keeps_the_templates_own_tab_name(tmp_path: Path):
+    # The ordinary case must stay indistinguishable from last year's file.
+    _template(tmp_path / "PY.xlsx")
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    wb = openpyxl.load_workbook(outcome.path)
+    assert "Sample" in wb.sheetnames
+    assert not any(n.startswith("Sample ") for n in wb.sheetnames)
+    wb.close()
+
+
+def test_every_summary_link_points_at_a_tab_that_exists(tmp_path: Path):
+    # Tab names and summary links are derived from the same sample_id for
+    # exactly this reason. A first version named tabs after the check number
+    # while the links used the id, so every link pointed at a tab that did
+    # not exist -- and Excel does not complain, the click just does nothing.
+    _template(tmp_path / "PY.xlsx")
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _two_sample_results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    wb = openpyxl.load_workbook(outcome.path)
+    ws = wb["Summary"]
+    targets = [
+        ws.cell(r, 5).hyperlink.location.split("!")[0].strip("'")
+        for r in range(2, ws.max_row + 1)
+        if ws.cell(r, 5).hyperlink
+    ]
+    assert targets
+    assert all(t in wb.sheetnames for t in targets), (targets, wb.sheetnames)
+    wb.close()

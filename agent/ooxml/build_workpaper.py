@@ -39,6 +39,29 @@ STYLE_IA_TOTAL_LABEL = 13
 STYLE_IA_TOTAL_AMOUNT = 14
 
 
+def sample_tab_name(base: str, sample_id: str, index: int, total: int) -> str:
+    """Tab name for one sampled item.
+
+    A single sample keeps the template's own tab name, so the ordinary case
+    is byte-for-byte the shape of last year's workbook. Several samples get
+    numbered tabs. Excel caps a sheet name at 31 characters and forbids
+    : \\ / ? * [ ], and a name that violates either makes the whole
+    workbook unopenable -- so the identifier is sanitised rather than
+    trusted, since it comes from a sample listing nobody validated.
+    """
+    if total <= 1:
+        return base
+    # From the SAMPLE ID, never from a data column. The Summary tab builds
+    # its hyperlink from the same id, and a first version named tabs after
+    # the check number while the links used the id -- so every link pointed
+    # at a tab that did not exist. Excel does not complain about that; the
+    # click just does nothing.
+    raw = f"{base} {sample_id or index + 1}"
+    for bad in ':\\/?*[]':
+        raw = raw.replace(bad, "-")
+    return raw[:31].strip() or f"{base} {index + 1}"
+
+
 def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
                             sst: ox.SharedStrings) -> None:
     """Overwrite the Sample sheet's data rows (raw data rows + IA Calculation
@@ -296,13 +319,38 @@ def build_workpaper(request: WorkpaperRequest,
     sample_sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{sample_sheet_num}.xml")
     pop_sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{population_sheet_num}.xml")
 
-    build_sample_sheet_xml(sample_sheet_path, request.sample_items, sst)
     build_population_sheet_xml(pop_sheet_path, request.population_rows, sst)
-    sst.write()
 
+    # ONE TAB PER SAMPLED ITEM. The prior-year workpaper documents a single
+    # selection on its Sample tab -- narrative, raw data row, exhibits,
+    # tickmarks -- so five selections means five tabs shaped like that one,
+    # not five rows crammed onto it. Stacking them also produced the large
+    # empty regions a reviewer flagged, because each sample's exhibits were
+    # pushed below the previous sample's.
+    #
+    # A single sample keeps the tab named exactly as the template had it, so
+    # the common case is indistinguishable from last year's file.
+    unplaced: list[tuple[str, str, str, str]] = []
+    sheets_for_sample: dict[str, str] = {}
     column_layout = ox.parse_column_widths(sample_sheet_path)
-    sample_drawing = db.build_sample_drawing(request.sample_items, column_layout)
-    _write_drawing_and_media(work_dir, sample_sheet_num, sample_drawing)
+
+    for i, item in enumerate(request.sample_items):
+        label = sample_tab_name(sample_sheet, item.sample_id, i, len(request.sample_items))
+        if i == 0:
+            num, path = sample_sheet_num, sample_sheet_path
+            if label != sample_sheet:
+                ox.rename_sheet(work_dir, num, label)
+        else:
+            num = ox.clone_sheet(work_dir, sample_sheet_num, label)
+            path = os.path.join(work_dir, "xl", "worksheets", f"sheet{num}.xml")
+        sheets_for_sample[label] = label
+
+        build_sample_sheet_xml(path, [item], sst)
+        drawing = db.build_sample_drawing([item], column_layout)
+        _write_drawing_and_media(work_dir, num, drawing)
+        unplaced.extend(drawing.unplaced_callouts)
+
+    sst.write()
 
     if request.parameters is not None:
         if parameters_sheet_num is None:
@@ -322,7 +370,7 @@ def build_workpaper(request: WorkpaperRequest,
         sst.write()
 
     if on_unplaced is not None:
-        on_unplaced(sample_drawing.unplaced_callouts)
+        on_unplaced(unplaced)
 
     ox.remove_calc_chain(work_dir)
     ox.repackage(work_dir, request.output_path)

@@ -410,3 +410,107 @@ def check_template(work_dir: str, *, required_sheets: list[str], max_style_index
             f"template's styles.xml and do not transfer to this one."
         )
     return sheets
+
+
+def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str) -> int:
+    """Duplicate a worksheet part under a new tab name; return its number.
+
+    Used to give every sampled item its own tab. The prior-year workpaper
+    documents ONE selection on its Sample tab -- narrative, raw data row,
+    exhibits, tickmarks -- so the honest way to document five selections is
+    five tabs shaped like that one, not five rows crammed onto it. It also
+    makes mirroring exact rather than approximate: PY's Sample layout is a
+    layout for a single sample, and a single-sample tab can use it as-is.
+
+    The clone deliberately drops the source's <drawing> reference and its
+    relationships. Sharing a drawing part between two sheets would put
+    sample 1's exhibits on sample 2's tab; each clone gets its own drawing
+    written afterwards by _write_drawing_and_media.
+    """
+    sheets_dir = os.path.join(work_dir, "xl", "worksheets")
+    existing = [f for f in os.listdir(sheets_dir) if re.fullmatch(r"sheet\d+\.xml", f)]
+    new_num = max((int(re.findall(r"\d+", f)[0]) for f in existing), default=0) + 1
+
+    with open(os.path.join(sheets_dir, f"sheet{src_sheet_num}.xml"), encoding="utf-8") as fh:
+        body = fh.read()
+    # Strip the inherited drawing link -- a fresh one is added per clone.
+    body = re.sub(r"<drawing[^>]*/>", "", body)
+    with open(os.path.join(sheets_dir, f"sheet{new_num}.xml"), "w", encoding="utf-8") as fh:
+        fh.write(body)
+
+    rid = f"rIdSampleClone{new_num}"
+    rels_path = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
+    with open(rels_path, encoding="utf-8") as fh:
+        rels = fh.read()
+    rels = rels.replace(
+        "</Relationships>",
+        f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+        f'officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{new_num}.xml"/>'
+        "</Relationships>",
+        1,
+    )
+    with open(rels_path, "w", encoding="utf-8") as fh:
+        fh.write(rels)
+
+    wb_path = os.path.join(work_dir, "xl", "workbook.xml")
+    with open(wb_path, encoding="utf-8") as fh:
+        wb = fh.read()
+    used = [int(x) for x in re.findall(r'sheetId="(\d+)"', wb)] or [0]
+    entry = f'<sheet name="{escape(new_name)}" sheetId="{max(used) + 1}" r:id="{rid}"/>'
+    # Insert immediately after the LAST tab whose name starts the same way,
+    # so cloned sample tabs stay together in tab order. Appending at the end
+    # scattered them after Population and Parameters, which reads as a
+    # mistake in a workpaper a reviewer pages through in order.
+    prefix = new_name.rsplit(" ", 1)[0] if " " in new_name else new_name
+    siblings = [
+        m for m in re.finditer(r"<sheet\b[^>]*/>", wb)
+        if re.search(rf'name="{re.escape(prefix)}[^"]*"', m.group(0))
+    ]
+    if siblings:
+        at = siblings[-1].end()
+        wb = wb[:at] + entry + wb[at:]
+    else:
+        wb = wb.replace("</sheets>", f"{entry}</sheets>", 1)
+    with open(wb_path, "w", encoding="utf-8") as fh:
+        fh.write(wb)
+
+    ct_path = os.path.join(work_dir, "[Content_Types].xml")
+    with open(ct_path, encoding="utf-8") as fh:
+        ct = fh.read()
+    ct = ct.replace(
+        "</Types>",
+        f'<Override PartName="/xl/worksheets/sheet{new_num}.xml" ContentType="application/'
+        f'vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+        1,
+    )
+    with open(ct_path, "w", encoding="utf-8") as fh:
+        fh.write(ct)
+    return new_num
+
+
+def rename_sheet(work_dir: str, sheet_num: int, new_name: str) -> None:
+    """Rename the tab that points at sheet<N>.xml."""
+    wb_path = os.path.join(work_dir, "xl", "workbook.xml")
+    rels_path = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
+    with open(rels_path, encoding="utf-8") as fh:
+        rels = fh.read()
+    rid = None
+    for m in re.finditer(r'<Relationship\b[^>]*/>', rels):
+        tag = m.group(0)
+        if re.search(rf'Target="[^"]*sheet{sheet_num}\.xml"', tag):
+            got = re.search(r'Id="([^"]+)"', tag)
+            if got:
+                rid = got.group(1)
+            break
+    if not rid:
+        return
+    with open(wb_path, encoding="utf-8") as fh:
+        wb = fh.read()
+    wb = re.sub(
+        rf'(<sheet )name="[^"]*"([^>]*r:id="{re.escape(rid)}")',
+        rf'\1name="{escape(new_name)}"\2',
+        wb,
+        count=1,
+    )
+    with open(wb_path, "w", encoding="utf-8") as fh:
+        fh.write(wb)

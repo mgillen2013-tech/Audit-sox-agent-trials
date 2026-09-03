@@ -143,6 +143,13 @@ class IACalculation(BaseModel):
 
 class SampleItem(BaseModel):
     control_id: str = Field(description="e.g. 'SS.PTP.AP.156'")
+    sample_id: str = Field(
+        default="",
+        description="The selection's id from the sample listing. This names "
+                    "the item's own tab, and the Summary tab links to it by "
+                    "the same name -- derive both from this one field or the "
+                    "links silently point at tabs that do not exist.",
+    )
     raw_data: RawDataRow
     narrative: list[NarrativeParagraph]
     raw_data_tie_outs: list[RawDataTieOut] = Field(default_factory=list)

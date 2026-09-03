@@ -356,21 +356,28 @@ def test_unvalidated_ipe_reads_as_an_exception_not_a_pass():
     assert "not validated" in rows[-1].result.lower()
 
 
-def test_an_exception_names_which_sample_failed():
-    # "Not satisfied" alone sends a reviewer hunting through every sample
-    # sheet to find which one.
+def test_each_sample_gets_its_own_row_with_its_own_verdict():
+    # Stronger than naming the failed item inside one merged row: the
+    # passing selection reads green and the failing one reads red, side by
+    # side, each linking to its own tab. A reviewer clears selections one
+    # at a time and a merged row cannot be cleared one at a time.
     from agent.render_bridge import summary_rows
 
     conclusion = _conclusion(
         conclusion="not_satisfied",
         sample_results=[
             {"sample_id": "1", "conclusion": "satisfied"},
-            {"sample_id": "2", "conclusion": "not_satisfied"},
+            {"sample_id": "2", "conclusion": "not_satisfied", "note": "no approval on file"},
         ],
     )
     rows = summary_rows([("1.", conclusion)])
-    assert "2" in rows[0].result
-    assert rows[0].verdict_colour == "red"
+    sample_rows = [r for r in rows if not r.test_step.startswith("IPE")]
+    assert len(sample_rows) == 2
+    assert [r.verdict_colour for r in sample_rows] == ["green", "red"]
+    # The failing row says WHY without making anyone open the tab...
+    assert "no approval" in sample_rows[1].result
+    # ...and each links to its own sample tab, not to a shared one.
+    assert sample_rows[0].link_to != sample_rows[1].link_to
 
 
 def test_an_unrecognised_verdict_is_never_shown_as_a_pass():

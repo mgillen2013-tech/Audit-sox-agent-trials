@@ -190,6 +190,28 @@ def _raw_columns_for(anchors: list[str], key_fields: dict[str, str] | None) -> l
     return columns
 
 
+# Two sentences, or ~320 characters, whichever comes first.
+_MAX_LEAD_SENTENCES = 2
+_MAX_LEAD_CHARS = 320
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _lead_sentences(text: str) -> str:
+    """The opening of the narrative box: the first couple of sentences.
+
+    Cut on a sentence boundary rather than mid-word, and only fall back to
+    a hard character cut when the model wrote one enormous sentence.
+    """
+    flat = " ".join((text or "").split())
+    if not flat:
+        return ""
+    sentences = _SENTENCE_END_RE.split(flat)
+    lead = " ".join(sentences[:_MAX_LEAD_SENTENCES]).strip()
+    if len(lead) <= _MAX_LEAD_CHARS:
+        return lead
+    return lead[: lead.rfind(" ", 0, _MAX_LEAD_CHARS)].rstrip(",;:") + "..."
+
+
 def _page_of(location: str) -> int:
     """0-indexed page from a citation's location string.
 
@@ -343,9 +365,16 @@ def sample_items_from_conclusion(
                 f"The evidence is still attached; only the callouts are missing."
             )
 
+        # The lead paragraph is CAPPED, not merely requested to be short.
+        # The schema asks the model for two or three sentences and the
+        # prompt explains why, but this box is the first thing a reviewer
+        # reads in the finished workpaper and a run that ignores the
+        # instruction should not be able to bury the legend underneath a
+        # paragraph. Real output was flagged as "way too wordy" here while
+        # the legend below it already said the same things in a line each.
         narrative: list[NarrativeParagraph] = [
             NarrativeParagraph(
-                runs=[NarrativeRun(text=conclusion.narrative, color="BLACK")]
+                runs=[NarrativeRun(text=_lead_sentences(conclusion.narrative), color="BLACK")]
             ),
             NarrativeParagraph(),
         ]
@@ -429,6 +458,7 @@ def sample_items_from_conclusion(
         items.append(
             OoxmlSampleItem(
                 control_id=control_id,
+                sample_id=sample_id,
                 raw_data=_raw_data_row(manifest, sample_id) if manifest else RawDataRow(values={}),
                 narrative=narrative,
                 raw_data_tie_outs=raw_tie_outs,
@@ -501,14 +531,18 @@ def summary_rows(
     conclusions: "list[tuple[str, ConclusionOutput]]",
     *,
     sample_sheet: str = "Sample",
+    tab_names: "dict[str, str] | None" = None,
 ) -> list:
-    """One row per test step, plus one for IPE.
+    """One row per SAMPLED ITEM, plus one for IPE.
 
-    IPE gets its OWN row rather than a sentence inside a test step. It is a
-    separate assertion -- whether the population the sample was drawn from
-    is complete and accurate -- and folding it into a step makes it
-    invisible to a reviewer scanning for exactly that. A control can have
-    every step satisfied and still fail here.
+    Per item rather than per test step: an exception is always about a
+    specific selection, a reviewer clears selections one at a time, and
+    each selection now has its own tab to link to. A per-step row can only
+    say "one of these failed" and leaves the reviewer to find which.
+
+    IPE keeps its own row. It is a separate assertion -- whether the
+    population the sample came from is complete and accurate -- and a
+    control can have every item satisfied and still fail it.
     """
     from agent.ooxml.summary_sheet import SummaryRow
 
@@ -517,71 +551,80 @@ def summary_rows(
     # meant a step that actually validated its IPE could never replace the
     # seed -- validated ranks BETTER, so the "keep the worst" comparison
     # rejected it -- and the summary reported N/A for a control whose IPE
-    # had been tested. Found from a reviewer's note reading "didn't try to
-    # verify" against a run where it had.
+    # had been tested.
     worst_ipe: str | None = None
 
     for step_label, conclusion in conclusions:
         citations_by_id = {c.evidence_id: c for c in conclusion.evidence_citations}
+        verdicts = {r.sample_id: r for r in conclusion.sample_results}
 
-        # Attribute NAMES only in the middle column: the reviewer is asking
-        # "what did you test", not "what did it say".
-        attributes = [
-            _terse(a.attribute, 60)
-            for a in conclusion.attribute_results
-            if a.sample_id is not None
-        ] or ["(no attributes recorded)"]
+        sample_ids: list[str] = [r.sample_id for r in conclusion.sample_results]
+        for a in conclusion.attribute_results:
+            if a.sample_id and a.sample_id not in sample_ids:
+                sample_ids.append(a.sample_id)
+        if not sample_ids:
+            sample_ids = [""]
 
-        # Observed VALUES, one line per attribute, prefixed with the
-        # tickmark letter so the cell and the red box on the exhibit are
-        # obviously the same thing.
-        #
-        # DENSITY, not brevity. An earlier version cut these to the bare
-        # value ("A - Invoice 35713082") on the theory that shorter is
-        # better, and the review of that output read "too little
-        # information" -- correctly. The reference workpaper's equivalent
-        # column is a full clause per attribute: the values, where each came
-        # from, and what they agree TO. That is what makes it evidence a
-        # reviewer can sign rather than a label. The thing to strip is the
-        # multi-paragraph narrative, not the facts.
-        evidenced = []
-        for i, a in enumerate(a for a in conclusion.attribute_results if a.sample_id is not None):
-            letter = _LETTERS[i] if i < len(_LETTERS) else "-"
-            sources = sorted({
-                citations_by_id[e].source_file
-                for e in a.evidence_ids
-                if e in citations_by_id
-            })
-            where = f" per {', '.join(Path(x).stem for x in sources)}" if sources else ""
-            verdict = (
-                " - agrees" if a.result == "satisfied"
-                else f" - {a.result.replace('_', ' ').upper()}"
+        for sample_id in sample_ids:
+            attrs = [
+                a for a in conclusion.attribute_results
+                if a.sample_id == sample_id or (not sample_id and a.sample_id is None)
+            ]
+            attributes = [_terse(a.attribute, 60) for a in attrs] or ["(no attributes recorded)"]
+
+            # DENSITY, not brevity. An earlier version cut these to the bare
+            # value ("A - Invoice 35713082"), and the review of that output
+            # read "too little information" -- correctly. The reference
+            # workpaper's column is a full clause per attribute: the values,
+            # where each came from, and what they agree TO.
+            evidenced = []
+            for i, a in enumerate(attrs):
+                letter = _LETTERS[i] if i < len(_LETTERS) else "-"
+                sources = sorted({
+                    citations_by_id[e].source_file for e in a.evidence_ids if e in citations_by_id
+                })
+                where = f" per {', '.join(Path(x).stem for x in sources)}" if sources else ""
+                verdict = (
+                    " - agrees" if a.result == "satisfied"
+                    else f" - {a.result.replace('_', ' ').upper()}"
+                )
+                evidenced.append(_terse(f"{letter} - {a.value_observed}{where}{verdict}", 240))
+            if not evidenced:
+                evidenced = ["(no evidence recorded)"]
+
+            result_obj = verdicts.get(sample_id)
+            if result_obj is not None:
+                verdict_text = result_obj.conclusion
+                note = result_obj.note
+            else:
+                verdict_text = conclusion.conclusion
+                note = ""
+            result = (
+                "Satisfied" if verdict_text == "satisfied"
+                else f"Exception{f' - {_terse(note, 40)}' if note else ''}"
+                if verdict_text == "not_satisfied"
+                else verdict_text.replace("_", " ").capitalize()
             )
-            evidenced.append(_terse(f"{letter} - {a.value_observed}{where}{verdict}", 240))
-        if not evidenced:
-            evidenced = ["(no evidence recorded)"]
 
-        failed = [r.sample_id for r in conclusion.sample_results if r.conclusion != "satisfied"]
-        if conclusion.conclusion == "satisfied":
-            result = "Satisfied"
-        elif failed:
-            # Name the item. "Not satisfied" alone sends a reviewer hunting
-            # through every sample sheet to find which one.
-            result = f"Exception ({', '.join(failed)})"
-        else:
-            result = conclusion.conclusion.replace("_", " ").capitalize()
-
-        letters = _LETTERS[: len(evidenced)]
-        rows.append(
-            SummaryRow(
-                test_step=_terse(step_label, 200),
-                attributes=attributes,
-                evidenced=[e[:_MAX_SUMMARY_CELL_CHARS] for e in evidenced],
-                result=result,
-                evidence_label=f"{sample_sheet} {letters[0]}-{letters[-1]}" if letters else "-",
-                link_to=f"{sample_sheet}!A1",
+            tab = (tab_names or {}).get(sample_id) or (
+                sample_sheet if len(sample_ids) <= 1 else f"{sample_sheet} {sample_id}"
             )
-        )
+            letters = _LETTERS[: len(evidenced)]
+            rows.append(
+                SummaryRow(
+                    test_step=_terse(
+                        f"{step_label}" + (f"  [selection {sample_id}]" if sample_id else ""), 200
+                    ),
+                    attributes=attributes,
+                    evidenced=[e[:_MAX_SUMMARY_CELL_CHARS] for e in evidenced],
+                    result=result,
+                    evidence_label=(
+                        f"{tab} {letters[0]}-{letters[-1]}" if len(letters) > 1
+                        else (f"{tab} {letters[0]}" if letters else tab)
+                    ),
+                    link_to=f"'{tab}'!A1" if " " in tab else f"{tab}!A1",
+                )
+            )
 
         order = {"validated": 0, "not_applicable": 1, "not_validated": 2}
         status = conclusion.ipe_completeness_accuracy_status

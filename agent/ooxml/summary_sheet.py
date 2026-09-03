@@ -167,7 +167,12 @@ def _add_styles(work_dir: str) -> _Styles:
     return _Styles(s_header, s_text, s_green, s_red, s_amber, s_link)
 
 
-def _sheet_xml(rows: list[SummaryRow], sst: ox.SharedStrings, styles: _Styles) -> str:
+def _sheet_xml(
+    rows: list[SummaryRow],
+    sst: ox.SharedStrings,
+    styles: _Styles,
+    existing_sheets: "set[str] | None" = None,
+) -> str:
     cols = "".join(
         f'<col min="{ox.col_letter_to_index(c)}" max="{ox.col_letter_to_index(c)}" '
         f'width="{w}" customWidth="1"/>'
@@ -191,6 +196,8 @@ def _sheet_xml(rows: list[SummaryRow], sst: ox.SharedStrings, styles: _Styles) -
 
     for i, row in enumerate(rows, start=2):
         verdict_style = fill_for[row.verdict_colour]
+        target_sheet = row.link_to.split("!")[0].strip("'") if row.link_to else ""
+        linkable = bool(row.link_to) and (existing_sheets is None or target_sheet in existing_sheets)
         cells = [
             ox.cell_xml(f"A{i}", row.test_step, style=styles.text, sst=sst),
             ox.cell_xml(f"B{i}", "\n".join(row.attributes), style=styles.text, sst=sst),
@@ -199,7 +206,7 @@ def _sheet_xml(rows: list[SummaryRow], sst: ox.SharedStrings, styles: _Styles) -
             ox.cell_xml(
                 f"E{i}",
                 row.evidence_label or "-",
-                style=styles.link if row.link_to else styles.text,
+                style=styles.link if linkable else styles.text,
                 sst=sst,
             ),
         ]
@@ -209,7 +216,13 @@ def _sheet_xml(rows: list[SummaryRow], sst: ox.SharedStrings, styles: _Styles) -
         body.append(
             ox.row_xml(i, cells, spans="1:5", extra_attrs=f' ht="{max(30, lines * 15)}" customHeight="1"')
         )
-        if row.link_to:
+        # Drop a link whose target tab is not in this workbook. Checked
+        # HERE, at the only layer that knows which sheets exist, so no
+        # caller can ship a broken one: the IPE row links to "Parameters",
+        # which some templates simply do not have. Excel does not complain
+        # about a dangling internal link -- the click just does nothing,
+        # which reads to a reviewer as the workpaper being broken.
+        if linkable:
             hyperlinks.append(
                 f'<hyperlink ref="E{i}" location="{escape(row.link_to)}" '
                 f'display="{escape(row.evidence_label)}"/>'
@@ -247,6 +260,11 @@ def add_summary_sheet(
     evidence behind it is what the other tabs are for.
     """
     styles = _add_styles(work_dir)
+    # Named for what it holds. A plain `existing` collided with the
+    # sheet-FILENAME list further down, which silently overwrote it and
+    # made every hyperlink target look absent -- so the tab shipped with
+    # no working links at all.
+    existing_sheet_names = set(ox.resolve_sheets(work_dir))
 
     # Next free sheetN.xml, so this never collides with the template's own.
     sheet_dir = os.path.join(work_dir, "xl", "worksheets")
@@ -254,7 +272,7 @@ def add_summary_sheet(
     n = max((int(re.findall(r"\d+", f)[0]) for f in existing), default=0) + 1
 
     with open(os.path.join(sheet_dir, f"sheet{n}.xml"), "w", encoding="utf-8") as fh:
-        fh.write(_sheet_xml(rows, sst, styles))
+        fh.write(_sheet_xml(rows, sst, styles, existing_sheet_names))
 
     rels_path = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
     with open(rels_path, encoding="utf-8") as fh:

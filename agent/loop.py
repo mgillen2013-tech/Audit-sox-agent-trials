@@ -463,7 +463,13 @@ TOOLS = [
         "and should not re-derive that detail; procedures_performed says what "
         "you DID, not what you found. A real workpaper repeated a single IPE "
         "break six times across these fields -- that is harder to review, not "
-        "more thorough.",
+        "more thorough. The same rule governs the narrative, which is the "
+        "first thing a reviewer reads in the finished workpaper: two or three "
+        "sentences saying what you tested, against what, and how it came "
+        "out. The attributes, values, dates, names and amounts do NOT belong "
+        "there -- attribute_results already carries each of them beside the "
+        "tickmark that points at it on the evidence. Ask yourself how few "
+        "words can carry the key attributes, not how many you can fit.",
         SubmitConclusionInput,
     ),
 ]

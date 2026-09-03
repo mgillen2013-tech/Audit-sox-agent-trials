@@ -216,7 +216,24 @@ class _ConclusionCore(BaseModel):
     test_step_id: str
     control_objective_ref: str
     conclusion: Literal["satisfied", "not_satisfied", "insufficient_evidence"]
-    narrative: str
+    # Deliberately constrained. The narrative is NOT where findings live --
+    # attribute_results owns the observed values, sample_results owns the
+    # per-item verdicts, exceptions owns the failures. Left unbounded, the
+    # model restates all of it in prose, and that prose is what lands in the
+    # workpaper's narrative box where a reviewer meets it first. Real output
+    # opened with a paragraph a reviewer described as "way too wordy", above
+    # a legend that already said the same things in one line each.
+    narrative: str = Field(
+        description=(
+            "Two or three sentences, maximum. Say what you tested, against "
+            "what evidence, and how it came out -- nothing else. Do NOT "
+            "restate the individual attributes, values, dates, names or "
+            "amounts here: every one of those belongs in attribute_results, "
+            "and repeating them makes the workpaper longer to review, not "
+            "more thorough. A reviewer reads this first and should reach the "
+            "answer in one breath."
+        )
+    )
     evidence_citations: list[EvidenceCitation]
     procedures_performed: list[str]
     # Per-item verdicts. The step-level `conclusion` above is a roll-up and
