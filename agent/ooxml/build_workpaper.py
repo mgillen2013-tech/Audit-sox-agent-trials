@@ -167,8 +167,8 @@ def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingRe
 
 
 def build_workpaper(request: WorkpaperRequest,
-                     *, sample_sheet_num: int = 2, population_sheet_num: int = 3,
-                     parameters_sheet_num: int = 4,
+                     *, sample_sheet: str = "Sample", population_sheet: str = "Population",
+                     parameters_sheet: str = "Parameters",
                      on_unplaced=None, summary_rows=None) -> str:
     """Writes the workpaper and returns its path.
 
@@ -186,6 +186,18 @@ def build_workpaper(request: WorkpaperRequest,
     work_dir = request.output_path + ".workdir"
     ox.extract_template(request.template_path, work_dir)
 
+    # Refuse a template this builder cannot write correctly, before writing
+    # anything. Across a population of controls a wrong-but-produced
+    # workpaper costs far more than a refusal -- see check_template.
+    sheets = ox.check_template(
+        work_dir,
+        required_sheets=[sample_sheet, population_sheet],
+        max_style_index=STYLE_IA_TOTAL_AMOUNT,
+    )
+    sample_sheet_num = sheets[sample_sheet]
+    population_sheet_num = sheets[population_sheet]
+    parameters_sheet_num = sheets.get(parameters_sheet)
+
     sst = ox.SharedStrings(work_dir)
 
     sample_sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{sample_sheet_num}.xml")
@@ -200,6 +212,10 @@ def build_workpaper(request: WorkpaperRequest,
     _write_drawing_and_media(work_dir, sample_sheet_num, sample_drawing)
 
     if request.parameters is not None:
+        if parameters_sheet_num is None:
+            raise ox.TemplateMismatch(
+                f"parameters were supplied but the template has no {parameters_sheet!r} tab"
+            )
         params_drawing = db.build_parameters_drawing(request.parameters)
         _write_drawing_and_media(work_dir, parameters_sheet_num, params_drawing)
 

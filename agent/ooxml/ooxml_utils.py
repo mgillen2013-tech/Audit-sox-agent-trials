@@ -12,7 +12,7 @@ import shutil
 import zipfile
 import datetime as dt
 import xml.etree.ElementTree as ET
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
 from dataclasses import dataclass, field
 
 EXCEL_EPOCH = dt.date(1899, 12, 30)
@@ -269,3 +269,93 @@ def cell_box_emu(layout: ColumnLayout, col_start: str, col_end: str,
     x, y, w, h = layout.cell_box_px(col_start, col_end, row_top_px, row_height_px)
     return (x * CELL_GRID_EMU_PER_PX, y * CELL_GRID_EMU_PER_PX,
             w * CELL_GRID_EMU_PER_PX, h * CELL_GRID_EMU_PER_PX)
+
+
+# ---------------------------------------------------------------------------
+# Template compatibility
+# ---------------------------------------------------------------------------
+
+class TemplateMismatch(ValueError):
+    """The template does not have the shape this builder writes into."""
+
+
+def resolve_sheets(work_dir: str) -> dict[str, int]:
+    """{sheet name: N} for xl/worksheets/sheetN.xml, from the workbook itself.
+
+    Sheet NAME is the stable thing; sheetN.xml numbering is not. The two are
+    related only through workbook.xml -> workbook.xml.rels, and in the real
+    PY template they already disagree: "IA Leadsheet" carries sheetId="4"
+    while living in sheet1.xml. Hard-coding "the Sample tab is sheet2.xml"
+    happens to hold for one control and is a coin flip across a population
+    of them -- and when it is wrong it does not fail, it writes the sample
+    rows into whatever tab happens to be second.
+
+    Parsed with ElementTree rather than regex, deliberately. Attribute ORDER
+    is not significant in XML and real files disagree about it: Excel writes
+    <Relationship Id=... Target=...>, openpyxl writes Target= before Id=.
+    A regex pinned to one order silently returns nothing for files written
+    by the other, and "nothing" here means every sheet looks missing.
+    """
+    ns_r = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    ns_main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    ns_pkg = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+    rels_root = ET.parse(os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")).getroot()
+    target_by_rid = {
+        rel.get("Id"): rel.get("Target", "")
+        for rel in rels_root.findall(f"{ns_pkg}Relationship")
+    }
+
+    wb_root = ET.parse(os.path.join(work_dir, "xl", "workbook.xml")).getroot()
+    sheets: dict[str, int] = {}
+    for sheet in wb_root.iter(f"{ns_main}sheet"):
+        name = sheet.get("name")
+        # Target is relative ("worksheets/sheet1.xml") from Excel and
+        # absolute ("/xl/worksheets/sheet1.xml") from openpyxl; only the
+        # trailing sheetN.xml is load-bearing.
+        target = target_by_rid.get(sheet.get(f"{ns_r}id"), "")
+        num = re.search(r"sheet(\d+)\.xml$", target)
+        if name and num:
+            sheets[name] = int(num.group(1))
+    return sheets
+
+
+def check_template(work_dir: str, *, required_sheets: list[str], max_style_index: int) -> dict[str, int]:
+    """Verify a template can take this builder's output; return its sheet map.
+
+    Written for a population of 172 controls, not for one. Every assumption
+    below is one that holds for the template this package was built from and
+    may not hold for the next: the tab names, and the style indices lifted
+    out of that file's styles.xml.
+
+    Both fail SILENTLY if unchecked, which is the reason this exists. A
+    missing tab writes evidence into the wrong sheet; a style index past the
+    end of cellXfs makes Excel show a repair prompt that names nothing, or
+    quietly renders the cell in some other format. Across 172 workpapers
+    either one is worse than a refusal, because a refusal is a two-minute
+    fix and a wrong workpaper is a finding.
+    """
+    import re as _re
+
+    sheets = resolve_sheets(work_dir)
+    missing = [name for name in required_sheets if name not in sheets]
+    if missing:
+        raise TemplateMismatch(
+            f"template has no sheet named {missing} -- it has {sorted(sheets)}. "
+            f"This builder writes into tabs by name; either the template is for a "
+            f"differently-shaped control, or the tab names differ and the caller "
+            f"should pass the names this template actually uses."
+        )
+
+    with open(os.path.join(work_dir, "xl", "styles.xml"), encoding="utf-8") as fh:
+        styles = fh.read()
+    m = _re.search(r'<cellXfs count="(\d+)"', styles)
+    available = int(m.group(1)) if m else 0
+    if available <= max_style_index:
+        raise TemplateMismatch(
+            f"template's styles.xml defines {available} cell formats, but this "
+            f"builder addresses style index {max_style_index}. The STYLE_* "
+            f"constants in build_workpaper.py were lifted from a specific "
+            f"template's styles.xml and do not transfer to this one."
+        )
+    return sheets

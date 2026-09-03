@@ -40,6 +40,7 @@ from agent.ooxml.models import (
     NarrativeParagraph,
     NarrativeRun,
     PopulationRow,
+    RawDataTieOut,
     RawDataRow,
     SampleItem as OoxmlSampleItem,
     WorkpaperRequest,
@@ -123,6 +124,47 @@ def anchor_candidates(text: str) -> list[str]:
     # on the page more often than a short one.
     by_length = lambda xs: sorted(xs, key=len, reverse=True)  # noqa: E731
     return by_length(amounts) + by_length(identifiers) + by_length(dates)
+
+
+def _normalise_value(value: object) -> str:
+    """Lowercased, punctuation-free form for comparing an anchor against a
+    cell. "11,193.00", "11193.0" and 11193.0 all collapse to "1119300", so a
+    value matches its own column whichever way the extract happened to
+    store it -- which is the whole difficulty, since intake reads text and
+    the OOXML side wants numbers.
+    """
+    text = str(value if value is not None else "").strip().lower()
+    # Drop a trailing ".0"/".00" so a float that round-tripped through a
+    # string still matches the anchor a human would have typed.
+    text = re.sub(r"\.0+$", "", text)
+    return re.sub(r"[^a-z0-9]", "", text)
+
+
+def _raw_columns_for(anchors: list[str], key_fields: dict[str, str] | None) -> list[str]:
+    """Template column letters whose value is the one this tickmark marks.
+
+    Matched on the VALUE, never on the column name. That matters far more
+    than it looks: this has to work across 172 controls whose extracts name
+    their columns differently ("Invoice Number F0411.VINV" here, something
+    else next door), and a value match needs no per-control configuration
+    at all. Empty list is a normal outcome -- an attribute about an
+    approver's identity has nothing to point at in a payment extract -- and
+    means no box is drawn on the row.
+    """
+    if not key_fields or not anchors:
+        return []
+    wanted = {_normalise_value(a) for a in anchors if _normalise_value(a)}
+    columns: list[str] = []
+    for i, (_name, value) in enumerate(key_fields.items()):
+        if i >= len(_LETTERS):
+            break
+        cell = _normalise_value(value)
+        # Require a full match, not a substring: "2859" is contained in a
+        # dozen unrelated numbers on a real extract row, and a box over the
+        # wrong column is worse than no box.
+        if cell and cell in wanted:
+            columns.append(_LETTERS[i])
+    return columns
 
 
 def _page_of(location: str) -> int:
@@ -285,6 +327,10 @@ def sample_items_from_conclusion(
             NarrativeParagraph(),
         ]
 
+        sample_item = next((x for x in (manifest.samples if manifest else []) if x.sample_id == sample_id), None)
+        sample_key_fields = sample_item.key_fields if sample_item else None
+        raw_tie_outs: list[RawDataTieOut] = []
+
         # letter -> (attribute, anchor candidates, evidence ids)
         by_image: dict[tuple[str, int], list[EvidenceTieOut]] = {}
         for i, attr in enumerate(attributes):
@@ -298,6 +344,15 @@ def sample_items_from_conclusion(
             narrative.append(_legend_line(letter, f"{attr.attribute}: {attr.value_observed}"))
 
             anchors = anchor_candidates(attr.value_observed)
+
+            # Box the same value on the extract row itself, not only on the
+            # exhibit. This is what visually ties the sample listing to the
+            # document -- without it a reviewer sees a red box on an invoice
+            # and has to take on faith that it is the row that was selected.
+            raw_columns = _raw_columns_for(anchors, sample_key_fields)
+            if raw_columns:
+                raw_tie_outs.append(RawDataTieOut(letter=letter, columns=raw_columns))
+
             if not anchors:
                 warnings.append(
                     f"sample {sample_id!r} tickmark {letter} ({attr.attribute!r}): no "
@@ -353,7 +408,7 @@ def sample_items_from_conclusion(
                 control_id=control_id,
                 raw_data=_raw_data_row(manifest, sample_id) if manifest else RawDataRow(values={}),
                 narrative=narrative,
-                raw_data_tie_outs=[],
+                raw_data_tie_outs=raw_tie_outs,
                 evidence_images=evidence_images,
                 # Absent a per-sample verdict, fall back to the step's
                 # roll-up. Never default to True: a workpaper that silently

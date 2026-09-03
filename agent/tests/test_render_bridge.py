@@ -378,3 +378,119 @@ def test_every_summary_row_links_somewhere(tmp_path: Path):
 
     for row in summary_rows([("1.", _conclusion())]):
         assert row.link_to and "!" in row.link_to
+
+
+# --------------------------------------------------------------------------
+# Raw-data-row callouts, and surviving a template that isn't this one.
+# There are 172 controls; this package was built from exactly one of them.
+# --------------------------------------------------------------------------
+
+
+def test_the_extract_row_gets_boxed_too(tmp_path: Path):
+    # Without this a reviewer sees a red box on an invoice and has to take
+    # on faith that it is the row that was selected.
+    (tmp_path / "invoice.pdf").write_bytes(b"%PDF-1.4\n")
+    # The attribute has to observe a value that IS on the extract row --
+    # here the invoice number, which is the first key field and so column A.
+    # An amount the extract does not carry correctly boxes nothing.
+    conclusion = _conclusion(
+        attribute_results=[
+            {
+                "attribute": "Invoice number agrees to the sample listing",
+                "sample_id": "1",
+                "result": "satisfied",
+                "value_observed": "Invoice 21022452",
+                "evidence_ids": ["ev_0001"],
+            }
+        ]
+    )
+    items, _ = sample_items_from_conclusion(conclusion, _manifest(), "C-14", tmp_path)
+    tie_outs = items[0].raw_data_tie_outs
+    assert [t.letter for t in tie_outs] == ["A"]
+    assert tie_outs[0].columns == ["A"]
+
+
+def test_raw_columns_are_matched_on_value_not_column_name():
+    # 172 controls means 172 extracts that name their columns differently.
+    # Matching the value needs no per-control configuration at all.
+    from agent.render_bridge import _raw_columns_for
+
+    fields = {"Invoice Number F0411.VINV": "35713082", "Total Payment Amount": "32677.00"}
+    assert _raw_columns_for(["35713082"], fields) == ["A"]
+    assert _raw_columns_for(["32,677.00"], fields) == ["B"]  # formatting differs, still matches
+
+
+def test_a_value_that_is_not_on_the_extract_row_boxes_nothing():
+    # An attribute about an approver's identity has nothing to point at in
+    # a payment extract. No box is the right answer, not a guess.
+    from agent.render_bridge import _raw_columns_for
+
+    assert _raw_columns_for(["Milosevic"], {"Payee Number": "27677628"}) == []
+
+
+def test_raw_column_match_is_exact_not_substring():
+    # "2859" is contained in a dozen unrelated numbers on a real extract
+    # row, and a box over the wrong column is worse than no box.
+    from agent.render_bridge import _raw_columns_for
+
+    assert _raw_columns_for(["2859"], {"Document Number": "11928590"}) == []
+
+
+def test_a_template_missing_a_required_tab_is_refused(tmp_path: Path):
+    # Silently writing the sample rows into whatever tab happens to be
+    # second is the failure this prevents. Across 172 controls a refusal is
+    # a two-minute fix; a wrong workpaper is a finding.
+    import openpyxl
+
+    from agent.ooxml import ooxml_utils as ox
+
+    wb = openpyxl.Workbook()
+    wb.active.title = "NotTheSampleTab"
+    src = tmp_path / "odd_template.xlsx"
+    wb.save(src)
+
+    work = str(tmp_path / "wd")
+    ox.extract_template(str(src), work)
+    with pytest.raises(ox.TemplateMismatch, match="no sheet named"):
+        ox.check_template(work, required_sheets=["Sample", "Population"], max_style_index=0)
+
+
+def test_a_template_without_the_expected_styles_is_refused(tmp_path: Path):
+    # The STYLE_* constants were lifted from one specific styles.xml. On a
+    # template with fewer formats they address past the end of cellXfs,
+    # which makes Excel show a repair prompt naming nothing useful.
+    import openpyxl
+
+    from agent.ooxml import ooxml_utils as ox
+
+    wb = openpyxl.Workbook()
+    wb.active.title = "Sample"
+    wb.create_sheet("Population")
+    src = tmp_path / "plain.xlsx"
+    wb.save(src)
+
+    work = str(tmp_path / "wd2")
+    ox.extract_template(str(src), work)
+    with pytest.raises(ox.TemplateMismatch, match="cell formats"):
+        ox.check_template(work, required_sheets=["Sample", "Population"], max_style_index=99)
+
+
+def test_sheets_are_resolved_by_name_not_by_position(tmp_path: Path):
+    # sheetN.xml numbering does not follow tab order -- in the real PY
+    # template "IA Leadsheet" carries sheetId=4 while living in sheet1.xml.
+    import openpyxl
+
+    from agent.ooxml import ooxml_utils as ox
+
+    wb = openpyxl.Workbook()
+    wb.active.title = "First"
+    wb.create_sheet("Sample")
+    wb.create_sheet("Population")
+    src = tmp_path / "ordered.xlsx"
+    wb.save(src)
+
+    work = str(tmp_path / "wd3")
+    ox.extract_template(str(src), work)
+    sheets = ox.resolve_sheets(work)
+    assert set(sheets) == {"First", "Sample", "Population"}
+    assert sheets["Sample"] != sheets["Population"]
