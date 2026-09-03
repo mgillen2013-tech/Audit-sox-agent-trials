@@ -34,6 +34,7 @@ from typing import Any
 from agent.ooxml import ooxml_utils as ox
 from agent.ooxml.build_workpaper import build_workpaper as build_ooxml_workpaper
 from agent.ooxml.models import PopulationRow, WorkpaperRequest
+from agent.narrative_styles import NarrativeStyle
 from agent.render_bridge import build_workpaper_request, summary_rows
 from agent.schemas import ConclusionOutput, SamplePopulationManifest
 
@@ -147,8 +148,26 @@ def build_cy_workpaper(
     population_sheet: str | None = None,
     sample_sheet_name: str = "Sample",
     population_sheet_name: str = "Population",
+    narrative_style: "NarrativeStyle" = "model",
+    review_client: Any = None,
+    review_model: str = "",
+    evidence_items: "list[Any] | None" = None,
 ) -> WorkpaperOutcome:
-    """Render one control's results, mirroring PY where that is possible."""
+    """Render one control's results, mirroring PY where that is possible.
+
+    Two switches, both experiments, both off by default:
+
+    narrative_style="template" gives every sample tab the SAME sentences
+    with only its own values substituted, and moves the model's prose to
+    the Summary. See agent/narrative_styles.py for why that might read
+    better across five tabs, and what it costs.
+
+    review_client + review_model turn on a second model pass that checks
+    each tickmark line against the text of the evidence it cites, and
+    writes the result into a "Reviewer check" column. It costs one API
+    call per sampled item and never gates the workpaper -- see
+    agent/reviewer.py.
+    """
     support = Path(support_dir or out_dir)
     py_path = support / py_testing_filename
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -175,6 +194,10 @@ def build_cy_workpaper(
     step_labels = []
     for step_id, conclusion in conclusions:
         manifest = (sample_manifests or {}).get(step_id)
+        text = next(
+            (s.get("test_step_text", "") for s in spec.get("test_steps", []) if s.get("test_step_id") == step_id),
+            "",
+        )
         request, step_warnings = build_workpaper_request(
             conclusion,
             manifest,
@@ -182,13 +205,11 @@ def build_cy_workpaper(
             template_path=py_path,
             output_path=out_dir / f"{spec['control_id']}_CY_Testing_wp.xlsx",
             support_dir=support,
+            narrative_style=narrative_style,
+            step_label=f"{step_id}: {text}" if text else step_id,
         )
         sample_items.extend(request.sample_items)
         warnings.extend(f"[{step_id}] {w}" for w in step_warnings)
-        text = next(
-            (s.get("test_step_text", "") for s in spec.get("test_steps", []) if s.get("test_step_id") == step_id),
-            "",
-        )
         step_labels.append(f"{step_id}: {text}" if text else step_id)
 
     output_path = out_dir / f"{spec['control_id']}_CY_Testing_wp.xlsx"
@@ -201,13 +222,43 @@ def build_cy_workpaper(
         ),
     )
 
+    # Optional second opinion, per sampled item. Failures come back as
+    # "not reviewed" rather than raising -- the workpaper it checks is
+    # already built and valid, and losing it because an optional review
+    # failed would be absurd.
+    reviews: dict[str, str] = {}
+    if review_client is not None and evidence_items:
+        from agent.reviewer import review_sample
+
+        for step_id, conclusion in conclusions:
+            cited = {c.evidence_id for c in conclusion.evidence_citations}
+            by_sample: dict[str, list[tuple[str, str, str]]] = {}
+            for a in conclusion.attribute_results:
+                if a.sample_id:
+                    entries = by_sample.setdefault(a.sample_id, [])
+                    entries.append((_LETTERS[len(entries)], a.attribute, a.value_observed))
+            for sample_id, legend in by_sample.items():
+                result = review_sample(
+                    review_client,
+                    review_model or "claude-opus-5",
+                    sample_id=sample_id,
+                    legend=legend,
+                    evidence_items=evidence_items,
+                    evidence_ids=cited,
+                )
+                reviews[sample_id] = result.summary
+                if not result.all_supported and not result.error:
+                    warnings.append(f"[{step_id}] reviewer: {result.summary}")
+
     unplaced: list[tuple[str, str, str, str]] = []
     build_ooxml_workpaper(
         request,
         sample_sheet=sample_sheet_name,
         population_sheet=population_sheet_name,
         on_unplaced=unplaced.extend,
-        summary_rows=summary_rows(list(zip(step_labels, [c for _s, c in conclusions]))),
+        summary_rows=summary_rows(
+            list(zip(step_labels, [c for _s, c in conclusions])), reviews=reviews
+        ),
     )
     return WorkpaperOutcome(output_path, mirrored_py=True, warnings=warnings, unplaced_callouts=unplaced)
 

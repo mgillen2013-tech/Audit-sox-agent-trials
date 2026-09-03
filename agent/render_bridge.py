@@ -45,6 +45,7 @@ from agent.ooxml.models import (
     SampleItem as OoxmlSampleItem,
     WorkpaperRequest,
 )
+from agent.narrative_styles import NarrativeStyle, build_narrative
 from agent.schemas import ConclusionOutput, SamplePopulationManifest
 
 # Same patterns as agent/wordboxes.py, and for the same reasons -- see the
@@ -328,6 +329,9 @@ def sample_items_from_conclusion(
     manifest: SamplePopulationManifest | None,
     control_id: str,
     support_dir: Path,
+    *,
+    narrative_style: "NarrativeStyle" = "model",
+    step_label: str = "",
 ) -> tuple[list[OoxmlSampleItem], list[str]]:
     """One OOXML SampleItem per sampled item, plus any warnings.
 
@@ -365,19 +369,10 @@ def sample_items_from_conclusion(
                 f"The evidence is still attached; only the callouts are missing."
             )
 
-        # The lead paragraph is CAPPED, not merely requested to be short.
-        # The schema asks the model for two or three sentences and the
-        # prompt explains why, but this box is the first thing a reviewer
-        # reads in the finished workpaper and a run that ignores the
-        # instruction should not be able to bury the legend underneath a
-        # paragraph. Real output was flagged as "way too wordy" here while
-        # the legend below it already said the same things in a line each.
-        narrative: list[NarrativeParagraph] = [
-            NarrativeParagraph(
-                runs=[NarrativeRun(text=_lead_sentences(conclusion.narrative), color="BLACK")]
-            ),
-            NarrativeParagraph(),
-        ]
+        # The narrative box is built by agent/narrative_styles, which
+        # implements two competing shapes so they can be compared on real
+        # controls. Nothing below depends on which was chosen.
+        legend_entries: list[tuple[str, str, str]] = []
 
         sample_item = next((x for x in (manifest.samples if manifest else []) if x.sample_id == sample_id), None)
         sample_key_fields = sample_item.key_fields if sample_item else None
@@ -393,7 +388,7 @@ def sample_items_from_conclusion(
                 )
                 break
             letter = _LETTERS[i]
-            narrative.append(_legend_line(letter, f"{attr.attribute}: {attr.value_observed}"))
+            legend_entries.append((letter, attr.attribute, attr.value_observed))
 
             anchors = anchor_candidates(attr.value_observed)
 
@@ -432,6 +427,15 @@ def sample_items_from_conclusion(
                         fallback_anchors=anchors[1:],
                     )
                 )
+
+        narrative = build_narrative(
+            narrative_style,
+            step_label=step_label,
+            model_narrative=conclusion.narrative,
+            legend=legend_entries,
+            satisfied=verdicts.get(sample_id, conclusion.conclusion) == "satisfied",
+            lead_sentences=_lead_sentences,
+        )
 
         evidence_images: list[EvidenceImage] = []
         for (source_file, page), tie_outs in by_image.items():
@@ -485,10 +489,13 @@ def build_workpaper_request(
     output_path: str | Path,
     support_dir: str | Path,
     population_rows: list[dict] | None = None,
+    narrative_style: "NarrativeStyle" = "model",
+    step_label: str = "",
 ) -> tuple[WorkpaperRequest, list[str]]:
     """The whole translation: one test step's conclusion -> a build request."""
     items, warnings = sample_items_from_conclusion(
-        conclusion, manifest, control_id, Path(support_dir)
+        conclusion, manifest, control_id, Path(support_dir),
+        narrative_style=narrative_style, step_label=step_label,
     )
     return (
         WorkpaperRequest(
@@ -532,6 +539,7 @@ def summary_rows(
     *,
     sample_sheet: str = "Sample",
     tab_names: "dict[str, str] | None" = None,
+    reviews: "dict[str, str] | None" = None,
 ) -> list:
     """One row per SAMPLED ITEM, plus one for IPE.
 
@@ -565,6 +573,7 @@ def summary_rows(
         if not sample_ids:
             sample_ids = [""]
 
+        first_row_of_step = True
         for sample_id in sample_ids:
             attrs = [
                 a for a in conclusion.attribute_results
@@ -623,8 +632,15 @@ def summary_rows(
                         else (f"{tab} {letters[0]}" if letters else tab)
                     ),
                     link_to=f"'{tab}'!A1" if " " in tab else f"{tab}!A1",
+                    # Once per test step, not per selection. The prose
+                    # explains the step; repeating it beside every sample
+                    # is the noise this column was created to remove from
+                    # the narrative boxes.
+                    narrative=_terse(conclusion.narrative, 400) if first_row_of_step else "",
+                    review=(reviews or {}).get(sample_id, ""),
                 )
             )
+            first_row_of_step = False
 
         order = {"validated": 0, "not_applicable": 1, "not_validated": 2}
         status = conclusion.ipe_completeness_accuracy_status

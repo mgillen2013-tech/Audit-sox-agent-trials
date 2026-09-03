@@ -38,13 +38,19 @@ _RED_BG, _RED_FG = "FFFFC7CE", "FF9C0006"
 _AMBER_BG, _AMBER_FG = "FFFFEB9C", "FF9C6500"
 _HEADER_BG = "FFD9D9D9"
 
+# Column F carries the model's prose. It used to sit in the narrative box
+# on each sample tab, where it repeated per sample and pushed the legend
+# down; on the summary it is written once per test step, next to the rows
+# it explains. Column G exists only when the reviewer pass is enabled.
 _COLUMNS = [
     ("A", "Test Step", 46),
     ("B", "Attributes", 30),
     ("C", "Attributes Evidenced?", 62),
     ("D", "Result", 12),
     ("E", "Evidence", 16),
+    ("F", "Conclusion", 52),
 ]
+_REVIEW_COLUMN = ("G", "Reviewer check", 40)
 
 
 @dataclass
@@ -60,6 +66,13 @@ class SummaryRow:
     result: str = ""  # "Satisfied" | "Exception" | "Not tested" ...
     evidence_label: str = ""
     link_to: str = ""
+    # The model's own prose, written once per test step rather than on
+    # every row -- repeating it beside each selection is noise.
+    narrative: str = ""
+    # Populated only when the reviewer pass ran; empty string means the
+    # column is not shown at all, which is different from "reviewed and
+    # found nothing".
+    review: str = ""
 
     @property
     def verdict_colour(self) -> str:
@@ -173,10 +186,14 @@ def _sheet_xml(
     styles: _Styles,
     existing_sheets: "set[str] | None" = None,
 ) -> str:
+    columns = list(_COLUMNS)
+    if any(r.review for r in rows):
+        columns.append(_REVIEW_COLUMN)
+    last_col = columns[-1][0]
     cols = "".join(
         f'<col min="{ox.col_letter_to_index(c)}" max="{ox.col_letter_to_index(c)}" '
         f'width="{w}" customWidth="1"/>'
-        for c, _t, w in _COLUMNS
+        for c, _t, w in columns
     )
 
     body = [
@@ -184,9 +201,9 @@ def _sheet_xml(
             1,
             [
                 ox.cell_xml(f"{c}1", title, style=styles.header, sst=sst)
-                for c, title, _w in _COLUMNS
+                for c, title, _w in columns
             ],
-            spans="1:5",
+            spans=f'1:{ox.col_letter_to_index(last_col)}',
             extra_attrs=' ht="20" customHeight="1"',
         )
     ]
@@ -209,12 +226,15 @@ def _sheet_xml(
                 style=styles.link if linkable else styles.text,
                 sst=sst,
             ),
+            ox.cell_xml(f"F{i}", row.narrative, style=styles.text, sst=sst),
         ]
+        if len(columns) > len(_COLUMNS):
+            cells.append(ox.cell_xml(f"G{i}", row.review, style=styles.text, sst=sst))
         # Row height scaled to the longest stacked column, so a reviewer
         # sees every attribute without resizing anything.
         lines = max(len(row.attributes), len(row.evidenced), 1)
         body.append(
-            ox.row_xml(i, cells, spans="1:5", extra_attrs=f' ht="{max(30, lines * 15)}" customHeight="1"')
+            ox.row_xml(i, cells, spans=f"1:{ox.col_letter_to_index(last_col)}", extra_attrs=f' ht="{max(30, lines * 15)}" customHeight="1"')
         )
         # Drop a link whose target tab is not in this workbook. Checked
         # HERE, at the only layer that knows which sheets exist, so no
@@ -233,7 +253,7 @@ def _sheet_xml(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        f'<dimension ref="A1:E{len(rows) + 1}"/>'
+        f'<dimension ref="A1:{last_col}{len(rows) + 1}"/>'
         '<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>'
         '<sheetFormatPr defaultRowHeight="15"/>'
         f"<cols>{cols}</cols>"
