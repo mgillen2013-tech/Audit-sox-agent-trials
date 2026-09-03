@@ -121,6 +121,19 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
 
 def build_population_sheet_xml(sheet_xml_path: str, population_rows: list[PopulationRow],
                                 sst: ox.SharedStrings, *, first_data_row: int = 6) -> None:
+    """Replace the Population tab's data rows.
+
+    An EMPTY list leaves the sheet untouched. It used to clear it, which
+    meant a caller that simply had no population to hand -- the common case
+    while the rest of the pipeline was being wired up -- silently shipped a
+    workpaper whose Population tab had been emptied out. Deleting the
+    population from an audit workpaper is worse than any formatting defect
+    on this sheet: it removes the basis for the sample. "I have nothing to
+    write here" must never mean "erase what is there".
+    """
+    if not population_rows:
+        return
+
     rows = []
     for i, prow in enumerate(population_rows):
         row_num = first_data_row + i

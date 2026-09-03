@@ -287,10 +287,20 @@ def test_a_conclusion_becomes_native_callouts_on_the_real_page(tmp_path: Path):
 
     # Every tickmark the bridge asked for was actually located on the page.
     assert result.unplaced_callouts == []
-    # Native shapes, not pictures: two callouts plus the narrative textbox.
-    assert len(re.findall(r"<xdr:sp[ >]", result.xml)) == 3
+    # Native shapes, not pictures. Each callout is TWO shapes -- an empty
+    # red outline over the value and a separate letter beside it -- because
+    # that is how the prior-year workpapers do it. A letter printed inside
+    # the box covers the value the box is highlighting, which was the first
+    # thing flagged on a real review.
+    assert len(re.findall(r'name="Rectangle [^"]+"', result.xml)) == 2
+    assert len(re.findall(r'name="Tickmark [^"]+"', result.xml)) == 2
+    assert len(re.findall(r"<xdr:sp[ >]", result.xml)) == 5  # + the narrative box
     assert len(re.findall(r"<xdr:pic[ >]", result.xml)) == 1
     assert sorted(set(re.findall(r"<a:t>([A-Z])</a:t>", result.xml))) == ["A", "B"]
+
+    # The letter must not sit inside the outline it labels.
+    for box in re.findall(r'<xdr:sp[^>]*>(?:(?!</xdr:sp>).)*name="Rectangle[^"]*"(?:(?!</xdr:sp>).)*</xdr:sp>', result.xml, re.S):
+        assert not re.search(r"<a:t>[A-Z]</a:t>", box)
 
     # The two boxes landed in DIFFERENT places -- a bridge that anchored both
     # attributes on the same token would place them identically and look
@@ -494,3 +504,31 @@ def test_sheets_are_resolved_by_name_not_by_position(tmp_path: Path):
     sheets = ox.resolve_sheets(work)
     assert set(sheets) == {"First", "Sample", "Population"}
     assert sheets["Sample"] != sheets["Population"]
+
+
+def test_an_empty_population_never_wipes_the_template(tmp_path: Path):
+    # Deleting the population from an audit workpaper removes the basis for
+    # the sample -- worse than any formatting defect on that sheet. A caller
+    # with nothing to write must not mean "erase what is there", and a real
+    # output shipped with the Population tab emptied because it did.
+    import openpyxl
+
+    from agent.ooxml import ooxml_utils as ox
+    from agent.ooxml.build_workpaper import build_population_sheet_xml
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Population"
+    for r in range(6, 12):
+        ws.cell(r, 1, f"existing row {r}")
+    src = tmp_path / "pop.xlsx"
+    wb.save(src)
+
+    work = str(tmp_path / "wd")
+    ox.extract_template(str(src), work)
+    sheet = f"{work}/xl/worksheets/sheet1.xml"
+    before = open(sheet, encoding="utf-8").read()
+
+    build_population_sheet_xml(sheet, [], ox.SharedStrings(work))
+
+    assert open(sheet, encoding="utf-8").read() == before

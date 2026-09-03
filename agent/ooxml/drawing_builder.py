@@ -122,6 +122,88 @@ def _rect_label_xml(shape_id: int, name: str, x: int, y: int, cx: int, cy: int,
 </xdr:absoluteAnchor>'''
 
 
+# Width/height reserved for the letter label sitting beside a callout box.
+# ~0.25in: big enough for a bold single character at 10pt without the shape
+# clipping it, small enough not to cover the value next door.
+_LABEL_EMU = 228_600
+_LABEL_GAP = 45_720  # 0.05in of air between the box and its letter
+
+
+def _rect_outline_xml(shape_id: int, name: str, x: int, y: int, cx: int, cy: int) -> str:
+    """The red box over a value. No text inside -- see _letter_label_xml."""
+    return f'''<xdr:absoluteAnchor>
+<xdr:pos x="{x}" y="{y}"/>
+<xdr:ext cx="{cx}" cy="{cy}"/>
+<xdr:sp macro="" textlink="">
+<xdr:nvSpPr>
+<xdr:cNvPr id="{shape_id}" name="{name}"/>
+<xdr:cNvSpPr/>
+</xdr:nvSpPr>
+<xdr:spPr>
+<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:noFill/>
+<a:ln w="19050" cmpd="sng"><a:solidFill><a:srgbClr val="{RED}"/></a:solidFill></a:ln>
+</xdr:spPr>
+<xdr:style>
+<a:lnRef idx="0"><a:scrgbClr r="0" g="0" b="0"/></a:lnRef>
+<a:fillRef idx="0"><a:scrgbClr r="0" g="0" b="0"/></a:fillRef>
+<a:effectRef idx="0"><a:scrgbClr r="0" g="0" b="0"/></a:effectRef>
+<a:fontRef idx="minor"><a:schemeClr val="dk1"/></a:fontRef>
+</xdr:style>
+<xdr:txBody><a:bodyPr wrap="none"/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></xdr:txBody>
+</xdr:sp>
+<xdr:clientData/>
+</xdr:absoluteAnchor>'''
+
+
+def _letter_label_xml(shape_id: int, name: str, box_x: int, box_y: int, box_cy: int,
+                       label: str, sz: int = 1000) -> str:
+    """The tickmark letter, as its own borderless shape BESIDE the box.
+
+    The prior-year workpapers do it this way -- 14 lettered shapes and 14
+    empty outlines in the real template, two shapes per callout -- and the
+    package this builder came from deliberately collapsed them into one,
+    calling it "visually equivalent, half the shape count". It is not
+    equivalent: a letter printed inside the box sits on top of the value
+    the box is meant to be highlighting, which is exactly the thing a
+    reviewer is trying to read. It was the first thing flagged on a real
+    review of the output.
+
+    Placed to the LEFT of the box, falling back to the right when the box
+    is hard against the left edge of the sheet and there is no room.
+    """
+    x = box_x - _LABEL_EMU - _LABEL_GAP
+    if x < 0:
+        x = box_x + _LABEL_GAP
+    y = box_y + max(0, (box_cy - _LABEL_EMU) // 2)
+    return f'''<xdr:absoluteAnchor>
+<xdr:pos x="{x}" y="{y}"/>
+<xdr:ext cx="{_LABEL_EMU}" cy="{_LABEL_EMU}"/>
+<xdr:sp macro="" textlink="">
+<xdr:nvSpPr>
+<xdr:cNvPr id="{shape_id}" name="{name}"/>
+<xdr:cNvSpPr txBox="1"/>
+</xdr:nvSpPr>
+<xdr:spPr>
+<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{_LABEL_EMU}" cy="{_LABEL_EMU}"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:noFill/>
+<a:ln><a:noFill/></a:ln>
+</xdr:spPr>
+<xdr:txBody>
+<a:bodyPr wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="ctr" anchorCtr="1"><a:noAutofit/></a:bodyPr>
+<a:lstStyle/>
+<a:p><a:pPr algn="ctr"/><a:r>
+<a:rPr lang="en-US" sz="{sz}" b="1"><a:solidFill><a:srgbClr val="{RED}"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr>
+<a:t>{label}</a:t>
+</a:r></a:p>
+</xdr:txBody>
+</xdr:sp>
+<xdr:clientData/>
+</xdr:absoluteAnchor>'''
+
+
 def _narrative_xml(shape_id: int, name: str, x: int, y: int, cx: int, cy: int,
                     paragraphs: list[NarrativeParagraph], font_sz: int = 1000) -> str:
     body = ""
@@ -213,9 +295,13 @@ def build_sample_drawing(
                 raw_data_column_layout, col_start, col_end, row_num,
                 row_height_px=narrative_row_height_px,
             )
-            shapes.append(_rect_label_xml(
-                shape_id, f"Rectangle raw_{sample_index}_{tie_out.letter}",
-                x, y, cx, cy, tie_out.letter,
+            shapes.append(_rect_outline_xml(
+                shape_id, f"Rectangle raw_{sample_index}_{tie_out.letter}", x, y, cx, cy,
+            ))
+            shape_id += 1
+            shapes.append(_letter_label_xml(
+                shape_id, f"Tickmark raw_{sample_index}_{tie_out.letter}",
+                x, y, cy, tie_out.letter,
             ))
             shape_id += 1
 
@@ -295,10 +381,13 @@ def build_sample_drawing(
                     by = image_y + int(py * scale)
                     bw = int(pw * scale)
                     bh = int(ph * scale)
-                    shapes.append(_rect_label_xml(
-                        shape_id,
-                        f"Rectangle {img_spec.name}_{tie_out.letter}",
-                        bx, by, bw, bh, tie_out.letter,
+                    shapes.append(_rect_outline_xml(
+                        shape_id, f"Rectangle {img_spec.name}_{tie_out.letter}", bx, by, bw, bh,
+                    ))
+                    shape_id += 1
+                    shapes.append(_letter_label_xml(
+                        shape_id, f"Tickmark {img_spec.name}_{tie_out.letter}",
+                        bx, by, bh, tie_out.letter,
                     ))
                     shape_id += 1
 

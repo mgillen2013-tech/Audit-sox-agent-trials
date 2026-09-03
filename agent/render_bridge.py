@@ -56,6 +56,22 @@ _LONG_NUM_RE = re.compile(r"\b\d{4,}\b")
 _ALNUM_ID_RE = re.compile(r"\b(?=[A-Za-z]*\d)[A-Za-z0-9\-]{5,}\b")
 _DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+# A capitalised word long enough to be a surname. On an approval document
+# the value a tickmark points at is a PERSON, not a number -- "approved by
+# Greg Miraglia" has no amount, no identifier and only a date, and the date
+# is the one thing an email reformats. Without this an approval attribute
+# is unanchorable and silently loses its box.
+_NAME_RE = re.compile(r"\b[A-Z][a-z]{4,}\b")
+# Words that look like names by shape and are not. Deliberately short and
+# domain-specific rather than a general stopword list: the cost of a miss
+# is one unplaced tickmark that gets reported, not a wrong box.
+_NOT_NAMES = frozenset({
+    "Invoice", "Payment", "Approved", "Approval", "Amount", "Vendor", "Payee",
+    "Number", "Total", "Check", "Batch", "Director", "Manager", "Branch",
+    "Sample", "Company", "Companies", "Extended", "Contract", "Administration",
+    "Verified", "Agrees", "Independent", "Designee", "Authority", "Preparer",
+    "Requestor", "Document", "Dated", "Prior", "Voucher", "Ledger", "Entry",
+})
 
 _MIN_ANCHOR_LEN = 4
 
@@ -95,6 +111,7 @@ def anchor_candidates(text: str) -> list[str]:
     # is often exactly right, but never preferred over a stable identifier.
     amounts: list[str] = []
     identifiers: list[str] = []
+    names: list[str] = []
     dates: list[str] = []
 
     def add(raw: str, bucket: list[str]) -> None:
@@ -119,11 +136,17 @@ def anchor_candidates(text: str) -> list[str]:
     for pattern in (_LONG_NUM_RE, _ALNUM_ID_RE):
         for m in pattern.findall(remainder):
             add(m, identifiers)
+    for m in _NAME_RE.findall(remainder):
+        if m not in _NOT_NAMES:
+            add(m, names)
 
     # Within a bucket, longest first -- a longer token identifies one place
     # on the page more often than a short one.
     by_length = lambda xs: sorted(xs, key=len, reverse=True)  # noqa: E731
-    return by_length(amounts) + by_length(identifiers) + by_length(dates)
+    # Names rank above dates: a person is written the same way on every
+    # document that mentions them, where a date is reformatted by every
+    # system that touches it.
+    return by_length(amounts) + by_length(identifiers) + by_length(names) + by_length(dates)
 
 
 def _normalise_value(value: object) -> str:
@@ -490,9 +513,17 @@ def summary_rows(
     from agent.ooxml.summary_sheet import SummaryRow
 
     rows: list[SummaryRow] = []
-    worst_ipe = "not_applicable"
+    # Seeded EMPTY, not with a status. Seeding it with "not_applicable"
+    # meant a step that actually validated its IPE could never replace the
+    # seed -- validated ranks BETTER, so the "keep the worst" comparison
+    # rejected it -- and the summary reported N/A for a control whose IPE
+    # had been tested. Found from a reviewer's note reading "didn't try to
+    # verify" against a run where it had.
+    worst_ipe: str | None = None
 
     for step_label, conclusion in conclusions:
+        citations_by_id = {c.evidence_id: c for c in conclusion.evidence_citations}
+
         # Attribute NAMES only in the middle column: the reviewer is asking
         # "what did you test", not "what did it say".
         attributes = [
@@ -501,14 +532,32 @@ def summary_rows(
             if a.sample_id is not None
         ] or ["(no attributes recorded)"]
 
-        # Observed VALUES in the next one, one line each, prefixed with the
+        # Observed VALUES, one line per attribute, prefixed with the
         # tickmark letter so the cell and the red box on the exhibit are
         # obviously the same thing.
+        #
+        # DENSITY, not brevity. An earlier version cut these to the bare
+        # value ("A - Invoice 35713082") on the theory that shorter is
+        # better, and the review of that output read "too little
+        # information" -- correctly. The reference workpaper's equivalent
+        # column is a full clause per attribute: the values, where each came
+        # from, and what they agree TO. That is what makes it evidence a
+        # reviewer can sign rather than a label. The thing to strip is the
+        # multi-paragraph narrative, not the facts.
         evidenced = []
         for i, a in enumerate(a for a in conclusion.attribute_results if a.sample_id is not None):
             letter = _LETTERS[i] if i < len(_LETTERS) else "-"
-            mark = "" if a.result == "satisfied" else f" [{a.result.replace('_', ' ')}]"
-            evidenced.append(_terse(f"{letter} - {a.value_observed}{mark}"))
+            sources = sorted({
+                citations_by_id[e].source_file
+                for e in a.evidence_ids
+                if e in citations_by_id
+            })
+            where = f" per {', '.join(Path(x).stem for x in sources)}" if sources else ""
+            verdict = (
+                " - agrees" if a.result == "satisfied"
+                else f" - {a.result.replace('_', ' ').upper()}"
+            )
+            evidenced.append(_terse(f"{letter} - {a.value_observed}{where}{verdict}", 240))
         if not evidenced:
             evidenced = ["(no evidence recorded)"]
 
@@ -534,15 +583,16 @@ def summary_rows(
             )
         )
 
-        order = {"not_validated": 2, "not_applicable": 1, "validated": 0}
-        if order.get(conclusion.ipe_completeness_accuracy_status, 0) > order.get(worst_ipe, 0):
-            worst_ipe = conclusion.ipe_completeness_accuracy_status
+        order = {"validated": 0, "not_applicable": 1, "not_validated": 2}
+        status = conclusion.ipe_completeness_accuracy_status
+        if worst_ipe is None or order.get(status, 2) > order.get(worst_ipe, 2):
+            worst_ipe = status
 
     ipe_result = {
         "validated": "Satisfied",
         "not_validated": "Exception (not validated)",
         "not_applicable": "N/A",
-    }.get(worst_ipe, worst_ipe)
+    }.get(worst_ipe or "not_applicable", worst_ipe)
     ipe_evidenced = {
         "validated": "Completeness and accuracy of the population extract obtained and tested.",
         "not_validated": (
@@ -550,7 +600,7 @@ def summary_rows(
             "and accuracy support."
         ),
         "not_applicable": "No IPE relied upon for this control.",
-    }.get(worst_ipe, worst_ipe)
+    }.get(worst_ipe or "not_applicable", worst_ipe)
 
     from agent.ooxml.summary_sheet import SummaryRow as _SR
 
