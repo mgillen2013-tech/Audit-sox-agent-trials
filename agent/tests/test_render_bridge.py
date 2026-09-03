@@ -298,3 +298,83 @@ def test_a_conclusion_becomes_native_callouts_on_the_real_page(tmp_path: Path):
     positions = re.findall(r'<xdr:pos x="(\d+)" y="(\d+)"/>', result.xml)
     callout_positions = set(positions[1:3])
     assert len(callout_positions) == 2
+
+
+# --------------------------------------------------------------------------
+# The summary tab. Its whole job is to be SHORT -- a summary a reviewer has
+# to read is not a summary -- so most of these assert on what it leaves out.
+# --------------------------------------------------------------------------
+
+
+def test_summary_never_carries_the_narrative():
+    # The narrative is multi-paragraph by design and belongs in the working
+    # papers underneath. Pasting it into a summary cell is exactly the "too
+    # much information" failure this tab exists to fix.
+    from agent.render_bridge import summary_rows
+
+    conclusion = _conclusion(
+        narrative=(
+            "IA performed a detailed inspection of the supporting documentation and "
+            "noted that the invoice was routed for approval on the 26th, approved on "
+            "the 1st, batched on the 7th and settled on the 10th, all of which is "
+            "consistent with the control description and the prior year approach."
+        )
+    )
+    rows = summary_rows([("1. Verify approval.", conclusion)])
+    cells = " ".join(rows[0].attributes + rows[0].evidenced)
+    assert "detailed inspection" not in cells
+    assert all(len(c) <= 300 for c in rows[0].evidenced)
+
+
+def test_ipe_always_gets_its_own_row():
+    # A control can have every test step satisfied and still fail on IPE.
+    # Folded into a step it is invisible to a reviewer scanning for it.
+    from agent.render_bridge import summary_rows
+
+    rows = summary_rows([("1. Verify approval.", _conclusion())])
+    assert len(rows) == 2
+    assert rows[-1].test_step.startswith("IPE")
+
+
+def test_unvalidated_ipe_reads_as_an_exception_not_a_pass():
+    from agent.render_bridge import summary_rows
+
+    rows = summary_rows(
+        [("1.", _conclusion(ipe_completeness_accuracy_status="not_validated"))]
+    )
+    assert rows[-1].verdict_colour == "red"
+    assert "not validated" in rows[-1].result.lower()
+
+
+def test_an_exception_names_which_sample_failed():
+    # "Not satisfied" alone sends a reviewer hunting through every sample
+    # sheet to find which one.
+    from agent.render_bridge import summary_rows
+
+    conclusion = _conclusion(
+        conclusion="not_satisfied",
+        sample_results=[
+            {"sample_id": "1", "conclusion": "satisfied"},
+            {"sample_id": "2", "conclusion": "not_satisfied"},
+        ],
+    )
+    rows = summary_rows([("1.", conclusion)])
+    assert "2" in rows[0].result
+    assert rows[0].verdict_colour == "red"
+
+
+def test_an_unrecognised_verdict_is_never_shown_as_a_pass():
+    # Green on something we did not understand is the one failure mode that
+    # actively misleads. Anything unknown must read as needing attention.
+    from agent.ooxml.summary_sheet import SummaryRow
+
+    assert SummaryRow(test_step="x", result="qualified, see memo").verdict_colour == "amber"
+    assert SummaryRow(test_step="x", result="").verdict_colour == "amber"
+    assert SummaryRow(test_step="x", result="Satisfied").verdict_colour == "green"
+
+
+def test_every_summary_row_links_somewhere(tmp_path: Path):
+    from agent.render_bridge import summary_rows
+
+    for row in summary_rows([("1.", _conclusion())]):
+        assert row.link_to and "!" in row.link_to

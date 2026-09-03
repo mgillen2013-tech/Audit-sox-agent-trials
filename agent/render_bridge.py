@@ -394,3 +394,119 @@ def build_workpaper_request(
         ),
         warnings,
     )
+
+
+# --------------------------------------------------------------------------
+# The summary tab
+# --------------------------------------------------------------------------
+
+# Hard ceiling on one summary cell. The agent's own prose is not the
+# problem to solve here -- it is genuinely thorough, and the working papers
+# below want that. But a summary a reviewer has to READ is not a summary,
+# and the observed failure mode was a summary cell carrying a full
+# paragraph plus a verbatim quote, which is where "too much information"
+# actually comes from. Truncation is the backstop; the real lever is that
+# these rows are built from the SHORTEST fields the agent emits and never
+# from `narrative`.
+_MAX_SUMMARY_CELL_CHARS = 300
+
+
+def _terse(text: str, limit: int = 160) -> str:
+    """One line, no paragraph breaks, cut at a word boundary."""
+    flat = " ".join(str(text).split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: flat.rfind(" ", 0, limit)].rstrip(",;:") + "..."
+
+
+def summary_rows(
+    conclusions: "list[tuple[str, ConclusionOutput]]",
+    *,
+    sample_sheet: str = "Sample",
+) -> list:
+    """One row per test step, plus one for IPE.
+
+    IPE gets its OWN row rather than a sentence inside a test step. It is a
+    separate assertion -- whether the population the sample was drawn from
+    is complete and accurate -- and folding it into a step makes it
+    invisible to a reviewer scanning for exactly that. A control can have
+    every step satisfied and still fail here.
+    """
+    from agent.ooxml.summary_sheet import SummaryRow
+
+    rows: list[SummaryRow] = []
+    worst_ipe = "not_applicable"
+
+    for step_label, conclusion in conclusions:
+        # Attribute NAMES only in the middle column: the reviewer is asking
+        # "what did you test", not "what did it say".
+        attributes = [
+            _terse(a.attribute, 60)
+            for a in conclusion.attribute_results
+            if a.sample_id is not None
+        ] or ["(no attributes recorded)"]
+
+        # Observed VALUES in the next one, one line each, prefixed with the
+        # tickmark letter so the cell and the red box on the exhibit are
+        # obviously the same thing.
+        evidenced = []
+        for i, a in enumerate(a for a in conclusion.attribute_results if a.sample_id is not None):
+            letter = _LETTERS[i] if i < len(_LETTERS) else "-"
+            mark = "" if a.result == "satisfied" else f" [{a.result.replace('_', ' ')}]"
+            evidenced.append(_terse(f"{letter} - {a.value_observed}{mark}"))
+        if not evidenced:
+            evidenced = ["(no evidence recorded)"]
+
+        failed = [r.sample_id for r in conclusion.sample_results if r.conclusion != "satisfied"]
+        if conclusion.conclusion == "satisfied":
+            result = "Satisfied"
+        elif failed:
+            # Name the item. "Not satisfied" alone sends a reviewer hunting
+            # through every sample sheet to find which one.
+            result = f"Exception ({', '.join(failed)})"
+        else:
+            result = conclusion.conclusion.replace("_", " ").capitalize()
+
+        letters = _LETTERS[: len(evidenced)]
+        rows.append(
+            SummaryRow(
+                test_step=_terse(step_label, 200),
+                attributes=attributes,
+                evidenced=[e[:_MAX_SUMMARY_CELL_CHARS] for e in evidenced],
+                result=result,
+                evidence_label=f"{sample_sheet} {letters[0]}-{letters[-1]}" if letters else "-",
+                link_to=f"{sample_sheet}!A1",
+            )
+        )
+
+        order = {"not_validated": 2, "not_applicable": 1, "validated": 0}
+        if order.get(conclusion.ipe_completeness_accuracy_status, 0) > order.get(worst_ipe, 0):
+            worst_ipe = conclusion.ipe_completeness_accuracy_status
+
+    ipe_result = {
+        "validated": "Satisfied",
+        "not_validated": "Exception (not validated)",
+        "not_applicable": "N/A",
+    }.get(worst_ipe, worst_ipe)
+    ipe_evidenced = {
+        "validated": "Completeness and accuracy of the population extract obtained and tested.",
+        "not_validated": (
+            "Reliance placed on a system-generated report WITHOUT completeness "
+            "and accuracy support."
+        ),
+        "not_applicable": "No IPE relied upon for this control.",
+    }.get(worst_ipe, worst_ipe)
+
+    from agent.ooxml.summary_sheet import SummaryRow as _SR
+
+    rows.append(
+        _SR(
+            test_step="IPE - completeness and accuracy of the population",
+            attributes=["Population extract is complete", "Population extract is accurate"],
+            evidenced=[ipe_evidenced],
+            result=ipe_result,
+            evidence_label="Parameters",
+            link_to="Parameters!A1",
+        )
+    )
+    return rows

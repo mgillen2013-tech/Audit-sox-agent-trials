@@ -169,7 +169,7 @@ def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingRe
 def build_workpaper(request: WorkpaperRequest,
                      *, sample_sheet_num: int = 2, population_sheet_num: int = 3,
                      parameters_sheet_num: int = 4,
-                     on_unplaced=None) -> str:
+                     on_unplaced=None, summary_rows=None) -> str:
     """Writes the workpaper and returns its path.
 
     on_unplaced, if given, is called once with the list of callouts whose
@@ -202,6 +202,15 @@ def build_workpaper(request: WorkpaperRequest,
     if request.parameters is not None:
         params_drawing = db.build_parameters_drawing(request.parameters)
         _write_drawing_and_media(work_dir, parameters_sheet_num, params_drawing)
+
+    if summary_rows:
+        # First tab: a reviewer opening the file cold needs the answer
+        # before the evidence. Added after the other sheets are written so
+        # it cannot disturb their sheetN numbering.
+        from agent.ooxml.summary_sheet import add_summary_sheet
+
+        add_summary_sheet(work_dir, summary_rows, sst)
+        sst.write()
 
     if on_unplaced is not None:
         on_unplaced(sample_drawing.unplaced_callouts)
