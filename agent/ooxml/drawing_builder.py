@@ -42,6 +42,13 @@ class DrawingResult:
     # list of (relationship_id, media_filename, PIL.Image) to write to xl/media
     # and reference from the matching drawingN.xml.rels
     media: list[tuple[str, str, Image.Image]] = field(default_factory=list)
+    # (image name, letter, anchor_text, reason) for every callout whose anchor
+    # could not be located on its image. See the try/except in
+    # build_sample_drawing: these are dropped from the drawing rather than
+    # killing the build, so they MUST be reported by whoever renders -- a
+    # tickmark that is silently absent is exactly the failure this project
+    # keeps designing against.
+    unplaced_callouts: list[tuple[str, str, str, str]] = field(default_factory=list)
 
     def rels_xml(self) -> str:
         rel_items = "".join(
@@ -188,6 +195,7 @@ def build_sample_drawing(
     Assumes sample N's raw data lives in sheet row (N+1) (row 1 = header).
     """
     shapes: list[str] = []
+    unplaced: list[tuple[str, str, str, str]] = []
     media: list[tuple[str, str, Image.Image]] = []
     shape_id = 2
     rid_counter = 1
@@ -251,11 +259,26 @@ def build_sample_drawing(
             if img_spec.tie_outs:
                 words = ocr_utils.ocr_words(im)
                 for tie_out in img_spec.tie_outs:
-                    px, py, pw, ph = ocr_utils.find_anchor_box(
-                        words, tie_out.anchor_text,
-                        occurrence=tie_out.occurrence,
-                        extra_words=tie_out.extra_words,
-                    )
+                    try:
+                        px, py, pw, ph = ocr_utils.find_anchor_box(
+                            words, tie_out.anchor_text,
+                            occurrence=tie_out.occurrence,
+                            extra_words=tie_out.extra_words,
+                        )
+                    except ValueError as exc:
+                        # Originally this propagated, reasoning that a missing
+                        # anchor should fail loudly rather than box the wrong
+                        # value. That is right for a human building one file by
+                        # hand, and wrong here: the anchor text is chosen by a
+                        # model from a value it read, OCR may render that value
+                        # slightly differently, and losing an entire workpaper
+                        # over one unlocatable box is far worse than losing the
+                        # box. So drop the callout, keep the image, and record
+                        # why -- unplaced, never unreported.
+                        unplaced.append(
+                            (img_spec.name, tie_out.letter, tie_out.anchor_text, str(exc))
+                        )
+                        continue
                     bx = image_x + int(px * scale)
                     by = image_y + int(py * scale)
                     bw = int(pw * scale)
@@ -274,7 +297,7 @@ def build_sample_drawing(
 
     xml = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
            f'<xdr:wsDr {NS_DECL}>' + "".join(shapes) + "</xdr:wsDr>")
-    return DrawingResult(xml=xml, media=media)
+    return DrawingResult(xml=xml, media=media, unplaced_callouts=unplaced)
 
 
 def build_parameters_drawing(params: ParametersTab) -> DrawingResult:
