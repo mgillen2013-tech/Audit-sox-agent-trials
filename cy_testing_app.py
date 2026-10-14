@@ -224,10 +224,7 @@ def _render_conclusion(conclusion: ConclusionOutput) -> None:
     if conclusion.sample_coverage:
         sc = conclusion.sample_coverage
         st.caption(f"Sample coverage: {sc.total_found}/{sc.total_required} ({sc.coverage_pct}%)")
-    st.caption(
-        f"IPE status: {conclusion.ipe_completeness_accuracy_status} · "
-        f"tool calls: {conclusion.model_metadata.tool_call_count}"
-    )
+    st.caption(f"Tool calls: {conclusion.model_metadata.tool_call_count}")
 
     with st.expander("Raw JSON"):
         st.json(conclusion.model_dump())
@@ -498,8 +495,20 @@ if run_clicked:
                 ledger=ledger,
             ):
                 progress.empty()
-                _render_result(test_step_id, result)
+                # Record the result BEFORE trying to display it, and never
+                # let a display failure escape. This loop sits between a
+                # finished agent run and the workpaper build, so an
+                # exception here throws away work that has already been
+                # paid for -- which is exactly what happened when a field
+                # removed from the schema was still referenced below.
                 all_results[test_step_id] = result
+                try:
+                    _render_result(test_step_id, result)
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(
+                        f"Couldn't display {test_step_id} ({exc}). The result is still "
+                        f"included in the workpaper below."
+                    )
 
             # Generate the CY workpaper (Excel) while the temp dir still
             # exists -- exhibits re-read the support files from it -- and

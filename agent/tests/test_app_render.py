@@ -101,3 +101,84 @@ def test_an_old_session_without_a_ledger_still_renders():
     at.session_state["run_output"] = {"results": {}, "wp_bytes": None, "wp_name": None}
     at.run()
     assert not at.exception
+
+
+def _real_conclusion():
+    """A conclusion shaped exactly like one a real run produces."""
+    from agent.schemas import ConclusionOutput, ModelMetadata, SampleCoverage
+
+    return ConclusionOutput(
+        test_step_id="TS-1",
+        control_objective_ref="CO-1",
+        conclusion="insufficient_evidence",
+        narrative="Sample 2 evidenced approval before payment; no approval support was provided for sample 1.",
+        evidence_citations=[
+            {
+                "evidence_id": "ev_0003",
+                "source_file": "invoice.pdf",
+                "location": "invoice.pdf p.1",
+                "quote_or_summary": "Lockton invoice 35713082 for $11,193.00",
+                "relevance": "the invoice",
+                "sample_id": "2",
+            }
+        ],
+        procedures_performed=["inspection"],
+        sample_results=[
+            {"sample_id": "1", "conclusion": "insufficient_evidence", "note": "no approval provided"},
+            {"sample_id": "2", "conclusion": "satisfied"},
+        ],
+        attribute_results=[
+            {
+                "attribute": "Approved before payment",
+                "sample_id": "2",
+                "result": "satisfied",
+                "value_observed": "Approved 02/09/2026, paid 02/11/2026",
+                "evidence_ids": ["ev_0003"],
+            }
+        ],
+        exceptions=[],
+        additional_support_requests=["Selection 1 approval and payment support"],
+        confidence="high",
+        confidence_rationale="Both packages reviewed.",
+        sample_coverage=SampleCoverage(
+            total_required=2, total_found=2, missing=[], coverage_pct=100.0, complete=True
+        ),
+        model_metadata=ModelMetadata(
+            model="claude-opus-5", prompt_version="v1", timestamp="2026-10-14T00:00:00Z", tool_call_count=8
+        ),
+    )
+
+
+def test_a_real_conclusion_renders_without_crashing():
+    # This is the test that was missing. The app tests only ever passed an
+    # EMPTY results dict, so _render_conclusion -- the function that
+    # actually touches a conclusion's fields -- was never executed by any
+    # test at all. A field removed from the schema therefore sailed through
+    # a green suite and crashed a real run AFTER the agent had finished,
+    # losing a paid run's workpaper.
+    at = _app()
+    at.session_state["run_output"] = {
+        "results": {"TS-1": {"conclusion": _real_conclusion(), "audit_log": []}},
+        "wp_bytes": None,
+        "wp_name": None,
+        "ledger": _populated_ledger(),
+    }
+    at.run()
+    assert not at.exception, at.exception
+
+
+def test_every_field_the_app_renders_still_exists_on_the_conclusion():
+    # Cheaper and blunter than the render test, and it names the field that
+    # went missing instead of pointing at a line number.
+    import re
+
+    from agent.schemas import ConclusionOutput
+
+    source = _APP.read_text()
+    referenced = set(re.findall(r"conclusion\.([a-z_]+)", source))
+    # Fields OR methods -- the app legitimately calls model_dump().
+    unknown = {
+        f for f in referenced
+        if f not in ConclusionOutput.model_fields and not hasattr(ConclusionOutput, f)
+    }
+    assert not unknown, f"cy_testing_app.py reads conclusion fields that no longer exist: {unknown}"
