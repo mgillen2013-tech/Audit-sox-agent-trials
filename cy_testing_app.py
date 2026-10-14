@@ -407,6 +407,45 @@ def _render_token_burn(ledger: TokenLedger) -> None:
     )
 
 
+# Plain-English next steps for the ways a test step commonly fails. Keyed by
+# the runner's "reason" code where it has one, and matched on the error
+# text otherwise (API errors carry no code of ours).
+_FAILURE_HINTS = {
+    "token_budget_exceeded": (
+        "it hit the per-step token cap before finishing. Raise "
+        "\"Max cost-weighted tokens per test step\" in the sidebar and re-run."
+    ),
+    "run_budget_exceeded": (
+        "the whole control hit its token cap. Raise \"Max cost-weighted tokens "
+        "for the whole control\" in the sidebar and re-run."
+    ),
+    "model_refusal": (
+        "the model declined to answer. Re-run; if it repeats, send the error text."
+    ),
+    "max_iterations": (
+        "it used every allowed turn without submitting a conclusion. Re-run; if "
+        "it repeats, the support may not contain what the step asks for."
+    ),
+}
+
+
+def _hint_for(error: str) -> str:
+    text = error.lower()
+    if "deploymentnotfound" in text or "404" in text:
+        return (
+            "the Model name in the sidebar isn't a deployment on your Foundry "
+            "resource. Use the deployment name exactly as Foundry shows it "
+            "(e.g. claude-opus-5)."
+        )
+    if "401" in text or "authentication" in text or "api key" in text:
+        return "the API key was rejected. Re-enter it in the sidebar."
+    if "429" in text or "rate limit" in text:
+        return "Foundry rate-limited the run. Wait a minute and re-run."
+    if "overloaded" in text or "529" in text or "timeout" in text or "timed out" in text:
+        return "the model service was busy or slow. Re-run."
+    return ""
+
+
 def _render_result(test_step_id: str, result: dict) -> None:
     """One test step's outcome -- success or preserved failure. Used both
     for live rendering during a run and for re-rendering from
@@ -565,6 +604,7 @@ if run_clicked:
             wp_bytes = wp_name = None
             wp_mirrored = False
             wp_fallback_reason = ""
+            wp_nothing_concluded = False
             wp_warnings: list[str] = []
             try:
                 outcome = build_cy_workpaper(
@@ -580,6 +620,7 @@ if run_clicked:
                 wp_bytes, wp_name = outcome.path.read_bytes(), outcome.path.name
                 wp_mirrored = outcome.mirrored_py
                 wp_fallback_reason = outcome.fallback_reason
+                wp_nothing_concluded = outcome.nothing_concluded
                 wp_warnings = list(outcome.warnings) + [
                     f"Tickmark {letter} on {name}: {anchor!r} could not be located on the page, "
                     f"so no box was drawn (the legend still lists it)."
@@ -595,6 +636,7 @@ if run_clicked:
             "ledger": ledger,
             "wp_mirrored": wp_mirrored,
             "wp_fallback_reason": wp_fallback_reason,
+            "wp_nothing_concluded": wp_nothing_concluded,
             "wp_warnings": wp_warnings,
         }
         st.success("Done.")
@@ -627,6 +669,24 @@ if _out:
                 "Built on the prior-year workpaper: same tabs and layout, with this "
                 "year's sample, evidence and tickmarks written in, plus a Summary tab "
                 "in front. Stamped DRAFT -- review and approve before it goes anywhere."
+            )
+        elif _out.get("wp_nothing_concluded"):
+            # Not a PY problem at all: every test step failed, so there was
+            # nothing to lay out in any format. Show the steps' own errors
+            # HERE, with what to do -- the first version of this notice
+            # blamed the PY file and sent the user to re-upload it.
+            _failures = "\n".join(
+                f"- **{_tsid}:** {_r.get('error', 'no conclusion returned')}"
+                + (f"\n  - What to do: {_FAILURE_HINTS[_r['reason']]}" if _r.get("reason") in _FAILURE_HINTS else "")
+                + (f"\n  - What to do: {_hint_for(_r.get('error', ''))}" if _r.get("reason") not in _FAILURE_HINTS and _hint_for(_r.get("error", "")) else "")
+                for _tsid, _r in _out["results"].items()
+                if "conclusion" not in _r
+            )
+            st.error(
+                "**The test step didn't finish, so there's no result to put in a workpaper.** "
+                "Your prior-year file wasn't the problem.\n\n"
+                f"{_failures}\n\n"
+                "The downloadable file below only records the failure."
             )
         else:
             # Red, on screen, with the reason -- not a caption. This file

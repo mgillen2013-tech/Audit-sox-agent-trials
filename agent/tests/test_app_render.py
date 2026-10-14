@@ -221,3 +221,32 @@ def test_a_mirrored_workpaper_shows_no_fallback_error():
     at.run()
     assert not at.exception, at.exception
     assert not any("NOT in last year's format" in e.value for e in at.error)
+
+
+def test_a_run_where_no_step_concluded_does_not_blame_the_py_file():
+    # A real run's only step failed, and the notice said the PY file could
+    # not be used and to re-upload it -- the wrong cause and the wrong fix.
+    at = _app()
+    at.session_state["run_output"] = {
+        "results": {
+            "TS-1": {
+                "error": "Error code: 404 - {'error': {'code': 'DeploymentNotFound'}}",
+                "audit_log": [], "turns_used": 0, "tokens_used": 0,
+            }
+        },
+        "wp_bytes": b"xlsx bytes",
+        "wp_name": "156_CY_Testing_DRAFT.xlsx",
+        "ledger": None,
+        "wp_mirrored": False,
+        "wp_nothing_concluded": True,
+        "wp_fallback_reason": "no test step reached a conclusion, so there was nothing to mirror",
+        "wp_warnings": [],
+    }
+    at.run()
+    assert not at.exception, at.exception
+    errors = " ".join(e.value for e in at.error)
+    assert "didn't finish" in errors
+    assert "DeploymentNotFound" in errors
+    assert "deployment name" in errors  # the plain-English fix
+    assert "re-run with the original prior-year workpaper" not in errors
+    assert "NOT in last year's format" not in errors

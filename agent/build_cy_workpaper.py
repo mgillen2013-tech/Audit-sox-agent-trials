@@ -65,6 +65,11 @@ class WorkpaperOutcome:
     # like last year's, and the first version reported that only in small
     # grey text -- a reviewer reasonably took it for a regression.
     fallback_reason: str = ""
+    # True when the fallback happened because NO test step concluded -- the
+    # PY file was never the problem. The first loud notice blamed the PY
+    # file for this case too and told the user to re-upload it, which sent
+    # them after the wrong thing; the step's own error is the real cause.
+    nothing_concluded: bool = False
 
     @property
     def summary_line(self) -> str:
@@ -213,8 +218,10 @@ def build_cy_workpaper(
     if not conclusions:
         # Nothing concluded: fall straight through to the legacy builder,
         # which knows how to render a control whose steps all failed.
-        return _legacy(spec, results, py_testing_filename, out_dir, support, population_workbook,
-                       ["no test step reached a conclusion, so there was nothing to mirror"])
+        outcome = _legacy(spec, results, py_testing_filename, out_dir, support, population_workbook,
+                          ["no test step reached a conclusion, so there was nothing to mirror"])
+        outcome.nothing_concluded = True
+        return outcome
 
     can, why, adopted = check_py_template(py_path, sample_sheet_name, population_sheet_name)
     if not can:
