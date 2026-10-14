@@ -320,7 +320,8 @@ def _raw_data_row(manifest: SamplePopulationManifest, sample_id: str) -> RawData
             _LETTERS[i]: _coerce(k, v)
             for i, (k, v) in enumerate(item.key_fields.items())
             if i < 26
-        }
+        },
+        headers={_LETTERS[i]: k for i, k in enumerate(item.key_fields) if i < 26},
     )
 
 

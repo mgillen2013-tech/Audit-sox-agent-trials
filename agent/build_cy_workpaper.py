@@ -308,6 +308,9 @@ def build_cy_workpaper(
         sample_sheet=sample_sheet_name,
         population_sheet=population_sheet_name,
         on_unplaced=unplaced.extend,
+        # How the PY tab was read (which row holds the headings, which
+        # columns were added). Tab notes already came from the pre-check.
+        on_notes=lambda notes: warnings.extend(n for n in notes if n not in warnings),
         summary_rows=summary_rows(
             list(zip(step_labels, [c for _s, c in conclusions])),
             reviews=reviews,

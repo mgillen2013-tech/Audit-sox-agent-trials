@@ -138,3 +138,21 @@ beside the upload box -- and again in red after it, with the reason. The
 standalone layout remains the fallback, because a run that reached real
 conclusions must always produce a workpaper; it must just never do so
 quietly.
+
+## And the sampled item's row
+
+The same rule, one level down. The builder assumed every PY sample tab has
+its headings on row 1 and the item on row 2, and wrote the item's values
+into columns A, B, C... in the order THIS year's listing had them. Real
+156 outputs had every value from column F onward one column left of its
+heading -- the payment amount under "Void Date" -- because the item's
+blank Void Date was dropped and everything after it slid over.
+
+`agent/ooxml/sample_grid.py` now reads both from the tab: the heading row
+is the row that best matches the listing's column names (titles and notes
+above it are kept), the item goes directly beneath, and each value goes
+under the heading with its name. A listing column the PY has no heading
+for takes the unused PY column between its neighbours if there is one,
+else is added after the last column with its own heading. If no heading
+matches at all, the listing's names are written as the headings rather
+than leaving values under someone else's labels.

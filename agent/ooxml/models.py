@@ -29,6 +29,12 @@ class RawDataRow(BaseModel):
                     "datetime.date/datetime, numbers as int/float, text as str, "
                     "blank as None."
     )
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Column letter -> the sample listing's column NAME for it. "
+                    "Lets the builder put each value under the PY heading of the "
+                    "same name instead of trusting the listing's column order.",
+    )
 
 
 class PopulationRow(BaseModel):

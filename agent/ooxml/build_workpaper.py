@@ -160,7 +160,7 @@ def _split_ref(ref: str) -> tuple[str, int]:
 
 def _resolve_styles(
     work_dir: str, sample_sheet_path: str, population_sheet_path: str | None,
-    shared: list, *, population_first_row: int = 6,
+    shared: list, *, population_first_row: int = 6, sample_data_row: int = 2,
 ) -> CellStyles:
     """Formats for every cell this builder writes, copied from the template
     wherever the template has the equivalent cell. Must run BEFORE any rows
@@ -171,7 +171,7 @@ def _resolve_styles(
     sample = _template_cells(sample_sheet_path, shared)
     for ref, (style, _text, _f) in sample.items():
         col, row = _split_ref(ref)
-        if row == 2 and style is not None:
+        if row == sample_data_row and style is not None:
             styles.sample_columns[col] = style
 
     population = _template_cells(population_sheet_path, shared) if population_sheet_path else {}
@@ -342,19 +342,27 @@ def find_template_tabs(work_dir: str, sample_sheet: str | None = None) -> Templa
 
 
 def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
-                            sst: ox.SharedStrings, styles: CellStyles | None = None) -> None:
+                            sst: ox.SharedStrings, styles: CellStyles | None = None,
+                            *, data_row: int = 2,
+                            column_for: dict[str, str] | None = None) -> None:
     """Overwrite the Sample sheet's data rows (raw data rows + IA Calculation
-    block(s)) in place. Leaves row 1 (headers) and the <drawing> reference
-    untouched."""
+    block(s)) in place, from `data_row` down. Everything above it -- the
+    headings, and any title or note above them -- and the <drawing>
+    reference are untouched.
+
+    column_for maps each value's listing column to the template column
+    whose heading has the same name (see sample_grid.plan_grid).
+    """
     st = styles or CellStyles()
     rows: list[str] = []
+    remap = column_for or {}
 
-    # --- raw data rows, one per sample, starting at row 2 ---
+    # --- raw data rows, one per sample, starting at data_row ---
     for i, sample in enumerate(sample_items):
-        row_num = i + 2
+        row_num = data_row + i
         cells = []
         for col_letter, value in sorted(
-            sample.raw_data.values.items(),
+            ((remap.get(k, k), v) for k, v in sample.raw_data.values.items()),
             key=lambda kv: ox.col_letter_to_index(kv[0]),
         ):
             style = (
@@ -366,7 +374,7 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
                                       style=style, sst=sst))
         rows.append(ox.row_xml(row_num, cells))
 
-    next_row = len(sample_items) + 2
+    next_row = data_row + len(sample_items)
 
     # --- IA Calculation block(s) ---
     for sample in sample_items:
@@ -411,7 +419,7 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
     new_dimension = f'<dimension ref="A1:T{max(next_row, 25)}"/>'
     ox.replace_sheet_rows(
         sheet_xml_path,
-        start_marker='<row r="2"', end_marker="</sheetData>",
+        start_marker=f'<row r="{data_row}"', end_marker="</sheetData>",
         new_rows_xml="".join(rows),
         new_dimension=new_dimension, old_dimension=None,
     )
@@ -593,7 +601,7 @@ def build_workpaper(request: WorkpaperRequest,
                      *, sample_sheet: str | None = None, population_sheet: str | None = None,
                      parameters_sheet: str = "Parameters",
                      on_unplaced=None, summary_rows=None,
-                     draft_banner: str | None = DRAFT_BANNER) -> str:
+                     draft_banner: str | None = DRAFT_BANNER, on_notes=None) -> str:
     """Writes the workpaper and returns its path.
 
     on_unplaced, if given, is called once with the list of callouts whose
@@ -648,7 +656,28 @@ def build_workpaper(request: WorkpaperRequest,
         if population_sheet_num else None
     )
 
-    styles = _resolve_styles(work_dir, sample_sheet_path, pop_sheet_path, sst.strings)
+    # Where the item's row goes and under which headings: read from the
+    # PY tab, never assumed (see sample_grid.py).
+    from agent.ooxml.sample_grid import plan_grid, write_headings
+
+    template_cells = _template_cells(sample_sheet_path, sst.strings)
+    listing_headers = next(
+        (it.raw_data.headers for it in request.sample_items if it.raw_data.headers), {}
+    )
+    grid = plan_grid(template_cells, listing_headers) if listing_headers else None
+    data_row = grid.data_row if grid else 2
+    if grid and on_notes is not None:
+        on_notes(list(tabs.notes) + grid.notes)
+    elif on_notes is not None:
+        on_notes(list(tabs.notes))
+    heading_style = next(
+        (st_ for ref, (st_, text, _f) in template_cells.items()
+         if grid and _split_ref(ref)[1] == grid.header_row and str(text).strip() and st_ is not None),
+        None,
+    )
+
+    styles = _resolve_styles(work_dir, sample_sheet_path, pop_sheet_path, sst.strings,
+                             sample_data_row=data_row)
     if pop_sheet_path:
         build_population_sheet_xml(pop_sheet_path, request.population_rows, sst, styles=styles)
 
@@ -662,7 +691,6 @@ def build_workpaper(request: WorkpaperRequest,
     # A single sample keeps the tab named exactly as the template had it, so
     # the common case is indistinguishable from last year's file.
     unplaced: list[tuple[str, str, str, str]] = []
-    sheets_for_sample: dict[str, str] = {}
     column_layout = ox.parse_column_widths(sample_sheet_path)
     # Where the PY put its narrative and exhibits -- read now, before the
     # tab's drawing is replaced. See agent/ooxml/layout.py.
@@ -670,21 +698,46 @@ def build_workpaper(request: WorkpaperRequest,
 
     template_layout = read_template_layout(work_dir, sample_sheet_path, column_layout)
 
-    previous_label = sample_sheet
-    for i, item in enumerate(request.sample_items):
-        label = sample_tab_name(sample_sheet, item.sample_id, i, len(request.sample_items))
-        if i == 0:
-            num, path = sample_sheet_num, sample_sheet_path
-            if label != sample_sheet:
-                ox.rename_sheet(work_dir, num, label)
-        else:
-            num = ox.clone_sheet(work_dir, sample_sheet_num, label, after=previous_label)
-            path = os.path.join(work_dir, "xl", "worksheets", f"sheet{num}.xml")
-        sheets_for_sample[label] = label
-        previous_label = label
+    # The data row's real position and height, so the red boxes over its
+    # cells land on it whatever rows sit above.
+    from agent.ooxml.layout import _row_heights
 
-        build_sample_sheet_xml(path, [item], sst, styles)
-        drawing = db.build_sample_drawing([item], column_layout, layout=template_layout)
+    with open(sample_sheet_path, encoding="utf-8") as fh:
+        default_h, custom_h = _row_heights(fh.read())
+    data_row_box = (
+        sum(custom_h.get(r, default_h) for r in range(data_row - 1)),
+        custom_h.get(data_row - 1, default_h),
+    )
+
+    # Every tab is cloned from the PRISTINE PY tab, before any of them is
+    # filled in -- otherwise sample 2 inherits headings added for sample 1.
+    targets: list[tuple[SampleItem, int, str]] = []
+    previous_label = sample_sheet
+    labels = [sample_tab_name(sample_sheet, it.sample_id, i, len(request.sample_items))
+              for i, it in enumerate(request.sample_items)]
+    for i, label in enumerate(labels[1:], start=1):
+        num = ox.clone_sheet(work_dir, sample_sheet_num, label, after=previous_label)
+        targets.append((request.sample_items[i], num, os.path.join(work_dir, "xl", "worksheets", f"sheet{num}.xml")))
+        previous_label = label
+    if request.sample_items:
+        if labels[0] != sample_sheet:
+            ox.rename_sheet(work_dir, sample_sheet_num, labels[0])
+        targets.insert(0, (request.sample_items[0], sample_sheet_num, sample_sheet_path))
+
+    for item, num, path in targets:
+        item_grid = plan_grid(template_cells, item.raw_data.headers) if item.raw_data.headers else grid
+        column_for = item_grid.column_for if item_grid else {}
+        if item_grid:
+            write_headings(path, item_grid.header_row, item_grid.headings_to_write, sst, heading_style)
+        build_sample_sheet_xml(path, [item], sst, styles, data_row=data_row, column_for=column_for)
+        drawn = item.model_copy(update={
+            "raw_data_tie_outs": [
+                t.model_copy(update={"columns": [column_for.get(c, c) for c in t.columns]})
+                for t in item.raw_data_tie_outs
+            ]
+        })
+        drawing = db.build_sample_drawing([drawn], column_layout, layout=template_layout,
+                                          data_row_box=data_row_box)
         _write_drawing_and_media(work_dir, num, drawing)
         unplaced.extend(drawing.unplaced_callouts)
 

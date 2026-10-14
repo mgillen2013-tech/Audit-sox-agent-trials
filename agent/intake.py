@@ -209,6 +209,14 @@ def read_excel_rows(path: str | Path, sheet_name: str | None = None) -> list[dic
         str(cell.value).strip() if cell.value is not None else f"column_{idx + 1}"
         for idx, cell in enumerate(header_row)
     ]
+    # Two columns with the same heading (E1 extracts do this: "Payee Number"
+    # for both the number and the name) used to collapse into one dict key,
+    # silently dropping the first column's value. Later ones get " (2)", " (3)".
+    seen: dict[str, int] = {}
+    for i, h in enumerate(headers):
+        seen[h] = seen.get(h, 0) + 1
+        if seen[h] > 1:
+            headers[i] = f"{h} ({seen[h]})"
 
     rows: list[dict[str, Any]] = []
     for row in all_rows[1:]:

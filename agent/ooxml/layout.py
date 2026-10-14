@@ -259,6 +259,7 @@ def plan_sample_layout(
     *,
     narrative_height_for_width,
     default_narrative_width: int,
+    top: int = GRID_TOP,
 ) -> tuple[Slot, list[Slot]]:
     """(narrative box, one box per image) in sheet EMU.
 
@@ -266,6 +267,9 @@ def plan_sample_layout(
     matters. narrative_height_for_width(cx) returns the height the text
     needs at that width -- text in a box narrower than the PY's must be
     allowed to grow rather than be clipped.
+
+    top is where the fallback layout starts: just below the sampled item's
+    row, wherever the PY tab puts that row.
     """
     if layout.usable:
         slots = list(layout.images)
@@ -281,20 +285,20 @@ def plan_sample_layout(
             top_band = [s for s in slots if s.y - slots[0].y <= EMU_PER_INCH]
             free = min(s.x for s in top_band) - GAP
             width = min(default_narrative_width, free) if free >= 3 * EMU_PER_INCH else default_narrative_width
-            narrative = Slot(0, min(GRID_TOP, slots[0].y), width, narrative_height_for_width(width))
+            narrative = Slot(0, min(top, slots[0].y), width, narrative_height_for_width(width))
         cell_w = _median([s.cx for s in slots])
         cell_h = _median([s.cy for s in slots])
         across = max(2, _widest_band(slots))
     else:
         slots = []
-        narrative = Slot(0, GRID_TOP, default_narrative_width,
+        narrative = Slot(0, top, default_narrative_width,
                          narrative_height_for_width(default_narrative_width))
         cell_w, cell_h, across = GRID_CELL_W, GRID_CELL_H, GRID_COLUMNS
         # The first row shares the top band with the narrative: exhibits
         # start to its right, exactly where the PY layouts put them.
         first_x = narrative.right + GAP
         for k in range(across - 1):
-            slots.append(Slot(first_x + k * (cell_w + GAP), GRID_TOP, cell_w, cell_h))
+            slots.append(Slot(first_x + k * (cell_w + GAP), top, cell_w, cell_h))
 
     placed: list[Slot] = []
     overflow = 0
@@ -312,7 +316,7 @@ def plan_sample_layout(
             x = col * (cell_w + GAP)
             above = [b.bottom for b in (narrative, *placed, *slots[len(placed):])
                      if b.x < x + cell_w and x < b.right]
-            slot = Slot(x, (max(above) + GAP) if above else GRID_TOP, cell_w, cell_h)
+            slot = Slot(x, (max(above) + GAP) if above else top, cell_w, cell_h)
         fw, fh = _fit(w, h, slot.cx, slot.cy)
         box = Slot(slot.x, slot.y, fw, fh)
         # Never on top of the narrative or of another exhibit. Text that

@@ -267,6 +267,7 @@ def build_sample_drawing(
     raw_data_column_layout: ColumnLayout,
     *,
     layout: "TemplateLayout | None" = None,
+    data_row_box: "tuple[int, int] | None" = None,
     narrative_x: int = 0,
     narrative_cx: int = 5_545_854,
     narrative_row_height_px: int = 20,
@@ -281,9 +282,11 @@ def build_sample_drawing(
     function only draws. It used to stack every exhibit at full page size
     in one column, which put a fourth exhibit 29 inches down the sheet.
 
-    Assumes sample N's raw data lives in sheet row (N+1) (row 1 = header).
+    data_row_box is (top, height) in EMU of the row the sampled item was
+    written to, read from the PY tab's real row heights. Without it, sample
+    N's row is assumed to be sheet row N+1 at default height.
     """
-    from agent.ooxml.layout import GRID_TOP, TemplateLayout, plan_sample_layout
+    from agent.ooxml.layout import GAP, GRID_TOP, TemplateLayout, plan_sample_layout
 
     shapes: list[str] = []
     unplaced: list[tuple[str, str, str, str]] = []
@@ -304,6 +307,8 @@ def build_sample_drawing(
                 raw_data_column_layout, col_start, col_end, row_num,
                 row_height_px=narrative_row_height_px,
             )
+            if data_row_box and sample_index == 0:
+                y, cy = data_row_box
             shapes.append(_rect_outline_xml(
                 shape_id, f"Rectangle raw_{sample_index}_{tie_out.letter}", x, y, cx, cy,
             ))
@@ -348,6 +353,7 @@ def build_sample_drawing(
                 _n, chars_per_line=max(20, int(95 * w / 5_545_854))
             ),
             default_narrative_width=narrative_cx,
+            top=max(GRID_TOP, sum(data_row_box) + GAP) if data_row_box else GRID_TOP,
         )
         if y_offset:
             shift = y_offset - GRID_TOP
