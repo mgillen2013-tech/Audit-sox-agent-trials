@@ -1,6 +1,7 @@
 # Where things stand -- read this first
 
-Handoff note for the next working session. Last updated at commit `6e08231`.
+Handoff note for the next working session. Last updated after the first
+real-model run of the mirror engine (code at `6e08231`).
 
 ## The direction (agreed with the reviewer, do not drift from it)
 
@@ -17,6 +18,35 @@ Handoff note for the next working session. Last updated at commit `6e08231`.
 - **Never delete what has not been decided; flag it.** Never lose a paid
   run's workpaper; fall back and say why.
 
+## How bugs are fixed: improve the base, not the instance
+
+We are building a BASE that works for any PY and any support, not a list
+of patches. Every bug a run exposes is treated as one example of a CLASS
+of bug, and is fixed at the class:
+
+- **Ask "what assumption made this possible?"**, not "what is wrong with
+  this file?". A value under the wrong heading was not a 156 problem; it
+  was "the code assumed column order" -- so columns are now matched by
+  heading for every PY. A copied tab breaking Excel was not a CI.9 problem;
+  it was "copies keep links they cannot resolve" -- so every copy is now
+  made self-contained, and a final integrity check refuses any file with a
+  broken link, whatever caused it.
+- **Remove the assumption, or move the decision to the PY.** If code had
+  to guess something about the workpaper (a tab's role, what a shape is, a
+  heading row, a cell's type), the fix is to read it from the PY -- the
+  model reads, code verifies -- not to add a better guess.
+- **Add a net that catches the whole class**, so the next variant shows up
+  even if the fix missed it: the integrity check (any unopenable file), the
+  leftover scan (any PY fact left anywhere), the Support Check (any PY
+  document without a CY counterpart), "not addressed" flags (anything the
+  model skipped).
+- **Test the class, not the file**: fixtures are built to the general shape
+  (two tabs per selection, headings below a title, absolute link paths,
+  no pictures), and each new test is shown to fail on the old code.
+- **The test for any fix:** would it still hold for a PY or a support pack
+  we have never seen? If it names a specific tab, word, control or layout,
+  it is the wrong fix.
+
 ## How it works now
 
 `agent/mirror/` (design: `docs/mirror_engine.md`):
@@ -26,12 +56,16 @@ decides every element; code applies) -> Mirror Check + Support Check tabs
 (leftover scan over every cell and shape, support comparison, final model
 pass). Fallbacks: layout builder (`agent/ooxml/`), then standalone layout.
 
-## Not yet proven
+## Status
 
-- **No real model call has run through the mirror engine.** Everything was
-  trialled with a scripted stand-in on four real PYs (CI.9, MAR.17, RR.134,
-  AP.156 -- kept out of the repo). The first real output, with its Mirror
-  Check and Support Check tabs, is the next thing to look at.
+- **Proven with a real model:** the reviewer ran the mirror engine end to
+  end with a real model and reported the output as much improved over the
+  earlier builders. This is now the base to build on, not replace.
+- Before that it was trialled with a scripted stand-in on four real PYs
+  (CI.9, MAR.17, RR.134, AP.156 -- kept out of the repo).
+- Next: work from the real output's **Mirror Check** and **Support Check**
+  tabs. Each flag that recurs is a class of problem -- fix it in the base
+  (see "How bugs are fixed"), never for the one control.
 - Not yet seen: a PY with its lead sheet in cells, or tickmarks typed into
   cells (Wingdings ticks). Ask for one.
 - Visual check in Excel is the user's -- this container cannot open xlsx.
