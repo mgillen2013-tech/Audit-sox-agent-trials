@@ -539,7 +539,8 @@ def _render_result(test_step_id: str, result: dict) -> None:
         _render_conclusion(result["conclusion"])
 
 
-def _build_workpaper(spec, results, py_name, run_dir, manifests, pop_name, pop_tab, ledger) -> dict:
+def _build_workpaper(spec, results, py_name, run_dir, manifests, pop_name, pop_tab, ledger,
+                     client=None, model_name="") -> dict:
     """Build the workpaper from whatever results exist; return what the page shows.
 
     Used at the end of a run AND to recover an interrupted one, so a run
@@ -550,7 +551,7 @@ def _build_workpaper(spec, results, py_name, run_dir, manifests, pop_name, pop_t
     out = {
         "results": results, "wp_bytes": None, "wp_name": None, "ledger": ledger,
         "wp_mirrored": False, "wp_fallback_reason": "", "wp_nothing_concluded": False,
-        "wp_warnings": [],
+        "wp_warnings": [], "mirror_flags": [],
     }
     try:
         outcome = build_cy_workpaper(
@@ -562,8 +563,14 @@ def _build_workpaper(spec, results, py_name, run_dir, manifests, pop_name, pop_t
             sample_manifests=manifests,
             population_workbook=pop_name,
             population_sheet=pop_tab,
+            # Edit a copy of the PY (wording, layout, tickmarks all from the
+            # PY) -- two more model calls per selection tab, see agent/mirror.
+            mirror_client=client,
+            mirror_model=model_name,
+            ledger=ledger,
         )
         out.update(
+            mirror_flags=[f.__dict__ for f in outcome.mirror_flags],
             wp_bytes=outcome.path.read_bytes(),
             wp_name=outcome.path.name,
             wp_mirrored=outcome.mirrored_py,
@@ -606,6 +613,8 @@ if _partial and not run_clicked:
         st.session_state["run_output"] = _build_workpaper(
             _partial["spec"], _partial["results"], _partial["py_name"], _partial["run_dir"],
             _partial["manifests"], _partial["pop_name"], _partial["pop_tab"], _partial["ledger"],
+            client=AnthropicFoundry(api_key=api_key, resource=resource) if api_key and resource else None,
+            model_name=model,
         )
         st.session_state.pop("partial_run", None)
         st.session_state.pop("run_dir", None)
@@ -748,7 +757,7 @@ if run_clicked:
 
             st.session_state["run_output"] = _build_workpaper(
                 spec, all_results, py_testing_file.name, tmp_dir, sample_manifests,
-                pop_sample_file.name, population_tab, ledger,
+                pop_sample_file.name, population_tab, ledger, client=client, model_name=model,
             )
             # Finished normally: nothing to recover, and the staged copies of
             # the evidence are no longer needed on disk.
@@ -780,6 +789,25 @@ if _out:
                 else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             ),
         )
+        # The mirror check: everything in the CY file that differs from the
+        # PY beyond the facts. Also written to the "Mirror Check" tab.
+        _flags = _out.get("mirror_flags") or []
+        if _out.get("wp_mirrored") and "mirror_flags" in _out:
+            _high = [f for f in _flags if f["severity"] == "high"]
+            if _high:
+                st.error(f"**Mirror check: {len(_high)} item(s) need attention before review** "
+                         f"({len(_flags)} flag(s) in total -- also on the workbook's Mirror Check tab).")
+            elif _flags:
+                st.warning(f"Mirror check: {len(_flags)} item(s) to look at (none high). "
+                           "Also on the workbook's Mirror Check tab.")
+            else:
+                st.success("Mirror check: no differences from the prior-year layout and wording beyond the facts.")
+            if _flags:
+                st.dataframe(
+                    [{"Severity": f["severity"].upper(), "Tab": f["tab"], "Item": f["item"],
+                      "Issue": f["issue"], "Found by": f["found_by"]} for f in _flags],
+                    hide_index=True, use_container_width=True,
+                )
         if _out.get("wp_mirrored"):
             st.caption(
                 "Built on the prior-year workpaper: same tabs and layout, with this "

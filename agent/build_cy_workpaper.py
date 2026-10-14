@@ -70,6 +70,9 @@ class WorkpaperOutcome:
     # file for this case too and told the user to re-upload it, which sent
     # them after the wrong thing; the step's own error is the real cause.
     nothing_concluded: bool = False
+    # The mirror check (agent/mirror/verify.py): what differs from the PY
+    # beyond the facts. Empty for the fallback builders, which do not run it.
+    mirror_flags: list = field(default_factory=list)
 
     @property
     def summary_line(self) -> str:
@@ -192,6 +195,9 @@ def build_cy_workpaper(
     review_client: Any = None,
     review_model: str = "",
     evidence_items: "list[Any] | None" = None,
+    mirror_client: Any = None,
+    mirror_model: str = "",
+    ledger: Any = None,
 ) -> WorkpaperOutcome:
     """Render one control's results, mirroring PY where that is possible.
 
@@ -223,8 +229,38 @@ def build_cy_workpaper(
         outcome.nothing_concluded = True
         return outcome
 
+    # Preferred: edit a copy of the PY (agent/mirror). Everything about the
+    # layout and wording comes from the PY itself. Needs the model, so it
+    # runs only when a client is supplied; any failure falls through to the
+    # builders below, so a paid run always produces a workpaper.
+    if mirror_client is not None and py_path.suffix.lower() in (".xlsx", ".xlsm") and py_path.exists():
+        try:
+            from agent.mirror.build import mirror_workpaper
+
+            step_labels_ = []
+            for step_id, _c in conclusions:
+                text = next((s.get("test_step_text", "") for s in spec.get("test_steps", [])
+                             if s.get("test_step_id") == step_id), "")
+                step_labels_.append(f"{step_id}: {text}" if text else step_id)
+            mirrored = mirror_workpaper(
+                spec, results, py_path, out_dir / _mirrored_filename(spec["control_id"]), support,
+                sample_manifests, mirror_client, mirror_model or "claude-opus-5",
+                summary_rows_fn=lambda names: summary_rows(
+                    list(zip(step_labels_, [c for _s, c in conclusions])), tab_names=names),
+                ledger=ledger,
+            )
+            return WorkpaperOutcome(
+                mirrored.path, mirrored_py=True,
+                warnings=list(mirrored.notes),
+                mirror_flags=mirrored.flags,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fall back, and say so
+            mirror_failure = f"editing the prior-year file directly failed ({exc}); used the layout builder instead"
+    else:
+        mirror_failure = ""
+
     can, why, tabs = inspect_py_template(py_path, sample_sheet_name)
-    adopted = tabs.notes if tabs else []
+    adopted = (tabs.notes if tabs else []) + ([mirror_failure] if mirror_failure else [])
     if not can:
         return _legacy(spec, results, py_testing_filename, out_dir, support, population_workbook,
                        [f"could not mirror the prior-year layout: {why}"], reason=why)

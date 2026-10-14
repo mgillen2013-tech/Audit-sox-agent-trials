@@ -449,7 +449,8 @@ def check_template(work_dir: str, *, required_sheets: list[str], max_style_index
     return sheets
 
 
-def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str, *, after: str | None = None) -> int:
+def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str, *, after: str | None = None,
+                keep_drawing: bool = False) -> int:
     """Duplicate a worksheet part under a new tab name; return its number.
 
     Used to give every sampled item its own tab. The prior-year workpaper
@@ -470,7 +471,7 @@ def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str, *, after: str 
 
     with open(os.path.join(sheets_dir, f"sheet{src_sheet_num}.xml"), encoding="utf-8") as fh:
         body = fh.read()
-    body = _detach_clone(work_dir, src_sheet_num, new_num, body)
+    body = _detach_clone(work_dir, src_sheet_num, new_num, body, keep_drawing=keep_drawing)
     with open(os.path.join(sheets_dir, f"sheet{new_num}.xml"), "w", encoding="utf-8") as fh:
         fh.write(body)
 
@@ -539,7 +540,17 @@ _UNCOPYABLE = ("drawing", "legacyDrawing", "legacyDrawingHF", "drawingHF", "pict
                "oleObjects", "controls", "tableParts")
 
 
-def _detach_clone(work_dir: str, src_num: int, new_num: int, body: str) -> str:
+def _part_path(work_dir: str, base: str, target: str) -> str:
+    """A relationship target as a file path. Excel writes targets relative to
+    the part ("../drawings/drawing1.xml"); openpyxl and others write them
+    absolute ("/xl/drawings/drawing1.xml"). Reading only the first form
+    silently dropped a copied tab's whole drawing."""
+    if target.startswith("/"):
+        return os.path.normpath(os.path.join(work_dir, target.lstrip("/")))
+    return os.path.normpath(os.path.join(work_dir, base, target))
+
+
+def _detach_clone(work_dir: str, src_num: int, new_num: int, body: str, *, keep_drawing: bool = False) -> str:
     """Make a copied sheet stand on its own.
 
     A sheet's XML refers to other parts by r:id, resolved through ITS OWN
@@ -570,6 +581,8 @@ def _detach_clone(work_dir: str, src_num: int, new_num: int, body: str) -> str:
                     src_rels[rid.group(1)] = (typ.group(1), tgt.group(1), mode.group(1) if mode else "")
 
     for tag in _UNCOPYABLE:
+        if keep_drawing and tag == "drawing":
+            continue  # copied below, as a drawing part of its own
         body = re.sub(rf"<{tag}\b[^>]*/>", "", body)
         body = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", body, flags=re.S)
     body = re.sub(r'\s(?:xr:uid|codeName)="[^"]*"', "", body)
@@ -580,7 +593,7 @@ def _detach_clone(work_dir: str, src_num: int, new_num: int, body: str) -> str:
         element, rid = m.group(0), m.group(1)
         typ, target, mode = src_rels.get(rid, ("", "", ""))
         if typ.endswith("/printerSettings") and mode != "External":
-            src_part = os.path.normpath(os.path.join(work_dir, "xl", "worksheets", target))
+            src_part = _part_path(work_dir, "xl/worksheets", target)
             if os.path.exists(src_part):
                 folder = os.path.dirname(src_part)
                 ext = os.path.splitext(src_part)[1]
@@ -603,6 +616,29 @@ def _detach_clone(work_dir: str, src_num: int, new_num: int, body: str) -> str:
                         fh.write(ct)
                 kept.append(f'<Relationship Id="{rid}" Type="{typ}" '
                             f'Target="../printerSettings/printerSettings{k}{ext}"/>')
+                return element
+        if keep_drawing and typ.endswith("/drawing"):
+            # A copy of the whole drawing -- text boxes, frames, tickmarks,
+            # pictures -- under a new part name; its pictures keep pointing
+            # at the same media until they are replaced.
+            src_part = _part_path(work_dir, "xl/worksheets", target)
+            if os.path.exists(src_part):
+                folder = os.path.dirname(src_part)
+                k = 1
+                while os.path.exists(os.path.join(folder, f"drawing{k}.xml")):
+                    k += 1
+                shutil.copyfile(src_part, os.path.join(folder, f"drawing{k}.xml"))
+                drawing_rels = os.path.join(folder, "_rels", os.path.basename(src_part) + ".rels")
+                if os.path.exists(drawing_rels):
+                    shutil.copyfile(drawing_rels, os.path.join(folder, "_rels", f"drawing{k}.xml.rels"))
+                ct_path = os.path.join(work_dir, "[Content_Types].xml")
+                with open(ct_path, encoding="utf-8") as fh:
+                    ct = fh.read()
+                ct = ct.replace("</Types>", f'<Override PartName="/xl/drawings/drawing{k}.xml" '
+                                'ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>', 1)
+                with open(ct_path, "w", encoding="utf-8") as fh:
+                    fh.write(ct)
+                kept.append(f'<Relationship Id="{rid}" Type="{typ}" Target="../drawings/drawing{k}.xml"/>')
                 return element
         if typ.endswith("/hyperlink") and mode == "External":
             kept.append(f'<Relationship Id="{rid}" Type="{typ}" Target="{target}" TargetMode="External"/>')

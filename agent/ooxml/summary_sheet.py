@@ -387,3 +387,85 @@ def add_summary_sheet(
     )
     with open(ct_path, "w", encoding="utf-8") as fh:
         fh.write(ct)
+
+
+def add_table_sheet(
+    work_dir: str,
+    name: str,
+    columns: list[tuple[str, str, int]],
+    rows: list[list[str]],
+    sst: ox.SharedStrings,
+    *,
+    position: int = 1,
+    red_rows: set[int] | None = None,
+    amber_rows: set[int] | None = None,
+) -> str:
+    """A plain table tab (headings + rows) inserted at a tab position.
+
+    Registered the same four ways add_summary_sheet registers its tab. Used
+    for the Mirror Check: it sits right after the Summary so a reviewer sees
+    what to look at before the evidence.
+    """
+    styles = _add_styles(work_dir)
+    existing = set(ox.resolve_sheets(work_dir))
+    final = name
+    k = 2
+    while final in existing:
+        final, k = f"{name} {k}", k + 1
+
+    sheet_dir = os.path.join(work_dir, "xl", "worksheets")
+    files = [f for f in os.listdir(sheet_dir) if re.fullmatch(r"sheet\d+\.xml", f)]
+    n = max((int(re.findall(r"\d+", f)[0]) for f in files), default=0) + 1
+    last = columns[-1][0]
+    cols = "".join(f'<col min="{ox.col_letter_to_index(c)}" max="{ox.col_letter_to_index(c)}" '
+                   f'width="{w}" customWidth="1"/>' for c, _t, w in columns)
+    body = [ox.row_xml(1, [ox.cell_xml(f"{c}1", t, style=styles.header, sst=sst) for c, t, _w in columns],
+                       spans=f"1:{ox.col_letter_to_index(last)}")]
+    for i, row in enumerate(rows, start=2):
+        style = (styles.red if red_rows and i - 2 in red_rows
+                 else styles.amber if amber_rows and i - 2 in amber_rows else styles.text)
+        cells = [ox.cell_xml(f"{c}{i}", (row[j] if j < len(row) else "") or None,
+                             style=style if j == 0 else styles.text, sst=sst)
+                 for j, (c, _t, _w) in enumerate(columns)]
+        body.append(ox.row_xml(i, cells, spans=f"1:{ox.col_letter_to_index(last)}"))
+    xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+           '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+           f'<dimension ref="A1:{last}{len(rows) + 1}"/><sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+           f'<sheetFormatPr defaultRowHeight="15"/><cols>{cols}</cols><sheetData>{"".join(body)}</sheetData>'
+           '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>')
+    with open(os.path.join(sheet_dir, f"sheet{n}.xml"), "w", encoding="utf-8") as fh:
+        fh.write(xml)
+
+    rels_path = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
+    with open(rels_path, encoding="utf-8") as fh:
+        rels = fh.read()
+    rid = f"rIdTable{n}"
+    rels = rels.replace("</Relationships>", f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+                        f'officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{n}.xml"/></Relationships>', 1)
+    with open(rels_path, "w", encoding="utf-8") as fh:
+        fh.write(rels)
+
+    wb_path = os.path.join(work_dir, "xl", "workbook.xml")
+    with open(wb_path, encoding="utf-8") as fh:
+        wb = fh.read()
+    used = [int(x) for x in re.findall(r'sheetId="(\d+)"', wb)] or [0]
+    entry = f'<sheet name="{escape(final)}" sheetId="{max(used) + 1}" r:id="{rid}"/>'
+    tabs = list(re.finditer(r"<sheet\b[^>]*/>", wb))
+    if position < len(tabs):
+        at = tabs[position].start()
+        wb = wb[:at] + entry + wb[at:]
+        wb = ox.shift_tab_positions(wb, position, +1)
+    else:
+        wb = wb.replace("</sheets>", f"{entry}</sheets>", 1)
+    with open(wb_path, "w", encoding="utf-8") as fh:
+        fh.write(wb)
+
+    ct_path = os.path.join(work_dir, "[Content_Types].xml")
+    with open(ct_path, encoding="utf-8") as fh:
+        ct = fh.read()
+    ct = ct.replace("</Types>", f'<Override PartName="/xl/worksheets/sheet{n}.xml" ContentType="application/'
+                    f'vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>', 1)
+    with open(ct_path, "w", encoding="utf-8") as fh:
+        fh.write(ct)
+    return final
