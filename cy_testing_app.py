@@ -99,8 +99,10 @@ def _hint_for(error: str) -> str:
     return ""
 
 
-# What this computer last ran, so the form does not have to be retyped
-# every session. Stored in the user's home folder, NOT the app folder: the
+# The connection settings this computer last used (resource and model), so
+# they do not have to be retyped every session. Control details are NOT
+# remembered: each run is usually a different control, and a box that
+# arrives pre-filled with the last one has to be cleared before every use. Stored in the user's home folder, NOT the app folder: the
 # code arrives as a fresh ZIP each time and anything beside it would be lost.
 # The API key is never written here.
 _REMEMBER_PATH = Path.home() / ".cy_testing_agent" / "last_inputs.json"
@@ -121,21 +123,11 @@ def _remember(values: dict) -> None:
         pass
 
 
-# Pre-filled for the control currently being trialled, so a re-run after a
-# fix does not mean retyping it. Anything typed since replaces these.
-_DEMO = {
-    "control_id": "SS.PTP.AP.156",
-    "control_objective_ref": "Non-PO Invoice Review and Approval",
-    "test_steps": [
-        "1. Verify the invoice was timely reviewed and approved by appropriate "
-        "independent personnel (i.e. Branch Designee)."
-    ],
-}
 _last = _remembered()
 
 
 def _prefill(key: str, fallback: str = ""):
-    return _last.get(key) or _DEMO.get(key) or fallback
+    return _last.get(key) or fallback
 
 
 st.set_page_config(page_title="CY Testing Agent", page_icon="🧾", layout="wide")
@@ -220,14 +212,13 @@ with st.sidebar:
 st.header("1. Control details")
 col1, col2 = st.columns(2)
 with col1:
-    control_id = st.text_input("Control ID", value=_prefill("control_id"), placeholder="C-14")
+    control_id = st.text_input("Control ID", placeholder="e.g. SS.PTP.AP.156")
 with col2:
     control_objective_ref = st.text_input(
-        "Control objective reference", value=_prefill("control_objective_ref"), placeholder="CO-4"
+        "Control objective reference", placeholder="e.g. Non-PO Invoice Review and Approval"
     )
 control_objective_text = st.text_area(
     "Control objective",
-    value=_prefill("control_objective_text"),
     placeholder="What this control is supposed to accomplish.",
 )
 
@@ -270,11 +261,7 @@ if sheet_names and st.checkbox(
 
 # ── 3. Test steps ────────────────────────────────────────────────────────────
 st.header("3. Test steps")
-_remembered_steps = _last.get("test_steps") or _DEMO["test_steps"]
-num_steps = st.number_input(
-    "How many test steps does this control have?",
-    min_value=1, max_value=10, value=max(1, min(10, len(_remembered_steps))), step=1,
-)
+num_steps = st.number_input("How many test steps does this control have?", min_value=1, max_value=10, value=1, step=1)
 
 test_steps = []
 for i in range(int(num_steps)):
@@ -287,7 +274,6 @@ for i in range(int(num_steps)):
         tstext = st.text_area(
             "Test step text",
             key=f"tstext_{i}",
-            value=_remembered_steps[i] if i < len(_remembered_steps) else "",
             placeholder="What this step requires you to test.",
         )
 
@@ -555,16 +541,7 @@ def _render_result(test_step_id: str, result: dict) -> None:
 st.header("5. Run")
 run_clicked = st.button("Run test steps", type="primary")
 if run_clicked:
-    _remember(
-        {
-            "resource": resource,
-            "model": model,
-            "control_id": control_id,
-            "control_objective_ref": control_objective_ref,
-            "control_objective_text": control_objective_text,
-            "test_steps": [s["test_step_text"] for s in test_steps],
-        }
-    )
+    _remember({"resource": resource, "model": model})
     errors = []
     if not control_id or not control_objective_ref or not control_objective_text:
         errors.append("Fill in all of the control details.")

@@ -263,17 +263,19 @@ def test_a_run_where_no_step_concluded_does_not_blame_the_py_file():
     assert "NOT in last year's format" not in errors
 
 
-def test_the_trial_control_is_prefilled():
+def test_control_boxes_start_empty_and_take_what_is_typed():
+    # Pre-filling one control meant clearing it before every new one.
     at = _app().run()
     assert not at.exception, at.exception
-    inputs = {t.label: t.value for t in at.text_input}
-    assert inputs["Control ID"] == "SS.PTP.AP.156"
-    assert inputs["Control objective reference"] == "Non-PO Invoice Review and Approval"
-    steps = [a.value for a in at.text_area if a.label == "Test step text"]
-    assert steps[0].startswith("1. Verify the invoice was timely reviewed")
+    box = next(t for t in at.text_input if t.label == "Control ID")
+    assert box.value == ""
+    box.input("SS.RTR.GL.010")
+    at.run()
+    assert next(t for t in at.text_input if t.label == "Control ID").value == "SS.RTR.GL.010"
+    assert all(a.value == "" for a in at.text_area if a.label in ("Control objective", "Test step text"))
 
 
-def test_what_was_typed_last_time_is_remembered_but_never_the_key(_isolated_home):
+def test_connection_settings_are_remembered_but_never_the_key(_isolated_home):
     import json
 
     saved = _isolated_home / ".cy_testing_agent" / "last_inputs.json"
@@ -281,7 +283,7 @@ def test_what_was_typed_last_time_is_remembered_but_never_the_key(_isolated_home
     saved.write_text(json.dumps({
         "model": "claude-sonnet-5-5",
         "resource": "my-resource",
-        "control_objective_text": "Invoices over the threshold are approved.",
+        "control_id": "SS.PTP.AP.156",  # an old file may still hold this
     }))
     at = _app().run()
     assert not at.exception, at.exception
@@ -289,20 +291,19 @@ def test_what_was_typed_last_time_is_remembered_but_never_the_key(_isolated_home
     assert inputs["Model"] == "claude-sonnet-5-5"
     assert inputs["Resource name"] == "my-resource"
     assert inputs["API key"] == ""
-    assert [a.value for a in at.text_area if a.label == "Control objective"] == [
-        "Invoices over the threshold are approved."
-    ]
+    assert inputs["Control ID"] == ""  # control details are not carried over
 
 
-def test_run_saves_the_inputs_without_the_api_key(_isolated_home):
+def test_run_saves_connection_settings_without_the_api_key(_isolated_home):
     import json
 
     at = _app().run()
     next(t for t in at.text_input if t.label == "API key").input("secret-key-123")
+    next(t for t in at.text_input if t.label == "Resource name").input("my-resource")
     next(b for b in at.button if b.label == "Run test steps").click()
     at.run()
     saved = (_isolated_home / ".cy_testing_agent" / "last_inputs.json").read_text()
-    assert "SS.PTP.AP.156" in json.loads(saved)["control_id"]
+    assert json.loads(saved)["resource"] == "my-resource"
     assert "secret-key-123" not in saved
 
 
