@@ -181,7 +181,7 @@ def iter_control_results(
         if manifest is None:
             print(
                 f"  WARNING: no sample list rows found for {test_step_id!r} -- "
-                f"running with an empty sample (check_sample_coverage will error)"
+                f"running with no sample coverage check for this step"
             )
 
         request = TestStepRequest(

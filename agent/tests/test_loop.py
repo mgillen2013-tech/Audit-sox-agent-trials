@@ -521,15 +521,7 @@ def test_coverage_comes_from_the_manifest_not_from_the_model(evidence_items, sam
     # the point of having removed the tool that let it.
     client = FakeClient(
         responses=[
-            response(
-                [
-                    tool_use(
-                        "t1",
-                        "check_sample_coverage",
-                        {"required_sample_ids": ["BOGUS-1", "BOGUS-2"], "found_evidence_ids": ["S01"]},
-                    )
-                ]
-            ),
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
             response(
                 [
                     tool_use(

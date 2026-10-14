@@ -3,14 +3,12 @@ from __future__ import annotations
 import pytest
 
 from agent.schemas import (
-    CheckSampleCoverageError,
-    CheckSampleCoverageInput,
     EvidenceItem,
     FlagExceptionInput,
     RequestAdditionalSupportInput,
     SearchCySupportInput,
 )
-from agent.tools import ToolContext, check_sample_coverage, flag_exception, request_additional_support, search_cy_support
+from agent.tools import ToolContext, flag_exception, locate_value, request_additional_support, search_cy_support
 
 
 @pytest.fixture
@@ -68,33 +66,6 @@ def test_search_respects_evidence_types_filter(ctx: ToolContext):
 def test_search_unindexable_ocr_placeholder_is_not_a_match(ctx: ToolContext):
     out = search_cy_support(SearchCySupportInput(query="scan.pdf"), ctx)
     assert all(r.evidence_id != "ev_003" for r in out.results)
-
-
-def test_check_sample_coverage_complete():
-    out = check_sample_coverage(
-        CheckSampleCoverageInput(required_sample_ids=["S01", "S02"], found_evidence_ids=["S01", "S02"])
-    )
-    assert out.total_required == 2
-    assert out.total_found == 2
-    assert out.missing == []
-    assert out.complete is True
-    assert out.coverage_pct == 100.0
-
-
-def test_check_sample_coverage_partial():
-    out = check_sample_coverage(
-        CheckSampleCoverageInput(required_sample_ids=["S01", "S02", "S03"], found_evidence_ids=["S01"])
-    )
-    assert out.total_found == 1
-    assert out.missing == ["S02", "S03"]
-    assert out.complete is False
-    assert round(out.coverage_pct, 2) == 33.33
-
-
-def test_check_sample_coverage_no_sample_list():
-    out = check_sample_coverage(CheckSampleCoverageInput(required_sample_ids=[], found_evidence_ids=["S01"]))
-    assert isinstance(out, CheckSampleCoverageError)
-    assert out.error == "no_sample_list_found"
 
 
 def test_flag_exception_records_and_returns_id(ctx: ToolContext):
@@ -162,3 +133,18 @@ def test_top_k_is_bounded():
     # Unbounded, one call could park arbitrarily much in the conversation.
     with pytest.raises(Exception):
         SearchCySupportInput(query="accrual", top_k=500)
+
+
+def test_locate_value_is_strict_about_digits_loose_about_punctuation(ctx: ToolContext):
+    # "11,193.00" printed and "11193.00" in the model's head are the same
+    # number -- being strict there would send it hunting for another anchor
+    # when the one it had was fine. A DIFFERENT number must still miss.
+    from agent.schemas import LocateValueInput
+
+    ids = list(ctx._evidence_by_id)
+    target = ctx._evidence_by_id[ids[0]]
+    target.extracted_text = "Invoice 35713082 paid 11,193.00 on 02/11/2026"
+
+    assert locate_value(LocateValueInput(evidence_id=ids[0], value="11193.00"), ctx).found
+    assert locate_value(LocateValueInput(evidence_id=ids[0], value="11,193.00"), ctx).found
+    assert not locate_value(LocateValueInput(evidence_id=ids[0], value="11,194.00"), ctx).found

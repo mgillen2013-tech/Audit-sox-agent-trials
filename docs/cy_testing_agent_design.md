@@ -109,7 +109,7 @@ SamplePopulationManifest = {
 }
 ```
 
-`required_sample_ids` in `check_sample_coverage` (section 3) is just the
+`required_sample_ids` (used by the coverage check in section 3) is just the
 `sample_id` list from this manifest for the given test step — this is what
 resolves the open question of where that input comes from.
 
@@ -136,7 +136,7 @@ resolves the open question of where that input comes from.
 app originally collected `population_description` / `selection_method` /
 `population_size` as manual per-step form fields, and a separate "sample
 list" file upload per step. A real run showed the actual cost of that: the
-model's only signal about sample size was `check_sample_coverage`'s bare
+model's only signal about sample size was the sample roster's bare
 count, with zero context for *why* it was that size, so a correct
 1-item judgmental sample got treated as suspicious purely because a CY
 support filename said "selection 1" (implying more might exist). The fix
@@ -184,12 +184,12 @@ weighted 5× — but a truncated one costs the same and yields nothing.
 never shown the `sample_id`s or `identifying_details`, even though the
 manifest carries both for every item. With one sample that was survivable:
 there is one thing to find and all CY support relates to it. With two, the
-model had to discover the ids by calling `check_sample_coverage` and
+model had to discover the ids by trial and error, and
 reading `missing`, then work out which evidence belonged to which item by
 fishing — and burned the whole cap doing it. `build_user_turn` now lists
 each selected item (`sample_id` + identifying field values, capped at 25
 items / 240 chars each), states that those ids are exactly what
-`check_sample_coverage` expects in `found_evidence_ids`, and instructs
+every `sample_result` and citation must use, and instructs
 matching on **field values, not filenames** — support files are commonly
 named for a selection number, mis-named, or cover several items at once.
 
@@ -311,35 +311,61 @@ input:  { query: str, evidence_types?: [str], top_k?: int = 5 }
 output: { results: [ { evidence_id, source_file, location, snippet, score } ] }
 ```
 
-### `check_sample_coverage`
+### `locate_value`
 
-Pure math, run server-side — never let the model eyeball "20 of 25 samples
-tested." The model submits which evidence it believes maps to which sample
-items; the tool checks that against the deterministically parsed sample
-population (from the CY population listing or PY sample list) and returns
-arithmetic, not judgment.
+Replaced `check_sample_coverage` as the second tool. See "Sample coverage"
+below for why that one went away.
+
+Asks whether a value is literally printed on one piece of evidence, so the
+model can pick a tickmark anchor it has checked rather than one it has
+guessed. The workpaper draws a red box around each attribute's value by
+searching the exhibit for the text reported in `attribute_results` — so an
+anchor the document does not contain verbatim loses its callout silently.
 
 ```
-input:  { required_sample_ids: [str], found_evidence_ids: [str] }
-output: { total_required: int, total_found: int, missing: [str],
-          coverage_pct: float, complete: bool }
-        | { error: "no_sample_list_found" }
+input:  { evidence_id: str, value: str }
+output: { found: bool, nearby: [str], note: str }
 ```
 
-The error case matters as much as the happy path — it's the deterministic
-trigger that should push the model toward `request_additional_support`
-rather than guessing.
+A miss returns what IS on the page. That is the point of the tool: a bare
+"no" leaves the model guessing a second time, while naming the distinctive
+values actually present lets it anchor on one that will work. The failure
+this was built from: an approval email spelling a date "February 9, 2026"
+where the model had written "02/09/2026", losing the tickmark, while the
+invoice number beside it would have matched.
 
-**Built (server-enforced, not just prompted):** on a sampled test step, a
-`satisfied` submit_conclusion is refused unless a successful
-`check_sample_coverage` call earlier in that conversation showed
-`complete: true` — same mechanism as the fabrication guard. The rejection
-message names the missing samples and points to the valid outs
-(cover the gaps, or downgrade the conclusion / request additional support).
-`not_satisfied` and `insufficient_evidence` are never gated on coverage —
-an exception found in one sample doesn't require the rest to be tested
-before flagging it, and blocking the "I don't have enough" close on a
-coverage check would defeat its purpose.
+Evidence with no readable text — an image-only page that was never OCR'd —
+is reported as such rather than as a plain miss. "Not found" would send the
+model hunting for a different anchor when the real problem is that this
+evidence cannot carry a tickmark at all.
+
+### Sample coverage — computed, not a tool
+
+This WAS a tool (`check_sample_coverage`): the model passed in the sample
+ids it believed it had covered, and the tool confirmed them against the
+parsed sample listing.
+
+The flaw is in that first clause. `found_evidence_ids` came from the model,
+so the check confirmed what it was told — the model marking its own
+homework, at the cost of a turn and an API call per test step.
+
+Coverage is now derived at submit time, server-side, with no turn and no
+input from the model: the backend compares the sample listing against what
+the submitted conclusion actually ADDRESSES — a `sample_result`, an
+`attribute_result`, or a citation carrying that `sample_id`. A selection the
+model searched for and then said nothing about is not covered, because the
+workpaper would show an empty tab for it.
+
+**Still server-enforced:** a `satisfied` conclusion on a sampled test step
+is refused when any required selection is unaddressed, and the rejection
+names the missing ids. `not_satisfied` and `insufficient_evidence` are
+never gated — an exception in one sample does not require the rest to be
+tested before flagging it, and blocking the "I don't have enough" close on
+a coverage check would defeat its purpose.
+
+The gate also matters less than it once did: every sampled item now gets its
+own tab and its own Summary row, so a selection nobody concluded on is
+visible in the workpaper itself.
 
 ### `flag_exception`
 

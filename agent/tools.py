@@ -17,9 +17,6 @@ from rank_bm25 import BM25Okapi
 from agent.schemas import (
     LocateValueInput,
     LocateValueOutput,
-    CheckSampleCoverageError,
-    CheckSampleCoverageInput,
-    CheckSampleCoverageOutput,
     EvidenceItem,
     FlagExceptionInput,
     FlagExceptionOutput,
@@ -158,31 +155,6 @@ def search_cy_support(inp: SearchCySupportInput, ctx: ToolContext) -> SearchCySu
 
     ctx.evidence_ids_returned_by_search.update(r.evidence_id for r in results)
     return SearchCySupportOutput(results=results)
-
-
-def check_sample_coverage(
-    inp: CheckSampleCoverageInput,
-) -> CheckSampleCoverageOutput | CheckSampleCoverageError:
-    # required_sample_ids is populated by the loop from the control's
-    # SamplePopulationManifest. An empty list means no manifest was found
-    # for this test step (see agent/loop.py) -- that's the error case, not
-    # "a sample of size zero."
-    if not inp.required_sample_ids:
-        return CheckSampleCoverageError(error="no_sample_list_found")
-
-    required = set(inp.required_sample_ids)
-    found = set(inp.found_evidence_ids) & required
-    missing = sorted(required - found)
-    total_required = len(required)
-    total_found = len(found)
-
-    return CheckSampleCoverageOutput(
-        total_required=total_required,
-        total_found=total_found,
-        missing=missing,
-        coverage_pct=round(100.0 * total_found / total_required, 2) if total_required else 100.0,
-        complete=not missing,
-    )
 
 
 def flag_exception(inp: FlagExceptionInput, ctx: ToolContext) -> FlagExceptionOutput:

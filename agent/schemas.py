@@ -119,23 +119,6 @@ class LocateValueOutput(BaseModel):
     note: str = ""
 
 
-class CheckSampleCoverageInput(BaseModel):
-    required_sample_ids: list[str]
-    found_evidence_ids: list[str]
-
-
-class CheckSampleCoverageOutput(BaseModel):
-    total_required: int
-    total_found: int
-    missing: list[str]
-    coverage_pct: float
-    complete: bool
-
-
-class CheckSampleCoverageError(BaseModel):
-    error: Literal["no_sample_list_found"]
-
-
 class FlagExceptionInput(BaseModel):
     test_step_id: str
     description: str
@@ -230,8 +213,9 @@ class _ConclusionCore(BaseModel):
     validation rules live in exactly one place and apply to both.
 
     sample_coverage and model_metadata are deliberately NOT here -- they're
-    backend-computed (sample_coverage from the last check_sample_coverage
-    call, model_metadata from the loop's own bookkeeping) and appended after
+    backend-computed (sample_coverage is derived at submit time by comparing
+    the sample listing against what this conclusion actually addresses;
+    model_metadata comes from the loop's own bookkeeping) and appended after
     validation, not supplied by the model. Asking the model to restate them
     would just be another thing it could get wrong or fabricate.
     """

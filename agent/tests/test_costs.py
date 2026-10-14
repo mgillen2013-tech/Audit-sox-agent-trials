@@ -215,7 +215,7 @@ def test_a_real_run_itemises_each_turn_by_what_it_did():
                 usage=fake_usage(input_tokens=500, cache_creation_input_tokens=9_000, output_tokens=200),
             ),
             response(
-                [tool_use("t2", "check_sample_coverage", {"required_sample_ids": ["1"], "found_evidence_ids": ["1"]})],
+                [tool_use("t2", "locate_value", {"evidence_id": "ev_0001", "value": "21022452"})],
                 usage=fake_usage(input_tokens=200, cache_read_input_tokens=9_000, output_tokens=150),
             ),
             response(
@@ -241,7 +241,7 @@ def test_a_real_run_itemises_each_turn_by_what_it_did():
     # would not tell a reviewer that the expensive turn was the write-up.
     assert [(r.turn, r.label) for r in ledger.records] == [
         (1, "search_cy_support"),
-        (2, "check_sample_coverage"),
+        (2, "locate_value"),
         (3, "submit_conclusion"),
     ]
     # Caching visible as its own column rather than blended away. This is
