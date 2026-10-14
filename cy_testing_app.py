@@ -51,7 +51,7 @@ from agent.intake import build_manifest_from_any_columns, read_excel_rows
 from agent.loop import DEFAULT_MODEL, MAX_TOOL_ITERATIONS, MAX_TOTAL_TOKENS
 from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
-from agent.build_cy_workpaper import build_cy_workpaper
+from agent.build_cy_workpaper import build_cy_workpaper, check_py_template
 
 st.set_page_config(page_title="CY Testing Agent", page_icon="🧾", layout="wide")
 st.title("🧾 CY Testing Agent")
@@ -195,6 +195,46 @@ for i in range(int(num_steps)):
 # ── 4. Files ──────────────────────────────────────────────────────────────
 st.header("4. Upload PY testing + CY support")
 py_testing_file = st.file_uploader("PY testing workpaper", type=["pdf", "xlsx", "xls", "xlsm"])
+
+
+def _py_template_verdict(name: str, data: bytes) -> tuple[bool, str, list[str]]:
+    """check_py_template on the uploaded bytes, once per distinct file.
+
+    Cached in session state: Streamlit reruns this whole script on every
+    click, and unzipping the workbook each time would make the form lag.
+    """
+    import hashlib
+
+    key = ("py_verdict", name, hashlib.sha256(data).hexdigest())
+    cached = st.session_state.get("_py_verdict")
+    if cached and cached[0] == key:
+        return cached[1]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / name
+        path.write_bytes(data)
+        verdict = check_py_template(path)
+    st.session_state["_py_verdict"] = (key, verdict)
+    return verdict
+
+
+# Said BEFORE the run, beside the upload, because finding out afterwards
+# costs a paid run. A real run used a file this check would have rejected,
+# got a workpaper in a completely different layout, and the only notice was
+# small grey text under the download button.
+if py_testing_file is not None:
+    _ok, _why, _notes = _py_template_verdict(py_testing_file.name, py_testing_file.getvalue())
+    if _ok:
+        st.success("✅ The workpaper will be built on this file's layout (tabs, tickmarks, format).")
+        for _n in _notes:
+            st.caption(f"ℹ️ {_n[0].upper()}{_n[1:]}.")
+    else:
+        st.error(
+            "**This file can't be used as the layout for the workpaper.** The run will "
+            "still work, but the workpaper will come out in the plain standalone format "
+            "-- no prior-year tabs, no tickmark boxes.\n\n"
+            f"Why: {_why}\n\n"
+            "Fix: upload the original prior-year workpaper (.xlsx) instead."
+        )
 cy_support_files = st.file_uploader(
     "CY support evidence (one or more)", type=["pdf", "xlsx", "xls", "xlsm"], accept_multiple_files=True
 )
@@ -524,6 +564,7 @@ if run_clicked:
             # Streamlit's reruns.
             wp_bytes = wp_name = None
             wp_mirrored = False
+            wp_fallback_reason = ""
             wp_warnings: list[str] = []
             try:
                 outcome = build_cy_workpaper(
@@ -538,6 +579,7 @@ if run_clicked:
                 )
                 wp_bytes, wp_name = outcome.path.read_bytes(), outcome.path.name
                 wp_mirrored = outcome.mirrored_py
+                wp_fallback_reason = outcome.fallback_reason
                 wp_warnings = list(outcome.warnings) + [
                     f"Tickmark {letter} on {name}: {anchor!r} could not be located on the page, "
                     f"so no box was drawn (the legend still lists it)."
@@ -552,6 +594,7 @@ if run_clicked:
             "wp_name": wp_name,
             "ledger": ledger,
             "wp_mirrored": wp_mirrored,
+            "wp_fallback_reason": wp_fallback_reason,
             "wp_warnings": wp_warnings,
         }
         st.success("Done.")
@@ -586,15 +629,23 @@ if _out:
                 "in front. Stamped DRAFT -- review and approve before it goes anywhere."
             )
         else:
-            st.caption(
-                "Built with the standalone layout -- the prior-year workpaper could "
-                "not be used as a template, so this does NOT match last year's format. "
-                "See the notes below. Stamped DRAFT."
+            # Red, on screen, with the reason -- not a caption. This file
+            # looks nothing like last year's, and a reviewer who does not
+            # know why will take it for a broken build.
+            st.error(
+                "**This workpaper is NOT in last year's format.** The prior-year file "
+                "couldn't be used as the layout, so it was built in the plain standalone "
+                "format instead (no prior-year tabs, no tickmark boxes on the exhibits).\n\n"
+                f"Why: {_out.get('wp_fallback_reason') or 'see the notes below'}\n\n"
+                "Fix: re-run with the original prior-year workpaper (.xlsx)."
             )
         # Everything the finished file cannot show: evidence that was not
         # attached, and tickmarks whose anchor was never found. A legend entry
         # pointing at a box that does not exist sends a reviewer hunting.
         if _out.get("wp_warnings"):
-            with st.expander(f"⚠️ {len(_out['wp_warnings'])} note(s) about what is NOT in this workpaper"):
+            with st.expander(
+                f"⚠️ {len(_out['wp_warnings'])} note(s) about what is NOT in this workpaper",
+                expanded=not _out.get("wp_mirrored"),
+            ):
                 for w in _out["wp_warnings"]:
                     st.markdown(f"- {w}")

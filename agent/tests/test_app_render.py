@@ -182,3 +182,42 @@ def test_every_field_the_app_renders_still_exists_on_the_conclusion():
         if f not in ConclusionOutput.model_fields and not hasattr(ConclusionOutput, f)
     }
     assert not unknown, f"cy_testing_app.py reads conclusion fields that no longer exist: {unknown}"
+
+
+def test_a_fallback_workpaper_is_announced_in_red_with_its_reason():
+    # A real run fell back to the standalone layout and said so only in a
+    # grey caption under a collapsed expander. The reviewer reasonably read
+    # the different-looking file as a regression.
+    at = _app()
+    at.session_state["run_output"] = {
+        "results": {},
+        "wp_bytes": b"xlsx bytes",
+        "wp_name": "156_CY_Testing_DRAFT.xlsx",
+        "ledger": None,
+        "wp_mirrored": False,
+        "wp_fallback_reason": "it needs tabs named 'Sample' and 'Population'",
+        "wp_warnings": ["could not mirror the prior-year layout: it needs tabs named 'Sample'"],
+    }
+    at.run()
+    assert not at.exception, at.exception
+    errors = " ".join(e.value for e in at.error)
+    assert "NOT in last year's format" in errors
+    assert "it needs tabs named 'Sample' and 'Population'" in errors
+    # The notes are open, not hidden behind a click.
+    assert any(e.proto.expanded for e in at.expander if "NOT in this workpaper" in e.label)
+
+
+def test_a_mirrored_workpaper_shows_no_fallback_error():
+    at = _app()
+    at.session_state["run_output"] = {
+        "results": {},
+        "wp_bytes": b"xlsx bytes",
+        "wp_name": "156_CY_Testing_wp_DRAFT.xlsx",
+        "ledger": None,
+        "wp_mirrored": True,
+        "wp_fallback_reason": "",
+        "wp_warnings": [],
+    }
+    at.run()
+    assert not at.exception, at.exception
+    assert not any("NOT in last year's format" in e.value for e in at.error)

@@ -3,24 +3,35 @@ Top-level entry point. build_workpaper(request) turns a validated
 WorkpaperRequest into a finished .xlsx, doing all the OOXML/EMU/OCR work
 described in README.md.
 
-IMPORTANT ASSUMPTION: this assumes the *template* passed in is a workbook
-that already has the four-tab shape described in README.md, with cell
-styles s="1".."14" etc. already defined for: text cells, date cells, number
-cells, and the IA-Calculation box's header/line/total rows (see
-STYLE_INDEX_* constants below). Those style indices are template-specific --
-if you start from a different base template, open it, find the equivalent
-style ids (Sample!B19 etc.) and update the constants, or (cleaner) generate
-new styles.xml entries programmatically. This package doesn't do that
-automatically because "what should the IA Calculation box look like" is a
-one-time template decision, not a per-sample one.
+CELL FORMATS ARE COPIED FROM THE TEMPLATE, NOT ASSUMED
+------------------------------------------------------
+A cell's format is a number -- a position in that workbook's styles.xml.
+The first version hard-coded those numbers (STYLE_* below) from one PY
+file. That is wrong in two ways at once:
+
+  - every PY workpaper has its own styles.xml, so across 172 controls
+    "format #2" means something different in each, and a date can come out
+    as 46061 or a percentage;
+  - Excel COMPACTS styles.xml every time a file is saved, so even the one
+    template they were lifted from stops matching once someone opens and
+    saves it. A real run hit exactly that and fell back to the standalone
+    layout.
+
+So each cell takes the format of the template cell it replaces (the PY
+sample row, the PY population row, the PY IA Calculation box). Where the
+template has no such cell, a format is appended to styles.xml for the
+purpose -- never looked up by position. See _resolve_styles. The STYLE_*
+constants remain only as defaults for direct callers that pass no styles.
 """
 from __future__ import annotations
 import os
+from dataclasses import dataclass, field
 from PIL import Image
 
 from agent.ooxml.models import WorkpaperRequest, SampleItem, PopulationRow, RawDataRow
 from agent.ooxml import ooxml_utils as ox
 from agent.ooxml import drawing_builder as db
+from agent.ooxml.summary_sheet import DRAFT_BANNER
 
 # Style indices lifted from T0_SS_PTP_AP_156_01__PY_Testing_wp.xlsx's
 # styles.xml. Verify these against `Sample.xml` in your own template before
@@ -37,6 +48,169 @@ STYLE_IA_LINE_LABEL = 11
 STYLE_IA_LINE_AMOUNT = 12
 STYLE_IA_TOTAL_LABEL = 13
 STYLE_IA_TOTAL_AMOUNT = 14
+
+
+@dataclass
+class CellStyles:
+    """The format index for each kind of cell this builder writes."""
+
+    text: int = STYLE_TEXT
+    date: int = STYLE_DATE
+    number: int = STYLE_NUMBER
+    ia_divider: int = STYLE_IA_DIVIDER
+    ia_header_label: int = STYLE_IA_HEADER_LABEL
+    ia_header_blank: int = STYLE_IA_HEADER_BLANK
+    ia_line_label: int = STYLE_IA_LINE_LABEL
+    ia_line_amount: int = STYLE_IA_LINE_AMOUNT
+    ia_total_label: int = STYLE_IA_TOTAL_LABEL
+    ia_total_amount: int = STYLE_IA_TOTAL_AMOUNT
+    # Column letter -> the format the TEMPLATE used in that column.
+    sample_columns: dict[str, int] = field(default_factory=dict)
+    population_columns: dict[str, int] = field(default_factory=dict)
+
+    def for_value(self, value, column: str, by_column: dict[str, int]) -> int | None:
+        if column in by_column:
+            return by_column[column]
+        if hasattr(value, "year"):
+            return self.date
+        if isinstance(value, str):
+            return self.text
+        if isinstance(value, float):
+            return self.number
+        return None
+
+
+def _append_styles(work_dir: str) -> CellStyles:
+    """Append a complete set of formats to styles.xml; return their indices.
+
+    The fallback for anything the template cannot show us. Appended, never
+    inserted: every existing cell addresses formats by position, so
+    renumbering would restyle the whole workbook.
+    """
+    import re as _re
+
+    path = os.path.join(work_dir, "xl", "styles.xml")
+    with open(path, encoding="utf-8") as fh:
+        xml = fh.read()
+
+    def count(tag: str) -> int:
+        m = _re.search(rf"<{tag}\b[^>]*count=\"(\d+)\"", xml)
+        return int(m.group(1)) if m else len(_re.findall(rf"<{tag[:-1]}\b", xml))
+
+    n_fonts, n_borders, n_xfs = count("fonts"), count("borders"), count("cellXfs")
+    bold = n_fonts
+    thin_box, rule_below, total_rule = n_borders, n_borders + 1, n_borders + 2
+    fonts = '<font><b/><sz val="11"/><name val="Calibri"/></font>'
+    borders = (
+        '<border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/><diagonal/></border>'
+        '<border><left/><right/><top/><bottom style="medium"/><diagonal/></border>'
+        '<border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="double"/><diagonal/></border>'
+    )
+
+    def xf(fmt: int, font: int = 0, border: int = 0) -> str:
+        return (
+            f'<xf numFmtId="{fmt}" fontId="{font}" fillId="0" borderId="{border}" '
+            f'applyNumberFormat="1" applyFont="1" applyBorder="1"/>'
+        )
+
+    # Built-in number formats: 0 General, 14 short date, 4 #,##0.00.
+    new = [
+        xf(0), xf(14), xf(4),                 # text, date, number
+        xf(0, border=rule_below),             # ia_divider
+        xf(0, bold, thin_box), xf(0, 0, thin_box),       # ia header label / blank
+        xf(0, 0, thin_box), xf(4, 0, thin_box),          # ia line label / amount
+        xf(0, bold, total_rule), xf(4, bold, total_rule),  # ia total label / amount
+    ]
+    for tag, addition, added in (
+        ("fonts", fonts, 1), ("borders", borders, 3), ("cellXfs", "".join(new), len(new)),
+    ):
+        xml = _re.sub(rf"(<{tag}\b[^>]*count=\")(\d+)", lambda m: f"{m.group(1)}{int(m.group(2)) + added}", xml, count=1)
+        xml = xml.replace(f"</{tag}>", f"{addition}</{tag}>", 1)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+
+    i = iter(range(n_xfs, n_xfs + len(new)))
+    return CellStyles(*(next(i) for _ in new))
+
+
+def _template_cells(sheet_xml_path: str, shared: list) -> dict[str, tuple[int | None, str, bool]]:
+    """{ref: (format index, text, has formula)} for every cell on a tab."""
+    import xml.etree.ElementTree as ET
+
+    ns = f"{{{ox.NS_MAIN}}}"
+    out: dict[str, tuple[int | None, str, bool]] = {}
+    for c in ET.parse(sheet_xml_path).getroot().iter(f"{ns}c"):
+        v = c.find(f"{ns}v")
+        raw = v.text if v is not None and v.text else ""
+        if c.get("t") == "s" and raw.isdigit() and int(raw) < len(shared):
+            raw = shared[int(raw)] or ""
+        elif c.get("t") == "inlineStr":
+            raw = "".join(t.text or "" for t in c.iter(f"{ns}t"))
+        style = c.get("s")
+        out[c.get("r", "")] = (int(style) if style else None, raw, c.find(f"{ns}f") is not None)
+    return out
+
+
+def _split_ref(ref: str) -> tuple[str, int]:
+    import re as _re
+
+    m = _re.fullmatch(r"([A-Z]+)(\d+)", ref)
+    return (m.group(1), int(m.group(2))) if m else ("", 0)
+
+
+def _resolve_styles(
+    work_dir: str, sample_sheet_path: str, population_sheet_path: str,
+    shared: list, *, population_first_row: int = 6,
+) -> CellStyles:
+    """Formats for every cell this builder writes, copied from the template
+    wherever the template has the equivalent cell. Must run BEFORE any rows
+    are replaced -- it reads the PY's own cells.
+    """
+    styles = _append_styles(work_dir)
+
+    sample = _template_cells(sample_sheet_path, shared)
+    for ref, (style, _text, _f) in sample.items():
+        col, row = _split_ref(ref)
+        if row == 2 and style is not None:
+            styles.sample_columns[col] = style
+
+    population = _template_cells(population_sheet_path, shared)
+    for ref, (style, _text, _f) in population.items():
+        col, row = _split_ref(ref)
+        if row == population_first_row and style is not None:
+            styles.population_columns[col] = style
+
+    # The PY's IA Calculation box, if it has one: found by its label, then
+    # read cell by cell around it.
+    label = next(
+        (ref for ref, (_s, text, _f) in sample.items() if text.strip().lower() == "ia calculation"),
+        None,
+    )
+    if label:
+        col, row = _split_ref(label)
+        nxt = ox.col_index_to_letter(ox.col_letter_to_index(col) + 1)
+
+        def style_at(ref: str) -> int | None:
+            return sample.get(ref, (None, "", False))[0]
+
+        for attr, ref in (
+            ("ia_header_label", label), ("ia_header_blank", f"{nxt}{row}"),
+            ("ia_divider", f"{col}{row - 1}"),
+            ("ia_line_label", f"{col}{row + 1}"), ("ia_line_amount", f"{nxt}{row + 1}"),
+        ):
+            got = style_at(ref)
+            if got is not None:
+                setattr(styles, attr, got)
+        total = next(
+            (r for r in range(row + 1, row + 30) if sample.get(f"{nxt}{r}", (None, "", False))[2]),
+            None,
+        )
+        if total:
+            for attr, ref in (("ia_total_label", f"{col}{total}"), ("ia_total_amount", f"{nxt}{total}")):
+                got = style_at(ref)
+                if got is not None:
+                    setattr(styles, attr, got)
+    return styles
 
 
 def sample_tab_name(base: str, sample_id: str, index: int, total: int) -> str:
@@ -62,11 +236,74 @@ def sample_tab_name(base: str, sample_id: str, index: int, total: int) -> str:
     return raw[:31].strip() or f"{base} {index + 1}"
 
 
+def adopt_prior_output(work_dir: str, sample_sheet: str = "Sample") -> list[str]:
+    """Make a previous CY workpaper usable as this run's template.
+
+    A workpaper this builder wrote is the natural template for the next
+    cycle -- it IS last year's file -- but it no longer has the shape the
+    builder looks for. Its single "Sample" tab became "Sample 1", "Sample
+    2", ... (one per sampled item) and a Summary was added in front. A real
+    run uploaded one as the prior year, the "Sample" tab was missing, and
+    the whole workpaper silently fell back to the standalone layout: no
+    tickmarks, no PY format, no explanation in the file.
+
+    So, when -- and only when -- the named sample tab is absent:
+      - the numbered sample tabs are recognised by name ("Sample" + a
+        space + something containing a digit, which is what this builder
+        produces; "Sample Selections" does not qualify and is never touched)
+      - the FIRST becomes the layout every new sample tab is cloned from,
+        renamed back to the plain name
+      - the rest are DELETED. Leaving them would ship last year's sampled
+        items, with last year's exhibits, inside this year's workpaper.
+
+    Independently, a Summary tab this builder generated is deleted so a
+    fresh one can replace it. It is recognised by its HEADINGS, not its
+    name: a hand-built PY workpaper may have a "Summary" of its own, and
+    deleting that would destroy prior-year content.
+
+    Returns one plain-English line per change, for the run's notes. Empty
+    when the template was an ordinary PY workpaper and nothing was done.
+    """
+    import re as _re
+    from agent.ooxml.summary_sheet import GENERATED_HEADINGS
+
+    notes: list[str] = []
+    sheets = ox.resolve_sheets(work_dir)
+
+    for name, num in list(sheets.items()):
+        rows = ox.first_rows_text(work_dir, num, rows=2)
+        if any(tuple(r[: len(GENERATED_HEADINGS)]) == GENERATED_HEADINGS for r in rows):
+            ox.delete_sheet(work_dir, name)
+            notes.append(f"removed the previous run's {name!r} tab; a new one replaces it")
+
+    sheets = ox.resolve_sheets(work_dir)
+    if sample_sheet in sheets:
+        return notes
+
+    numbered = [
+        name for name in sheets
+        if _re.fullmatch(rf"{_re.escape(sample_sheet)} .*\d.*", name)
+    ]
+    if not numbered:
+        return notes
+    base, stale = numbered[0], numbered[1:]
+    for name in stale:
+        ox.delete_sheet(work_dir, name)
+    ox.rename_sheet(work_dir, ox.resolve_sheets(work_dir)[base], sample_sheet)
+    notes.append(
+        f"the prior-year file is a previous CY workpaper: used its {base!r} tab as the "
+        f"sample layout"
+        + (f" and removed last cycle's {', '.join(repr(n) for n in stale)}" if stale else "")
+    )
+    return notes
+
+
 def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
-                            sst: ox.SharedStrings) -> None:
+                            sst: ox.SharedStrings, styles: CellStyles | None = None) -> None:
     """Overwrite the Sample sheet's data rows (raw data rows + IA Calculation
     block(s)) in place. Leaves row 1 (headers) and the <drawing> reference
     untouched."""
+    st = styles or CellStyles()
     rows: list[str] = []
 
     # --- raw data rows, one per sample, starting at row 2 ---
@@ -77,8 +314,10 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
             sample.raw_data.values.items(),
             key=lambda kv: ox.col_letter_to_index(kv[0]),
         ):
-            style = STYLE_DATE if hasattr(value, "year") else (
-                STYLE_TEXT if isinstance(value, str) else None
+            style = (
+                st.for_value(value, col_letter, st.sample_columns) if styles
+                else STYLE_DATE if hasattr(value, "year")
+                else STYLE_TEXT if isinstance(value, str) else None
             )
             cells.append(ox.cell_xml(f"{col_letter}{row_num}", value,
                                       style=style, sst=sst))
@@ -93,14 +332,14 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
         divider_row = next_row
         rows.append(
             f'<row r="{divider_row}" spans="2:6" ht="15.75" thickBot="1">'
-            f'<c r="B{divider_row}" s="{STYLE_IA_DIVIDER}"/></row>'
+            f'<c r="B{divider_row}" s="{st.ia_divider}"/></row>'
         )
         header_row = divider_row + 1
         rows.append(ox.row_xml(
             header_row,
             [ox.cell_xml(f"B{header_row}", "IA Calculation",
-                         style=STYLE_IA_HEADER_LABEL, sst=sst),
-             f'<c r="C{header_row}" s="{STYLE_IA_HEADER_BLANK}"/>'],
+                         style=st.ia_header_label, sst=sst),
+             f'<c r="C{header_row}" s="{st.ia_header_blank}"/>'],
             spans="2:6",
         ))
         line_row = header_row + 1
@@ -108,9 +347,9 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
             rows.append(ox.row_xml(
                 line_row,
                 [ox.cell_xml(f"B{line_row}", line.label,
-                             style=STYLE_IA_LINE_LABEL, sst=sst),
+                             style=st.ia_line_label, sst=sst),
                  ox.cell_xml(f"C{line_row}", line.amount,
-                             style=STYLE_IA_LINE_AMOUNT)],
+                             style=st.ia_line_amount)],
                 spans="2:6",
             ))
             line_row += 1
@@ -120,8 +359,8 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
         formula = f"SUM(C{first_line_row}:C{last_line_row})"
         rows.append(
             f'<row r="{total_row}" spans="2:6" ht="15.75" thickBot="1">'
-            f'{ox.cell_xml(f"B{total_row}", sample.ia_calculation.total_label, style=STYLE_IA_TOTAL_LABEL, sst=sst)}'
-            f'{ox.cell_xml(f"C{total_row}", sample.ia_calculation.total, style=STYLE_IA_TOTAL_AMOUNT, formula=formula)}'
+            f'{ox.cell_xml(f"B{total_row}", sample.ia_calculation.total_label, style=st.ia_total_label, sst=sst)}'
+            f'{ox.cell_xml(f"C{total_row}", sample.ia_calculation.total, style=st.ia_total_amount, formula=formula)}'
             f'</row>'
         )
         next_row = total_row + 2  # leave one blank row of breathing room
@@ -142,7 +381,8 @@ def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
 
 
 def build_population_sheet_xml(sheet_xml_path: str, population_rows: list[PopulationRow],
-                                sst: ox.SharedStrings, *, first_data_row: int = 6) -> None:
+                                sst: ox.SharedStrings, *, first_data_row: int = 6,
+                                styles: CellStyles | None = None) -> None:
     """Replace the Population tab's data rows.
 
     An EMPTY list leaves the sheet untouched. It used to clear it, which
@@ -165,9 +405,11 @@ def build_population_sheet_xml(sheet_xml_path: str, population_rows: list[Popula
         ):
             if value is None:
                 continue  # template omits blank cells entirely in Population
-            style = STYLE_DATE if hasattr(value, "year") else (
-                STYLE_TEXT if isinstance(value, str) else
-                (STYLE_NUMBER if col_letter in ("K", "L", "M") else None)
+            style = (
+                styles.for_value(value, col_letter, styles.population_columns) if styles
+                else STYLE_DATE if hasattr(value, "year")
+                else STYLE_TEXT if isinstance(value, str)
+                else (STYLE_NUMBER if col_letter in ("K", "L", "M") else None)
             )
             cells.append(ox.cell_xml(f"{col_letter}{row_num}", value,
                                       style=style, sst=sst))
@@ -226,7 +468,14 @@ def _drawing_for_sheet(work_dir: str, sheet_num: int) -> str:
         if target:
             return os.path.basename(target.group(1))
 
-    name = f"drawing{sheet_num}.xml"
+    # drawing<sheet_num>.xml is only a preference. Excel numbers drawings
+    # independently of sheets, so that name can already belong to ANOTHER
+    # tab -- and overwriting it would put this tab's exhibits on that one.
+    drawings_dir = os.path.join(work_dir, "xl", "drawings")
+    k = sheet_num
+    while os.path.exists(os.path.join(drawings_dir, f"drawing{k}.xml")):
+        k += 1
+    name = f"drawing{k}.xml"
     rid = "rIdDrawingCY"
     os.makedirs(os.path.dirname(rels_path), exist_ok=True)
     rels = (
@@ -268,6 +517,23 @@ def _drawing_for_sheet(work_dir: str, sheet_num: int) -> str:
 
 
 def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingResult) -> None:
+    # The drawing builder numbers its images from image1.png for every tab
+    # it draws, but xl/media is ONE folder for the whole workbook. Written
+    # as-is, sample 2's exhibits overwrote sample 1's -- and the template's
+    # own images on other tabs -- so every tab showed the last sample's
+    # pages. Renamed here to names nothing else is using.
+    media_dir = os.path.join(work_dir, "xl", "media")
+    os.makedirs(media_dir, exist_ok=True)
+    taken = set(os.listdir(media_dir))
+    renamed = []
+    n = 1
+    for rid, _fn, im in result.media:
+        while f"image{n}.png" in taken:
+            n += 1
+        taken.add(f"image{n}.png")
+        renamed.append((rid, f"image{n}.png", im))
+    result.media = renamed
+
     name = _drawing_for_sheet(work_dir, sheet_num)
     drawing_path = os.path.join(work_dir, "xl", "drawings", name)
     open(drawing_path, "w", encoding="utf-8").write(result.xml)
@@ -276,8 +542,6 @@ def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingRe
     os.makedirs(rels_dir, exist_ok=True)
     open(os.path.join(rels_dir, f"{name}.rels"), "w", encoding="utf-8").write(result.rels_xml())
 
-    media_dir = os.path.join(work_dir, "xl", "media")
-    os.makedirs(media_dir, exist_ok=True)
     for _rid, fn, im in result.media:
         im.save(os.path.join(media_dir, fn))
 
@@ -285,7 +549,8 @@ def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingRe
 def build_workpaper(request: WorkpaperRequest,
                      *, sample_sheet: str = "Sample", population_sheet: str = "Population",
                      parameters_sheet: str = "Parameters",
-                     on_unplaced=None, summary_rows=None) -> str:
+                     on_unplaced=None, summary_rows=None,
+                     draft_banner: str | None = DRAFT_BANNER) -> str:
     """Writes the workpaper and returns its path.
 
     on_unplaced, if given, is called once with the list of callouts whose
@@ -298,9 +563,14 @@ def build_workpaper(request: WorkpaperRequest,
     the workpaper ships claiming a tickmark it does not have, and the
     reviewer goes hunting for a red box that was never drawn. That is worse
     than either extreme the drop was chosen between.
+
+    draft_banner is printed in every tab's page header (the Summary also
+    carries it on screen). Pass None only for a file that is genuinely not
+    a draft -- nothing this package produces qualifies.
     """
     work_dir = request.output_path + ".workdir"
     ox.extract_template(request.template_path, work_dir)
+    adopt_prior_output(work_dir, sample_sheet)
 
     # Refuse a template this builder cannot write correctly, before writing
     # anything. Across a population of controls a wrong-but-produced
@@ -308,7 +578,10 @@ def build_workpaper(request: WorkpaperRequest,
     sheets = ox.check_template(
         work_dir,
         required_sheets=[sample_sheet, population_sheet],
-        max_style_index=STYLE_IA_TOTAL_AMOUNT,
+        # Formats are copied from the template or appended (see
+        # _resolve_styles), so no particular count is required -- only a
+        # styles.xml that exists.
+        max_style_index=0,
     )
     sample_sheet_num = sheets[sample_sheet]
     population_sheet_num = sheets[population_sheet]
@@ -319,7 +592,8 @@ def build_workpaper(request: WorkpaperRequest,
     sample_sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{sample_sheet_num}.xml")
     pop_sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{population_sheet_num}.xml")
 
-    build_population_sheet_xml(pop_sheet_path, request.population_rows, sst)
+    styles = _resolve_styles(work_dir, sample_sheet_path, pop_sheet_path, sst.strings)
+    build_population_sheet_xml(pop_sheet_path, request.population_rows, sst, styles=styles)
 
     # ONE TAB PER SAMPLED ITEM. The prior-year workpaper documents a single
     # selection on its Sample tab -- narrative, raw data row, exhibits,
@@ -345,7 +619,7 @@ def build_workpaper(request: WorkpaperRequest,
             path = os.path.join(work_dir, "xl", "worksheets", f"sheet{num}.xml")
         sheets_for_sample[label] = label
 
-        build_sample_sheet_xml(path, [item], sst)
+        build_sample_sheet_xml(path, [item], sst, styles)
         drawing = db.build_sample_drawing([item], column_layout)
         _write_drawing_and_media(work_dir, num, drawing)
         unplaced.extend(drawing.unplaced_callouts)
@@ -372,6 +646,14 @@ def build_workpaper(request: WorkpaperRequest,
     if on_unplaced is not None:
         on_unplaced(unplaced)
 
+    if draft_banner:
+        for num in ox.resolve_sheets(work_dir).values():
+            ox.stamp_print_header(
+                os.path.join(work_dir, "xl", "worksheets", f"sheet{num}.xml"), draft_banner
+            )
+
+    ox.repair_builtin_name_scopes(work_dir)
+    ox.remove_orphan_media(work_dir)
     ox.remove_calc_chain(work_dir)
     ox.repackage(work_dir, request.output_path)
     return request.output_path

@@ -38,6 +38,12 @@ _RED_BG, _RED_FG = "FFFFC7CE", "FF9C0006"
 _AMBER_BG, _AMBER_FG = "FFFFEB9C", "FF9C6500"
 _HEADER_BG = "FFD9D9D9"
 
+# Shown across the top of the Summary and in every tab's printed header.
+# The standalone builder (agent/workpaper.py) has carried this since the
+# start; the PY-mirroring path did not, so the file that looked MOST
+# finished was the only one with no draft marking at all.
+DRAFT_BANNER = "DRAFT -- AI-prepared, pending human reviewer approval. Not a finalized workpaper."
+
 # Column F carries the model's prose. It used to sit in the narrative box
 # on each sample tab, where it repeated per sample and pushed the legend
 # down; on the summary it is written once per test step, next to the rows
@@ -51,6 +57,15 @@ _COLUMNS = [
     ("F", "Conclusion", 52),
 ]
 _REVIEW_COLUMN = ("G", "Reviewer check", 40)
+
+# Row 1 is the DRAFT banner, row 2 the headings.
+_FIRST_DATA_ROW = 3
+
+# How a previous run's Summary is recognised when a past CY workpaper is
+# used as the template: by its headings, which no PY tab shares. The tab
+# NAME is not enough -- a real PY workpaper may have a "Summary" of its own,
+# and that one must never be deleted.
+GENERATED_HEADINGS = tuple(title for _c, title, _w in _COLUMNS[:3])
 
 
 @dataclass
@@ -99,6 +114,7 @@ class _Styles:
     red: int
     amber: int
     link: int
+    banner: int
 
 
 def _add_styles(work_dir: str) -> _Styles:
@@ -129,8 +145,9 @@ def _add_styles(work_dir: str) -> _Styles:
         f'<font><sz val="11"/><color rgb="{_RED_FG}"/><name val="Calibri"/></font>'
         f'<font><sz val="11"/><color rgb="{_AMBER_FG}"/><name val="Calibri"/></font>'
         f'<font><u/><sz val="11"/><color theme="10"/><name val="Calibri"/></font>'
+        f'<font><b/><sz val="12"/><color rgb="{_RED_FG}"/><name val="Calibri"/></font>'
     )
-    f_bold, f_green, f_red, f_amber, f_link = (n_fonts + i for i in range(5))
+    f_bold, f_green, f_red, f_amber, f_link, f_banner = (n_fonts + i for i in range(6))
 
     new_fills = "".join(
         f'<fill><patternFill patternType="solid"><fgColor rgb="{bg}"/>'
@@ -162,14 +179,15 @@ def _add_styles(work_dir: str) -> _Styles:
         + xf(f_red, fl_red, centre=True)
         + xf(f_amber, fl_amber, centre=True)
         + xf(f_link, 0, centre=True)
+        + xf(f_banner, fl_red)
     )
-    s_header, s_text, s_green, s_red, s_amber, s_link = (n_xfs + i for i in range(6))
+    s_header, s_text, s_green, s_red, s_amber, s_link, s_banner = (n_xfs + i for i in range(7))
 
     for tag, count, addition in (
-        ("fonts", n_fonts + 5, new_fonts),
+        ("fonts", n_fonts + 6, new_fonts),
         ("fills", n_fills + 4, new_fills),
         ("borders", n_borders + 1, new_borders),
-        ("cellXfs", n_xfs + 6, new_xfs),
+        ("cellXfs", n_xfs + 7, new_xfs),
     ):
         xml = re.sub(rf'<{tag} count="\d+"', f'<{tag} count="{count}"', xml, count=1)
         xml = xml.replace(f"</{tag}>", f"{addition}</{tag}>", 1)
@@ -177,7 +195,7 @@ def _add_styles(work_dir: str) -> _Styles:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(xml)
 
-    return _Styles(s_header, s_text, s_green, s_red, s_amber, s_link)
+    return _Styles(s_header, s_text, s_green, s_red, s_amber, s_link, s_banner)
 
 
 def _sheet_xml(
@@ -196,22 +214,33 @@ def _sheet_xml(
         for c, _t, w in columns
     )
 
+    spans = f"1:{ox.col_letter_to_index(last_col)}"
     body = [
+        # Row 1 is the draft banner, merged across the table. It is the
+        # first thing on the first tab, so nobody opens this file without
+        # seeing it.
         ox.row_xml(
             1,
+            [ox.cell_xml("A1", DRAFT_BANNER, style=styles.banner, sst=sst)]
+            + [ox.cell_xml(f"{c}1", None, style=styles.banner, sst=sst) for c, _t, _w in columns[1:]],
+            spans=spans,
+            extra_attrs=' ht="22" customHeight="1"',
+        ),
+        ox.row_xml(
+            2,
             [
-                ox.cell_xml(f"{c}1", title, style=styles.header, sst=sst)
+                ox.cell_xml(f"{c}2", title, style=styles.header, sst=sst)
                 for c, title, _w in columns
             ],
-            spans=f'1:{ox.col_letter_to_index(last_col)}',
+            spans=spans,
             extra_attrs=' ht="20" customHeight="1"',
-        )
+        ),
     ]
 
     hyperlinks = []
     fill_for = {"green": styles.green, "red": styles.red, "amber": styles.amber}
 
-    for i, row in enumerate(rows, start=2):
+    for i, row in enumerate(rows, start=_FIRST_DATA_ROW):
         verdict_style = fill_for[row.verdict_colour]
         target_sheet = row.link_to.split("!")[0].strip("'") if row.link_to else ""
         linkable = bool(row.link_to) and (existing_sheets is None or target_sheet in existing_sheets)
@@ -249,15 +278,17 @@ def _sheet_xml(
             )
 
     links_xml = f"<hyperlinks>{''.join(hyperlinks)}</hyperlinks>" if hyperlinks else ""
+    merge_xml = f'<mergeCells count="1"><mergeCell ref="A1:{last_col}1"/></mergeCells>'
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        f'<dimension ref="A1:{last_col}{len(rows) + 1}"/>'
+        f'<dimension ref="A1:{last_col}{len(rows) + _FIRST_DATA_ROW - 1}"/>'
         '<sheetViews><sheetView tabSelected="1" workbookViewId="0"/></sheetViews>'
         '<sheetFormatPr defaultRowHeight="15"/>'
         f"<cols>{cols}</cols>"
         f"<sheetData>{''.join(body)}</sheetData>"
+        f"{merge_xml}"
         f"{links_xml}"
         '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
         "</worksheet>"
@@ -285,11 +316,31 @@ def add_summary_sheet(
     # made every hyperlink target look absent -- so the tab shipped with
     # no working links at all.
     existing_sheet_names = set(ox.resolve_sheets(work_dir))
+    # A PY workpaper may already have a "Summary" of its own (a previous
+    # run's is removed before this point -- see adopt_prior_output). Two
+    # tabs with one name is a workbook Excel will not open, so ours steps
+    # aside rather than the template's being touched.
+    if name in existing_sheet_names:
+        name = next(
+            candidate for candidate in (f"CY {name}", *(f"CY {name} {i}" for i in range(2, 100)))
+            if candidate not in existing_sheet_names
+        )
 
     # Next free sheetN.xml, so this never collides with the template's own.
     sheet_dir = os.path.join(work_dir, "xl", "worksheets")
     existing = [f for f in os.listdir(sheet_dir) if re.fullmatch(r"sheet\d+\.xml", f)]
     n = max((int(re.findall(r"\d+", f)[0]) for f in existing), default=0) + 1
+
+    # Only ONE tab may be selected. The template arrives with its own
+    # selected tab; leaving that flag on as well opens the workbook with
+    # both tabs GROUPED, and anything typed then lands on both of them.
+    for fn in existing:
+        path = os.path.join(sheet_dir, fn)
+        with open(path, encoding="utf-8") as fh:
+            xml = fh.read()
+        if 'tabSelected="1"' in xml:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(xml.replace(' tabSelected="1"', ""))
 
     with open(os.path.join(sheet_dir, f"sheet{n}.xml"), "w", encoding="utf-8") as fh:
         fh.write(_sheet_xml(rows, sst, styles, existing_sheet_names))
@@ -299,6 +350,8 @@ def add_summary_sheet(
         rels = fh.read()
     # A relationship id that cannot collide with the template's rId1..rIdN.
     rid = "rIdSummary"
+    while f'Id="{rid}"' in rels:
+        rid += "X"
     rels = rels.replace(
         "</Relationships>",
         f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
@@ -315,6 +368,11 @@ def add_summary_sheet(
     used_ids = [int(x) for x in re.findall(r'sheetId="(\d+)"', wb)] or [0]
     entry = f'<sheet name="{escape(name)}" sheetId="{max(used_ids) + 1}" r:id="{rid}"/>'
     wb = wb.replace("<sheets>", f"<sheets>{entry}", 1)
+    # Everything that addressed a tab by position now addresses the one to
+    # its left unless shifted -- see shift_tab_positions. Then make the
+    # Summary the tab the file opens on.
+    wb = ox.shift_tab_positions(wb, 0, +1)
+    wb = re.sub(r'\bactiveTab="\d+"', 'activeTab="0"', wb)
     with open(wb_path, "w", encoding="utf-8") as fh:
         fh.write(wb)
 

@@ -111,13 +111,34 @@ class SharedStrings:
         self.path = os.path.join(work_dir, "xl", "sharedStrings.xml")
         self.strings: list[str | None] = []
         self._index: dict[str, int] = {}
+        # The template's own entries, as the exact XML they arrived in, and
+        # written back untouched. An entry with mixed formatting -- one bold
+        # word in a sentence -- is stored as several <r> runs with no direct
+        # <t>, and the first version read those as EMPTY and wrote them back
+        # empty: prior-year text on every tab, silently blanked.
+        self._raw: list[str] = []
         if os.path.exists(self.path):
-            root = ET.fromstring(open(self.path, encoding="utf-8").read())
-            ns = {"m": NS_MAIN}
-            for si in root:
-                t = si.find("m:t", ns)
-                self.strings.append(t.text if t is not None else None)
+            data = open(self.path, encoding="utf-8").read()
+            root = ET.fromstring(data)
+            ns = f"{{{NS_MAIN}}}"
+            for si in root.findall(f"{ns}si"):
+                # All text runs, but not phonetic guides (<rPh>), which
+                # repeat the text in another script.
+                text = "".join(
+                    t.text or ""
+                    for child in si
+                    if child.tag in (f"{ns}t", f"{ns}r")
+                    for t in ([child] if child.tag == f"{ns}t" else child.findall(f"{ns}t"))
+                )
+                self.strings.append(text)
+            self._raw = re.findall(r"<(?:\w+:)?si\b[^>]*?(?:/>|>.*?</(?:\w+:)?si>)", data, re.S)
+            if len(self._raw) != len(self.strings):
+                self._raw = []  # unexpected shape; fall back to regenerating
         for i, s in enumerate(self.strings):
+            # Only PLAIN entries are reused for new cells. Reusing a
+            # formatted one would give new text someone else's bold word.
+            if self._raw and "<r>" in self._raw[i]:
+                continue
             self._index.setdefault(s if s is not None else "", i)
 
     def get_or_add(self, value: str | None) -> int:
@@ -174,8 +195,8 @@ class SharedStrings:
 
     def write(self) -> None:
         self._register_part()
-        items = []
-        for s in self.strings:
+        items = list(self._raw)
+        for s in self.strings[len(items):]:
             if s is None or s == "":
                 items.append('<si><t xml:space="preserve"></t></si>')
             else:
@@ -236,11 +257,27 @@ def replace_sheet_rows(sheet_xml_path: str, start_marker: str, end_marker: str,
                         old_dimension: str | None = None) -> None:
     """Splice new row XML into an existing worksheet XML file, replacing
     everything between the first occurrence of start_marker and end_marker.
-    Typical usage: start_marker='<row r="6"', end_marker='</sheetData>'."""
+    Typical usage: start_marker='<row r="6"', end_marker='</sheetData>'.
+
+    When the template has no row at exactly that number -- a PY tab with
+    only its header row, or with data starting lower down -- the new rows go
+    where that row WOULD be: before the first later row, or at the end.
+    This used to assert, which raised after the run had finished and lost
+    the whole workpaper over a template that was perfectly usable.
+    """
     data = open(sheet_xml_path, encoding="utf-8").read()
+    data = re.sub(r"<sheetData\s*/>", "<sheetData></sheetData>", data, count=1)
     start = data.find(start_marker)
     end = data.find(end_marker)
-    assert start != -1 and end != -1, "markers not found in sheet XML"
+    if start == -1 and end != -1:
+        wanted = re.search(r'r="(\d+)"', start_marker)
+        later = [
+            m.start() for m in re.finditer(r'<row\b[^>]*?\br="(\d+)"', data)
+            if wanted and int(m.group(1)) > int(wanted.group(1))
+        ]
+        start = later[0] if later else end
+    if start == -1 or end == -1:
+        raise ValueError(f"no <sheetData> in {os.path.basename(sheet_xml_path)}")
     new_data = data[:start] + new_rows_xml + data[end:]
     if new_dimension and old_dimension:
         new_data = new_data.replace(old_dimension, new_dimension)
@@ -462,13 +499,15 @@ def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str) -> int:
     # scattered them after Population and Parameters, which reads as a
     # mistake in a workpaper a reviewer pages through in order.
     prefix = new_name.rsplit(" ", 1)[0] if " " in new_name else new_name
+    all_tabs = list(re.finditer(r"<sheet\b[^>]*/>", wb))
     siblings = [
-        m for m in re.finditer(r"<sheet\b[^>]*/>", wb)
+        (i, m) for i, m in enumerate(all_tabs)
         if re.search(rf'name="{re.escape(prefix)}[^"]*"', m.group(0))
     ]
     if siblings:
-        at = siblings[-1].end()
-        wb = wb[:at] + entry + wb[at:]
+        position, last = siblings[-1][0] + 1, siblings[-1][1]
+        wb = wb[: last.end()] + entry + wb[last.end():]
+        wb = shift_tab_positions(wb, position, +1)
     else:
         wb = wb.replace("</sheets>", f"{entry}</sheets>", 1)
     with open(wb_path, "w", encoding="utf-8") as fh:
@@ -514,3 +553,310 @@ def rename_sheet(work_dir: str, sheet_num: int, new_name: str) -> None:
     )
     with open(wb_path, "w", encoding="utf-8") as fh:
         fh.write(wb)
+
+
+# ---------------------------------------------------------------------------
+# Tab positions, deletion, and housekeeping
+# ---------------------------------------------------------------------------
+
+def shift_tab_positions(wb: str, at: int, delta: int) -> str:
+    """Keep workbook.xml's position-indexed references pointing at the
+    same tabs after a tab is inserted (+1) or removed (-1) at `at`.
+
+    Two things in workbook.xml address a tab by its POSITION in the tab
+    order rather than by name: a definedName's localSheetId (print titles,
+    print areas, autofilter ranges) and the workbookView's activeTab /
+    firstSheet. Inserting the Summary at position 0 without shifting them
+    moved every one of those onto the tab to its left -- a real output had
+    Population's print titles and filter range attached to "Sample 1".
+    Excel raises nothing; the settings are simply on the wrong tab.
+
+    On removal, a definedName that belonged to the removed tab is dropped
+    rather than reassigned to whichever tab slid into its place.
+    """
+    def fix_name(m: re.Match) -> str:
+        element = m.group(0)
+        lid = re.search(r'localSheetId="(\d+)"', element)
+        if not lid:
+            return element
+        i = int(lid.group(1))
+        if delta < 0 and i == at:
+            return ""
+        if (delta > 0 and i >= at) or (delta < 0 and i > at):
+            element = element.replace(lid.group(0), f'localSheetId="{i + delta}"', 1)
+        return element
+
+    wb = re.sub(r"<definedName\b[^>]*>.*?</definedName>", fix_name, wb, flags=re.S)
+    wb = re.sub(r"<definedNames>\s*</definedNames>", "", wb)
+
+    def fix_view(m: re.Match) -> str:
+        attr, i = m.group(1), int(m.group(2))
+        if delta < 0 and i == at:
+            i = 0
+        elif (delta > 0 and i >= at) or (delta < 0 and i > at):
+            i += delta
+        return f'{attr}="{max(i, 0)}"'
+
+    return re.sub(r'\b(activeTab|firstSheet)="(\d+)"', fix_view, wb)
+
+
+def _rels_path_for(part_path: str) -> str:
+    folder, name = os.path.split(part_path)
+    return os.path.join(folder, "_rels", f"{name}.rels")
+
+
+def _drop_content_override(work_dir: str, part_name: str) -> None:
+    ct_path = os.path.join(work_dir, "[Content_Types].xml")
+    with open(ct_path, encoding="utf-8") as fh:
+        ct = fh.read()
+    ct = re.sub(rf'<Override\b[^>]*PartName="{re.escape(part_name)}"[^>]*/>', "", ct)
+    with open(ct_path, "w", encoding="utf-8") as fh:
+        fh.write(ct)
+
+
+def delete_sheet(work_dir: str, name: str) -> bool:
+    """Remove the tab called `name`, with its part, rels and drawing.
+
+    Returns False (and changes nothing) when there is no such tab.
+
+    Like adding a sheet, removing one is several edits that must agree --
+    the <sheet> entry, the workbook relationship, the content-type override,
+    and every position-indexed reference to the tabs after it (see
+    shift_tab_positions). Missing any one gives Excel's nameless repair
+    prompt.
+
+    A defined name whose formula points INTO the deleted tab is dropped:
+    left in place it would evaluate to #REF!. Cell formulas on OTHER tabs
+    that reference it are not rewritten; Excel shows #REF! for those on
+    recalculation, which is the honest result for a reference to a tab that
+    no longer exists.
+    """
+    wb_path = os.path.join(work_dir, "xl", "workbook.xml")
+    with open(wb_path, encoding="utf-8") as fh:
+        wb = fh.read()
+
+    tabs = list(re.finditer(r"<sheet\b[^>]*/>", wb))
+    position = rid = None
+    for i, m in enumerate(tabs):
+        got = re.search(r'\bname="([^"]*)"', m.group(0))
+        if got and unescape(got.group(1), {"&quot;": '"', "&apos;": "'"}) == name:
+            position = i
+            rid_m = re.search(r'r:id="([^"]+)"', m.group(0))
+            rid = rid_m.group(1) if rid_m else None
+            wb = wb[: m.start()] + wb[m.end():]
+            break
+    if position is None:
+        return False
+
+    wb = shift_tab_positions(wb, position, -1)
+    quoted = "'" + name.replace("'", "''") + "'"
+    pointing_here = re.compile(
+        rf"{re.escape(escape(quoted))}!|(?<![\w'.]){re.escape(escape(name))}!"
+    )
+    wb = re.sub(
+        r"<definedName\b[^>]*>(.*?)</definedName>",
+        lambda m: "" if pointing_here.search(m.group(1)) else m.group(0),
+        wb,
+        flags=re.S,
+    )
+    wb = re.sub(r"<definedNames>\s*</definedNames>", "", wb)
+    with open(wb_path, "w", encoding="utf-8") as fh:
+        fh.write(wb)
+
+    rels_path = os.path.join(work_dir, "xl", "_rels", "workbook.xml.rels")
+    with open(rels_path, encoding="utf-8") as fh:
+        rels = fh.read()
+    target = ""
+    for m in re.finditer(r"<Relationship\b[^>]*/>", rels):
+        if rid and re.search(rf'\bId="{re.escape(rid)}"', m.group(0)):
+            t = re.search(r'Target="([^"]*)"', m.group(0))
+            target = t.group(1) if t else ""
+            rels = rels[: m.start()] + rels[m.end():]
+            break
+    with open(rels_path, "w", encoding="utf-8") as fh:
+        fh.write(rels)
+
+    num = re.search(r"sheet(\d+)\.xml$", target)
+    if not num:
+        return True
+    sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{num.group(1)}.xml")
+    sheet_rels = _rels_path_for(sheet_path)
+
+    # Its drawing goes with it: nothing else references a sheet's drawing,
+    # and the images it points at are swept by remove_orphan_media.
+    if os.path.exists(sheet_rels):
+        with open(sheet_rels, encoding="utf-8") as fh:
+            for t in re.findall(r'Target="([^"]*drawings/(drawing\d+\.xml))"', fh.read()):
+                drawing_path = os.path.join(work_dir, "xl", "drawings", t[1])
+                for p in (drawing_path, _rels_path_for(drawing_path)):
+                    if os.path.exists(p):
+                        os.remove(p)
+                _drop_content_override(work_dir, f"/xl/drawings/{t[1]}")
+        os.remove(sheet_rels)
+    if os.path.exists(sheet_path):
+        os.remove(sheet_path)
+    _drop_content_override(work_dir, f"/xl/worksheets/sheet{num.group(1)}.xml")
+    return True
+
+
+def remove_orphan_media(work_dir: str) -> list[str]:
+    """Delete images in xl/media that no part references any more.
+
+    Replacing a tab's drawing leaves the images it used behind. Excel
+    ignores them, but they stay in the file -- and when the template was
+    a previous workpaper, those are LAST year's exhibits, travelling
+    invisibly inside this year's file. Every .rels in the package is
+    scanned, so an image still used anywhere (another tab, a chart, a
+    header picture) is kept.
+    """
+    media_dir = os.path.join(work_dir, "xl", "media")
+    if not os.path.isdir(media_dir):
+        return []
+    referenced: set[str] = set()
+    for root, _dirs, files in os.walk(work_dir):
+        for fn in files:
+            if fn.endswith(".rels"):
+                with open(os.path.join(root, fn), encoding="utf-8") as fh:
+                    referenced.update(
+                        os.path.basename(t) for t in re.findall(r'Target="([^"]*media/[^"]+)"', fh.read())
+                    )
+    removed = [fn for fn in os.listdir(media_dir) if fn not in referenced]
+    for fn in removed:
+        os.remove(os.path.join(media_dir, fn))
+    return removed
+
+
+def first_rows_text(work_dir: str, sheet_num: int, rows: int = 2) -> list[list[str]]:
+    """The text of a tab's first `rows` rows, cell by cell in column order.
+
+    For RECOGNISING a tab by its headings, not for reading data -- numbers
+    come back as their raw stored strings.
+    """
+    ns = f"{{{NS_MAIN}}}"
+    sst_path = os.path.join(work_dir, "xl", "sharedStrings.xml")
+    shared: list[str] = []
+    if os.path.exists(sst_path):
+        shared = [
+            "".join(t.text or "" for t in si.iter(f"{ns}t"))
+            for si in ET.parse(sst_path).getroot().findall(f"{ns}si")
+        ]
+    root = ET.parse(os.path.join(work_dir, "xl", "worksheets", f"sheet{sheet_num}.xml")).getroot()
+    out: list[list[str]] = []
+    for row in root.iter(f"{ns}row"):
+        if len(out) >= rows:
+            break
+        texts = []
+        for c in row.findall(f"{ns}c"):
+            if c.get("t") == "inlineStr":
+                texts.append("".join(t.text or "" for t in c.iter(f"{ns}t")))
+                continue
+            v = c.find(f"{ns}v")
+            raw = v.text if v is not None and v.text else ""
+            if c.get("t") == "s" and raw.isdigit() and int(raw) < len(shared):
+                texts.append(shared[int(raw)])
+            else:
+                texts.append(raw)
+        out.append(texts)
+    return out
+
+
+# Sheet XML children that must come AFTER <headerFooter>, in schema order.
+# Inserting the header anywhere else makes Excel reject the sheet.
+_AFTER_HEADER_FOOTER = (
+    "rowBreaks", "colBreaks", "customProperties", "cellWatches", "ignoredErrors",
+    "smartTags", "drawing", "legacyDrawing", "legacyDrawingHF", "drawingHF",
+    "picture", "oleObjects", "controls", "webPublishItems", "tableParts", "extLst",
+)
+
+
+def stamp_print_header(sheet_xml_path: str, text: str) -> bool:
+    """Put `text` in red, bold, centred, in the tab's printed page header.
+
+    Returns False when the tab already has a page header of its own, which
+    is left alone: a template's header is the template's, and merging into
+    Excel's &L/&C/&R section codes risks garbling it.
+    """
+    with open(sheet_xml_path, encoding="utf-8") as fh:
+        xml = fh.read()
+    if "<oddHeader" in xml:
+        return False
+    # &C centre, &"-,Bold" bold in the default font, &KFF0000 red. The &
+    # codes are Excel's; they are XML-escaped to &amp; here.
+    header = escape(f'&C&"-,Bold"&KFF0000{text}')
+    if "<headerFooter" in xml:
+        xml = re.sub(r"<headerFooter\b([^>]*)/>", rf"<headerFooter\1><oddHeader>{header}</oddHeader></headerFooter>", xml, count=1)
+        xml = re.sub(r"(<headerFooter\b[^>]*>)(?!<oddHeader>)", rf"\1<oddHeader>{header}</oddHeader>", xml, count=1)
+    else:
+        element = f"<headerFooter><oddHeader>{header}</oddHeader></headerFooter>"
+        following = re.search(
+            r"<(?:%s)\b" % "|".join(_AFTER_HEADER_FOOTER), xml
+        )
+        at = following.start() if following else xml.rindex("</worksheet>")
+        xml = xml[:at] + element + xml[at:]
+    with open(sheet_xml_path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    return True
+
+
+def repair_builtin_name_scopes(work_dir: str) -> list[str]:
+    """Re-attach Excel's built-in names (_xlnm.*) to the tab they describe.
+
+    Print_Titles, Print_Area and _FilterDatabase are scoped to a tab by
+    POSITION (localSheetId) but always name that same tab inside their
+    formula ("Population!$5:$5"). The two disagreeing is never intended;
+    it is what an earlier version of this builder left behind by inserting
+    tabs without shifting positions, and Excel preserves it on every save
+    after. Files carrying it exist in the wild -- a previous CY workpaper
+    used as a template had Population's filter and print titles attached
+    to a Sample tab -- so this repairs rather than only preventing.
+
+    A mis-scoped name whose rightful tab already has a name of its own of
+    the same kind is dropped instead of moved: two equal names on one tab
+    is a corrupt workbook.
+    """
+    wb_path = os.path.join(work_dir, "xl", "workbook.xml")
+    with open(wb_path, encoding="utf-8") as fh:
+        wb = fh.read()
+    order = [
+        unescape(m, {"&quot;": '"', "&apos;": "'"})
+        for m in re.findall(r'<sheet\b[^>]*?\bname="([^"]*)"', wb)
+    ]
+
+    pattern = re.compile(r"<definedName\b([^>]*)>(.*?)</definedName>", re.S)
+    existing = {
+        (re.search(r'\bname="([^"]*)"', a).group(1), re.search(r'localSheetId="(\d+)"', a).group(1))
+        for a, _f in pattern.findall(wb)
+        if re.search(r'\bname="', a) and re.search(r"localSheetId=", a)
+    }
+    notes: list[str] = []
+
+    def fix(m: re.Match) -> str:
+        attrs, formula = m.group(1), m.group(2)
+        name = re.search(r'\bname="([^"]*)"', attrs)
+        lid = re.search(r'localSheetId="(\d+)"', attrs)
+        if not (name and lid and name.group(1).startswith("_xlnm.")):
+            return m.group(0)
+        refs = {
+            (q or u).replace("''", "'")
+            for q, u in re.findall(r"'((?:[^']|'')+)'!|(?<![\w'.\]])([A-Za-z_][\w. ]*?)!", unescape(formula))
+        }
+        if len(refs) != 1:
+            return m.group(0)
+        target = refs.pop()
+        if target not in order:
+            return m.group(0)
+        want, have = order.index(target), int(lid.group(1))
+        if want == have:
+            return m.group(0)
+        if (name.group(1), str(want)) in existing:
+            notes.append(f"dropped a duplicate {name.group(1)} for {target!r}")
+            return ""
+        existing.add((name.group(1), str(want)))
+        notes.append(f"re-attached {name.group(1)} to {target!r}")
+        return m.group(0).replace(lid.group(0), f'localSheetId="{want}"', 1)
+
+    fixed = pattern.sub(fix, wb)
+    if fixed != wb:
+        with open(wb_path, "w", encoding="utf-8") as fh:
+            fh.write(fixed)
+    return notes

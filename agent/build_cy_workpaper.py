@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.ooxml import ooxml_utils as ox
+from agent.ooxml.build_workpaper import adopt_prior_output
 from agent.ooxml.build_workpaper import build_workpaper as build_ooxml_workpaper
 from agent.ooxml.models import PopulationRow, WorkpaperRequest
 from agent.narrative_styles import NarrativeStyle
@@ -58,13 +59,19 @@ class WorkpaperOutcome:
     mirrored_py: bool
     warnings: list[str] = field(default_factory=list)
     unplaced_callouts: list[tuple[str, str, str, str]] = field(default_factory=list)
+    # Why the prior-year layout was NOT used, in a sentence. Empty when it
+    # was. Kept separate from `warnings` so a caller can put it front and
+    # centre: a run that fell back produced a workpaper that looks nothing
+    # like last year's, and the first version reported that only in small
+    # grey text -- a reviewer reasonably took it for a regression.
+    fallback_reason: str = ""
 
     @property
     def summary_line(self) -> str:
         how = (
             "mirroring the prior-year workpaper's layout"
             if self.mirrored_py
-            else "using the standalone layout (the PY file could not be used as a template)"
+            else f"using the standalone layout, NOT last year's format -- {self.fallback_reason}"
         )
         note = ""
         if self.unplaced_callouts:
@@ -109,31 +116,59 @@ def _population_rows(
         wb.close()
 
 
-def _can_mirror(py_path: Path, sample_sheet: str, population_sheet: str) -> tuple[bool, str]:
-    """Whether the PY file can be written into, and why not when it can't.
+def check_py_template(
+    py_path: Path, sample_sheet: str = "Sample", population_sheet: str = "Population"
+) -> tuple[bool, str, list[str]]:
+    """(usable, why not, notes) for a prior-year file, before anything runs.
+
+    Public so the app can call it the moment the file is uploaded. Finding
+    out AFTER a paid run that the PY file was unusable is the expensive
+    order; a red message beside the upload box costs nothing.
 
     Checked by actually unpacking and inspecting it rather than by
-    extension. A file can be named .xlsx and still be the wrong shape, and
-    finding that out here -- before any conclusion has been rendered -- is
-    much better than a half-written workbook.
+    extension. A file can be named .xlsx and still be the wrong shape.
+    The probe applies adopt_prior_output exactly as the real build does,
+    so a previous CY workpaper is judged as the builder will see it.
     """
     if py_path.suffix.lower() not in (".xlsx", ".xlsm"):
-        return False, f"the PY workpaper is a {py_path.suffix or 'file with no extension'}, not a workbook"
+        return False, (
+            f"the PY workpaper is a {py_path.suffix or 'file with no extension'}, "
+            "not an .xlsx/.xlsm workbook"
+        ), []
     import tempfile
 
-    with tempfile.TemporaryDirectory() as probe:
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = str(Path(tmp) / "probe")
         try:
             ox.extract_template(str(py_path), probe)
+            notes = adopt_prior_output(probe, sample_sheet)
             ox.check_template(
                 probe,
                 required_sheets=[sample_sheet, population_sheet],
-                max_style_index=14,  # build_workpaper's highest STYLE_* index
+                max_style_index=0,  # formats are copied from the template, not addressed by position
             )
         except ox.TemplateMismatch as exc:
-            return False, str(exc)
+            return False, _plain_mismatch(str(exc), sample_sheet, population_sheet), []
         except Exception as exc:  # noqa: BLE001 -- a corrupt or exotic file is a fallback, not a crash
-            return False, f"the PY workpaper could not be opened as a template: {exc}"
-    return True, ""
+            return False, f"the PY workpaper could not be opened as a template: {exc}", []
+    return True, "", notes
+
+
+def _plain_mismatch(detail: str, sample_sheet: str, population_sheet: str) -> str:
+    """The template error, led by what to DO about it."""
+    if "no sheet named" in detail:
+        return (
+            f"it needs tabs named {sample_sheet!r} and {population_sheet!r} "
+            f"(or numbered '{sample_sheet} 1', '{sample_sheet} 2'... from a previous "
+            f"CY workpaper). Details: {detail}"
+        )
+    return detail
+
+
+# Kept under its old name for callers and tests that use the two-value form.
+def _can_mirror(py_path: Path, sample_sheet: str, population_sheet: str) -> tuple[bool, str]:
+    ok, why, _notes = check_py_template(py_path, sample_sheet, population_sheet)
+    return ok, why
 
 
 def build_cy_workpaper(
@@ -181,15 +216,15 @@ def build_cy_workpaper(
         return _legacy(spec, results, py_testing_filename, out_dir, support, population_workbook,
                        ["no test step reached a conclusion, so there was nothing to mirror"])
 
-    can, why = _can_mirror(py_path, sample_sheet_name, population_sheet_name)
+    can, why, adopted = check_py_template(py_path, sample_sheet_name, population_sheet_name)
     if not can:
         return _legacy(spec, results, py_testing_filename, out_dir, support, population_workbook,
-                       [f"could not mirror the prior-year layout: {why}"])
+                       [f"could not mirror the prior-year layout: {why}"], reason=why)
 
     # One Sample tab holds every sampled item across every test step, which
     # is how the prior-year workpapers are built -- the sample listing is
     # per control, not per step.
-    warnings: list[str] = []
+    warnings: list[str] = list(adopted)
     sample_items = []
     step_labels = []
     for step_id, conclusion in conclusions:
@@ -203,7 +238,7 @@ def build_cy_workpaper(
             manifest,
             control_id=spec["control_id"],
             template_path=py_path,
-            output_path=out_dir / f"{spec['control_id']}_CY_Testing_wp.xlsx",
+            output_path=out_dir / _mirrored_filename(spec["control_id"]),
             support_dir=support,
             narrative_style=narrative_style,
             step_label=f"{step_id}: {text}" if text else step_id,
@@ -212,7 +247,7 @@ def build_cy_workpaper(
         warnings.extend(f"[{step_id}] {w}" for w in step_warnings)
         step_labels.append(f"{step_id}: {text}" if text else step_id)
 
-    output_path = out_dir / f"{spec['control_id']}_CY_Testing_wp.xlsx"
+    output_path = out_dir / _mirrored_filename(spec["control_id"])
     request = WorkpaperRequest(
         template_path=str(py_path),
         output_path=str(output_path),
@@ -263,6 +298,16 @@ def build_cy_workpaper(
     return WorkpaperOutcome(output_path, mirrored_py=True, warnings=warnings, unplaced_callouts=unplaced)
 
 
+def _mirrored_filename(control_id: str) -> str:
+    """DRAFT in the name, because the name is what travels: attached to an
+    email, listed in a folder, nobody sees the banner inside. "_wp_" keeps
+    it distinct from the standalone builder's "..._CY_Testing_DRAFT.xlsx",
+    so which layout a file got is visible without opening it.
+    """
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(control_id))
+    return f"{safe}_CY_Testing_wp_DRAFT.xlsx"
+
+
 def _legacy(
     spec: dict[str, Any],
     results: dict[str, dict],
@@ -271,6 +316,8 @@ def _legacy(
     support: Path,
     population_workbook: str | None,
     warnings: list[str],
+    *,
+    reason: str = "",
 ) -> WorkpaperOutcome:
     """The standalone builder, for when PY cannot be mirrored."""
     from agent.workpaper import build_workpaper as build_legacy_workpaper
@@ -283,4 +330,7 @@ def _legacy(
         support_dir=support,
         source_workbook=population_workbook,
     )
-    return WorkpaperOutcome(Path(path), mirrored_py=False, warnings=warnings)
+    return WorkpaperOutcome(
+        Path(path), mirrored_py=False, warnings=warnings,
+        fallback_reason=reason or (warnings[0] if warnings else "reason not recorded"),
+    )

@@ -299,3 +299,255 @@ def test_every_summary_link_points_at_a_tab_that_exists(tmp_path: Path):
     assert targets
     assert all(t in wb.sheetnames for t in targets), (targets, wb.sheetnames)
     wb.close()
+
+
+# --------------------------------------------------------------------------
+# A previous CY workpaper as the template
+#
+# A real run uploaded last cycle's OUTPUT as the prior year. Its "Sample"
+# tab had become "Sample 1"/"Sample 2", Excel had compacted its formats on
+# save, and the build fell back to the standalone layout -- no PY format,
+# no tickmark boxes -- with the reason in small grey text.
+# --------------------------------------------------------------------------
+
+import re
+import zipfile
+
+from agent.build_cy_workpaper import check_py_template
+
+
+def _real_pdf_saying(path: Path, text: str) -> Path:
+    from reportlab.lib.pagesizes import letter as PAGE
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(str(path), pagesize=PAGE)
+    c.setFont("Helvetica", 12)
+    c.drawString(72, 700, text)
+    c.save()
+    return path
+
+
+def _previous_output(tmp_path: Path) -> Path:
+    """A real two-sample output of this builder, to use as next cycle's PY."""
+    _template(tmp_path / "PY.xlsx")
+    _real_pdf(tmp_path / "invoice.pdf")
+    first = build_cy_workpaper(
+        _spec(), _two_sample_results(), "PY.xlsx", tmp_path / "cycle1",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    assert first.mirrored_py
+    prior = tmp_path / "PRIOR.xlsx"
+    prior.write_bytes(first.path.read_bytes())
+    return prior
+
+
+def test_a_previous_cy_workpaper_is_accepted_as_the_prior_year(tmp_path: Path):
+    _previous_output(tmp_path)
+    ok, why, notes = check_py_template(tmp_path / "PRIOR.xlsx")
+    assert ok, why
+    # And the run is told what was done to it, not left to discover it.
+    assert any("previous CY workpaper" in n for n in notes)
+
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PRIOR.xlsx", tmp_path / "cycle2",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    assert outcome.mirrored_py, outcome.fallback_reason
+    wb = openpyxl.load_workbook(outcome.path)
+    names = wb.sheetnames
+    wb.close()
+    # One sample this time: the plain tab name, and NONE of last cycle's
+    # numbered tabs -- those would carry last cycle's items and exhibits.
+    assert "Sample" in names
+    assert not any(n.startswith("Sample ") for n in names), names
+    # Exactly one Summary: the previous run's was replaced, not duplicated.
+    assert names.count("Summary") == 1 and names[0] == "Summary"
+
+
+def test_a_previous_cy_workpaper_with_more_samples_this_cycle(tmp_path: Path):
+    _previous_output(tmp_path)
+    outcome = build_cy_workpaper(
+        _spec(), _two_sample_results(), "PRIOR.xlsx", tmp_path / "cycle2",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    assert outcome.mirrored_py
+    wb = openpyxl.load_workbook(outcome.path)
+    assert [n for n in wb.sheetnames if n.startswith("Sample")] == ["Sample 1", "Sample 2"]
+    wb.close()
+
+
+def test_a_template_with_few_cell_formats_is_still_mirrored(tmp_path: Path):
+    # Excel compacts styles.xml on every save, so a file someone has opened
+    # and saved can have far fewer formats than the one the builder was
+    # written against. Formats are now copied from the template's own cells
+    # or appended, so the count no longer matters.
+    wb = openpyxl.Workbook()
+    wb.active.title = "Sample"
+    wb.active["A1"] = "Invoice Number"
+    wb.create_sheet("Population")["A5"] = "Invoice Number"
+    wb.save(tmp_path / "PY.xlsx")
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    assert outcome.mirrored_py, outcome.fallback_reason
+
+
+def test_written_cells_take_the_templates_own_format_for_that_column(tmp_path: Path):
+    # Every PY has its own styles.xml, so "format #2" means something
+    # different in each. The sampled row's cells must look like the PY's.
+    path = _template(tmp_path / "PY.xlsx")
+    wb = openpyxl.load_workbook(path)
+    wb["Sample"]["A2"].number_format = "@"
+    wb.save(path)
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    out = openpyxl.load_workbook(outcome.path)
+    assert out["Sample"]["A2"].number_format == "@"
+    out.close()
+
+
+def test_each_sample_tab_keeps_its_own_exhibit_images(tmp_path: Path):
+    # Every tab's drawing numbered its images from image1.png into ONE
+    # shared folder, so sample 2's pages overwrote sample 1's.
+    _template(tmp_path / "PY.xlsx")
+    _real_pdf_saying(tmp_path / "invoice.pdf", "Invoice Number: 21022452")
+    _real_pdf_saying(tmp_path / "invoice2.pdf", "Invoice Number: 21022453 SECOND")
+    results = _two_sample_results()
+    concl = results["TS-1"]["conclusion"]
+    citations = [
+        {"evidence_id": "ev_0001", "source_file": "invoice.pdf", "location": "invoice.pdf p.1",
+         "quote_or_summary": "21022452", "relevance": "invoice", "sample_id": "1"},
+        {"evidence_id": "ev_0002", "source_file": "invoice2.pdf", "location": "invoice2.pdf p.1",
+         "quote_or_summary": "21022453", "relevance": "invoice", "sample_id": "2"},
+    ]
+    attrs = [dict(a.model_dump(), evidence_ids=["ev_0002"] if a.sample_id == "2" else ["ev_0001"])
+             for a in concl.attribute_results]
+    results = _results(
+        conclusion=concl.conclusion,
+        sample_results=[s.model_dump() for s in concl.sample_results],
+        attribute_results=attrs,
+        evidence_citations=citations,
+    )
+    outcome = build_cy_workpaper(
+        _spec(), results, "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    z = zipfile.ZipFile(outcome.path)
+    per_drawing = [
+        tuple(re.findall(r'media/([^"]+)', z.read(n).decode()))
+        for n in z.namelist() if n.startswith("xl/drawings/_rels/")
+    ]
+    images = [m for refs in per_drawing for m in refs]
+    assert len(images) == 2, per_drawing
+    assert len(set(images)) == 2, f"two tabs share one image file: {per_drawing}"
+    assert z.read(f"xl/media/{images[0]}") != z.read(f"xl/media/{images[1]}")
+
+
+def test_population_print_settings_stay_on_the_population_tab(tmp_path: Path):
+    # Print titles are scoped to a tab by POSITION. Inserting the Summary
+    # in front without shifting moved them onto the tab to the left.
+    path = _template(tmp_path / "PY.xlsx")
+    wb = openpyxl.load_workbook(path)
+    wb["Population"].print_title_rows = "5:5"
+    wb.save(path)
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _two_sample_results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    wbx = zipfile.ZipFile(outcome.path).read("xl/workbook.xml").decode()
+    order = re.findall(r'<sheet name="([^"]+)"', wbx)
+    scoped = re.findall(r'<definedName name="_xlnm.Print_Titles" localSheetId="(\d+)"', wbx)
+    assert scoped and order[int(scoped[0])] == "Population", (order, scoped)
+
+
+def test_the_mirrored_workpaper_is_stamped_draft(tmp_path: Path):
+    # The standalone layout always carried a DRAFT banner; the mirrored
+    # one -- the file that looks most finished -- carried none.
+    _template(tmp_path / "PY.xlsx")
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    assert outcome.mirrored_py
+    assert "DRAFT" in outcome.path.name
+    wb = openpyxl.load_workbook(outcome.path)
+    assert "DRAFT" in wb["Summary"]["A1"].value
+    wb.close()
+    z = zipfile.ZipFile(outcome.path)
+    sheets = [n for n in z.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)]
+    assert all("DRAFT" in z.read(n).decode() for n in sheets)
+
+
+def test_the_workbook_opens_on_one_tab_not_a_group(tmp_path: Path):
+    # Two tabs flagged selected opens them GROUPED, and typing then edits both.
+    # A file saved by Excel always has one tab flagged (the one it was on);
+    # openpyxl's fixture has none unless told, which made this test unable
+    # to fail.
+    path = _template(tmp_path / "PY.xlsx")
+    wb = openpyxl.load_workbook(path)
+    wb["Population"].sheet_view.tabSelected = True
+    wb.save(path)
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _two_sample_results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    z = zipfile.ZipFile(outcome.path)
+    selected = [n for n in z.namelist()
+                if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n) and 'tabSelected="1"' in z.read(n).decode()]
+    assert len(selected) == 1
+
+
+def test_a_templates_own_summary_tab_is_never_deleted(tmp_path: Path):
+    # Our previous Summary is recognised by its headings, not its name; a
+    # PY's own "Summary" is prior-year content and must survive.
+    path = _template(tmp_path / "PY.xlsx")
+    wb = openpyxl.load_workbook(path)
+    wb.create_sheet("Summary", 0)["A1"] = "Control summary prepared by the PY tester"
+    wb.save(path)
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    out = openpyxl.load_workbook(outcome.path)
+    assert out["Summary"]["A1"].value == "Control summary prepared by the PY tester"
+    assert "CY Summary" in out.sheetnames
+    out.close()
+
+
+def test_a_sample_selections_tab_is_not_mistaken_for_a_sample_tab(tmp_path: Path):
+    # Only "Sample <something with a digit>" is a numbered sample tab.
+    path = _template(tmp_path / "PY.xlsx", sample="Sample 1")
+    wb = openpyxl.load_workbook(path)
+    wb.create_sheet("Sample Selections")["A1"] = "keep me"
+    wb.save(path)
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    assert outcome.mirrored_py
+    out = openpyxl.load_workbook(outcome.path)
+    assert out["Sample Selections"]["A1"].value == "keep me"
+    out.close()
+
+
+def test_an_unusable_prior_year_is_reported_before_the_run_and_after_it(tmp_path: Path):
+    (tmp_path / "PY.pdf").write_bytes(b"%PDF-1.4\n")
+    ok, why, _notes = check_py_template(tmp_path / "PY.pdf")
+    assert not ok and ".pdf" in why
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.pdf", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    assert not outcome.mirrored_py
+    assert ".pdf" in outcome.fallback_reason
+    assert "NOT last year's format" in outcome.summary_line

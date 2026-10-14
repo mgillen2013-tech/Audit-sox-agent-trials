@@ -96,3 +96,38 @@ slot inventory is a list of the document types the prior year relied on,
 which is exactly the checklist an agent should test its own evidence
 against before concluding. Handing it that list turns a layout detail into
 a real completeness procedure.
+
+## The same rule applies to cell formats, and to last year's output
+
+A cell's format in an .xlsx is a NUMBER -- a position in that workbook's
+`styles.xml`. The builder originally hard-coded those numbers from one PY
+file. That is computing the layout, not mirroring it, and it failed the
+way computed layout always does:
+
+- every PY workpaper has its own `styles.xml`, so the same number means a
+  different format in each of the 172;
+- Excel compacts `styles.xml` every time a file is saved, so even the file
+  the numbers came from stops matching once someone opens and saves it.
+
+A real run hit the second one. The prior-year file had been opened and
+saved, the format check failed, and the workpaper silently fell back to
+the standalone layout -- no PY tabs, no tickmark boxes -- reported only in
+small grey text.
+
+Now each written cell takes the format of the template cell it replaces
+(the PY's sample row, population row, IA Calculation box), and anything
+the template cannot show is appended to `styles.xml` for the purpose.
+Nothing is looked up by position.
+
+**A previous CY workpaper is a valid prior year.** It is last year's file.
+The builder recognises one -- numbered `Sample 1`, `Sample 2` tabs and a
+Summary with its own headings -- uses the first sample tab as the layout,
+and removes the rest, so last cycle's sampled items and exhibits never
+travel inside this cycle's file. A PY's own "Summary" tab is recognised by
+its content, not its name, and is never touched.
+
+**A file that cannot be mirrored is said so before the run**, in red,
+beside the upload box -- and again in red after it, with the reason. The
+standalone layout remains the fallback, because a run that reached real
+conclusions must always produce a workpaper; it must just never do so
+quietly.

@@ -541,3 +541,31 @@ def test_an_empty_population_never_wipes_the_template(tmp_path: Path):
     build_population_sheet_xml(sheet, [], ox.SharedStrings(work))
 
     assert open(sheet, encoding="utf-8").read() == before
+
+
+def test_formatted_text_in_the_template_survives_the_rebuild(tmp_path):
+    # A cell with one bold word is stored as several runs and no direct
+    # <t>. Those used to be read as empty and written back empty --
+    # prior-year text silently blanked across every tab.
+    import os
+
+    from agent.ooxml import ooxml_utils as ox
+
+    work = tmp_path / "w"
+    (work / "xl" / "_rels").mkdir(parents=True)
+    (work / "xl" / "_rels" / "workbook.xml.rels").write_text(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
+    )
+    (work / "[Content_Types].xml").write_text("<Types></Types>")
+    rich = '<si><r><rPr><b/></rPr><t>Approved</t></r><r><t xml:space="preserve"> by J. Smith</t></r></si>'
+    (work / "xl" / "sharedStrings.xml").write_text(
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f"<si><t>plain</t></si>{rich}</sst>"
+    )
+    sst = ox.SharedStrings(str(work))
+    assert sst.strings[:2] == ["plain", "Approved by J. Smith"]
+    # New text never borrows the formatted entry.
+    assert sst.get_or_add("Approved by J. Smith") == 2
+    sst.write()
+    assert rich in (work / "xl" / "sharedStrings.xml").read_text()
+    assert os.path.exists(work / "xl" / "sharedStrings.xml")
