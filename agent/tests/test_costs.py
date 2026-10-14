@@ -187,8 +187,6 @@ def _conclusion_input() -> dict:
             }
         ],
         "procedures_performed": ["inspection"],
-        "ipe_completeness_accuracy_status": "not_applicable",
-        "ipe_completeness_accuracy_evidence": [],
         "exceptions": [],
         "additional_support_requests": [],
         "confidence": "high",

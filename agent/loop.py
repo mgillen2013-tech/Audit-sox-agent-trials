@@ -140,14 +140,12 @@ Non-negotiables:
   before concluding anything. When you have enough to conclude -- including
   concluding you don't -- call submit_conclusion. That is the only way this
   conversation ends.
-- IPE: when the evidence includes both a population extract and the report
-  parameters it was produced from (a query/parameters screenshot, report
-  header, or run log), actually reconcile them -- agree the record count in
-  the parameters to the number of rows in the extract, and check the filters
-  match the control's scope and period. A record count that does not tie, or
-  filters that do not match the control, is an exception to flag, not a
-  detail to pass over. Only mark ipe_completeness_accuracy_status
-  "validated" when you have performed that reconciliation and it agrees.
+- IPE (completeness and accuracy of the population) is NOT yours to test.
+  A human performs it. Do not reconcile record counts, do not evaluate
+  report parameters, and do not conclude on whether the population is
+  complete -- there is no field for it and no credit for attempting it.
+  If something about the population looks wrong while you are testing,
+  raise it with flag_exception like any other finding.
 
 {COMPANY_CONTEXT}"""
 
@@ -449,7 +447,7 @@ TOOLS = [
         "and rejects a conclusion that silently skips one. Set each citation's sample_id to the "
         "sampled item it supports, so the workpaper can document each selection "
         "separately; leave it null only for evidence covering the step as a "
-        "whole (a policy, the population extract, IPE parameters). Also fill "
+        "whole (a policy, the population extract). Also fill "
         "sample_results with one entry per sampled item saying how the step "
         "came out FOR THAT ITEM -- an exception is always about a specific "
         "selection, and the step-level conclusion alone cannot say which one "
@@ -463,9 +461,9 @@ TOOLS = [
         "owns it: attribute_results carries the observed values and figures; "
         "exceptions and additional_support_requests are one concise line each "
         "and should not re-derive that detail; procedures_performed says what "
-        "you DID, not what you found. A real workpaper repeated a single IPE "
-        "break six times across these fields -- that is harder to review, not "
-        "more thorough. The same rule governs the narrative, which is the "
+        "you DID, not what you found. A real workpaper repeated a single "
+        "finding six times across these fields -- that is harder to review, "
+        "not more thorough. The same rule governs the narrative, which is the "
         "first thing a reviewer reads in the finished workpaper: two or three "
         "sentences saying what you tested, against what, and how it came "
         "out. The attributes, values, dates, names and amounts do NOT belong "
@@ -631,7 +629,7 @@ def _execute_tool(
 ) -> tuple[dict, bool, ConclusionOutput | None]:
     """Returns (content_for_claude, is_error, conclusion_if_this_was_a_successful_submit)."""
     # Count every call up front, before any early return -- a call that fails
-    # basic input validation (e.g. the IPE status/evidence rule) is still a
+    # basic input validation is still a
     # real tool call and belongs in the count. This used to increment only at
     # the bottom of the function, so a rejected submit_conclusion attempt was
     # logged in the audit trail but silently missing from tool_call_count --

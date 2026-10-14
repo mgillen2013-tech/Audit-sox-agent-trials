@@ -79,8 +79,6 @@ def _submit_conclusion_input(**overrides) -> dict:
         ],
         procedures_performed=["recalculation"],
         sample_results=[{"sample_id": "S01", "conclusion": "satisfied"}],
-        ipe_completeness_accuracy_status="not_applicable",
-        ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
         confidence="high",

@@ -449,8 +449,6 @@ def _submit_conclusion_input(**overrides) -> dict:
         # Coverage is computed from what the conclusion ADDRESSES, so a
         # fixture that concludes on nothing is correctly rejected.
         sample_results=[{"sample_id": "S01", "conclusion": "satisfied"}],
-        ipe_completeness_accuracy_status="not_applicable",
-        ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
         confidence="high",
@@ -603,9 +601,7 @@ def test_tool_call_count_matches_audit_log_even_after_invalid_input(evidence_ite
                     tool_use(
                         "t1",
                         "submit_conclusion",
-                        _submit_conclusion_input(
-                            ipe_completeness_accuracy_status="validated",
-                            ipe_completeness_accuracy_evidence=[],  # invalid: violates the pairing rule
+                        _submit_conclusion_input(  # invalid: violates the pairing rule
                         ),
                     )
                 ]
@@ -821,8 +817,6 @@ def test_none_cache_usage_fields_do_not_crash_token_tracking(
                     "narrative": "No evidence was found.",
                     "evidence_citations": [],
                     "procedures_performed": ["Searched CY support."],
-                    "ipe_completeness_accuracy_status": "not_applicable",
-                    "ipe_completeness_accuracy_evidence": [],
                     "exceptions": [],
                     "additional_support_requests": [],
                     "confidence": "low",
@@ -868,8 +862,6 @@ def test_on_turn_callback_fires_every_turn(evidence_items, sample_manifest, requ
                 "narrative": "No evidence was found.",
                 "evidence_citations": [],
                 "procedures_performed": ["Searched CY support."],
-                "ipe_completeness_accuracy_status": "not_applicable",
-                "ipe_completeness_accuracy_evidence": [],
                 "exceptions": [],
                 "additional_support_requests": [],
                 "confidence": "low",
@@ -933,8 +925,6 @@ def test_token_budget_does_not_abort_the_turn_that_actually_concludes(
                             "narrative": "No evidence was found.",
                             "evidence_citations": [],
                             "procedures_performed": ["Searched CY support."],
-                            "ipe_completeness_accuracy_status": "not_applicable",
-                            "ipe_completeness_accuracy_evidence": [],
                             "exceptions": [],
                             "additional_support_requests": [],
                             "confidence": "low",

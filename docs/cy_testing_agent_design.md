@@ -151,7 +151,7 @@ entirely (it was collected but never actually reached the model or the
 workpaper — see `_render_sample_line` below); the schema field is now
 optional (`| null`) rather than forced to a fake-good value. The whole
 workbook is also added to CY support evidence, so the population tab is
-searchable and can back an IPE completeness/accuracy conclusion.
+searchable and available to the human performing IPE.
 
 `agent/loop.py`'s `build_user_turn` now renders a `Sample:` line from
 `TestStepRequest.sample_size` / `population_size` (populated in
@@ -366,6 +366,30 @@ a coverage check would defeat its purpose.
 The gate also matters less than it once did: every sampled item now gets its
 own tab and its own Summary row, so a selection nobody concluded on is
 visible in the workpaper itself.
+
+### IPE is not tested by the agent
+
+Removed deliberately, not an omission. The agent used to reconcile the
+population extract against its report parameters and conclude on
+completeness and accuracy; `ipe_completeness_accuracy_status` was a
+required field on every conclusion.
+
+It was dropped because the effort was out of proportion to the result and
+the errors ran the wrong way: FALSE NEGATIVES. A record count that did not
+tie because of an OCR misread, or a filter the model could not interpret,
+surfaced as an IPE exception that a human then had to disprove -- more
+work than performing the procedure, and corrosive, because an exception
+that is usually wrong teaches a reviewer to skim them.
+
+A human performs IPE instead. The schema has no field for it, the system
+prompt tells the model it is not theirs to test, and the WORKPAPER STILL
+SHOWS THE ROW -- marked "Not tested (IA)", in amber. That last part is the
+point of the design:
+
+- it is a required SOX procedure, so a workpaper that silently omits it
+  reads as forgotten rather than assigned
+- amber, never red: outstanding is not a failure, nothing has gone wrong
+- amber, never green: a reviewer must not take it as done
 
 ### `flag_exception`
 
@@ -676,7 +700,7 @@ the answers. Now: exhibits move to a dedicated `<step> - Exhibits` sheet
 (the step sheet cross-references it by name), and the step sheet is
 ordered **answers first** — CONCLUSION (verdict, confidence + rationale,
 sample coverage, IPE status), EXCEPTIONS, ADDITIONAL SUPPORT REQUESTED —
-then the supporting detail: DOCUMENTATION, PROCEDURES PERFORMED, IPE C&A
+then the supporting detail: DOCUMENTATION, PROCEDURES PERFORMED
 EVIDENCE, EVIDENCE CITED, PREPARED BY. Sections carry banded headers, the
 verdict is color-coded (green/red/amber), and empty EXCEPTIONS /
 ADDITIONAL SUPPORT sections print "None noted." rather than rendering

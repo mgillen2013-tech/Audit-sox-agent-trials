@@ -46,8 +46,6 @@ def results() -> dict:
             )
         ],
         procedures_performed=["Recalculated the accrual", "Agreed the balance to the GL export"],
-        ipe_completeness_accuracy_status="not_applicable",
-        ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=["Q4 support for the November accrual"],
         confidence="high",
@@ -392,7 +390,6 @@ def test_summary_has_an_ipe_row_and_no_redundant_step_table(spec: dict, results:
 
     conclusion = results["TS-4.2"]["conclusion"].model_copy(
         update={
-            "ipe_completeness_accuracy_status": "not_validated",
             "sample_results": [SampleResult(sample_id="1", conclusion="satisfied")],
             "evidence_citations": [
                 EvidenceCitation(
@@ -413,8 +410,11 @@ def test_summary_has_an_ipe_row_and_no_redundant_step_table(spec: dict, results:
     rows = list(ws.iter_rows())
 
     ipe_row = next(r for r in rows if r[0].value == "IPE")
-    assert ipe_row[1].value == "not_validated"
-    assert ipe_row[1].fill.start_color.rgb.endswith("FFC7CE")  # red
+    assert ipe_row[1].value == "Not tested (IA)"
+    # Amber. Outstanding is not a failure -- nothing has gone wrong, the
+    # procedure simply has not been performed yet. Red would read as an
+    # exception nobody raised; green would read as done.
+    assert ipe_row[1].fill.start_color.rgb.endswith("FFEB9C")
 
     # On a single-step control the per-step table restated the matrix above
     # and the CONCLUSION section below -- every column of it was duplicated.
@@ -670,7 +670,9 @@ def test_summary_sheet_carries_ipe_and_open_request_counts(spec: dict, results: 
     text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
     assert "IPE status" in text
     assert "Open requests" in text
-    assert "not_applicable" in text  # from the fixture's conclusion
+    # IPE is performed by a human now, so the row must read as outstanding
+    # rather than carrying a verdict the agent did not reach.
+    assert "Not tested (IA)" in text
 
 
 def test_pdf_workpaper_contents(spec: dict, results: dict, tmp_path: Path):

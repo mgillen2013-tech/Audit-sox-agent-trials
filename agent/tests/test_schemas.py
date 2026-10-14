@@ -37,8 +37,6 @@ def _base_conclusion(**overrides) -> dict:
             )
         ],
         procedures_performed=["recalculation"],
-        ipe_completeness_accuracy_status="not_applicable",
-        ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
         confidence="high",
@@ -71,45 +69,15 @@ def test_insufficient_evidence_allows_empty_citations():
     assert conclusion.evidence_citations == []
 
 
-def test_ipe_validated_requires_evidence():
-    with pytest.raises(ValidationError, match="ipe_completeness_accuracy_evidence must be non-empty"):
-        ConclusionOutput(
-            **_base_conclusion(
-                ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=[]
-            )
-        )
 
 
-def test_ipe_validated_with_evidence_is_valid():
-    conclusion = ConclusionOutput(
-        **_base_conclusion(
-            ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=["ev_009"]
-        )
-    )
-    assert conclusion.ipe_completeness_accuracy_evidence == ["ev_009"]
 
 
-def test_ipe_not_validated_needs_no_citation():
-    # The case a bool + maybe-empty-list couldn't express: reliance exists,
-    # but completeness/accuracy was NOT obtained. This must be sayable
-    # without citing anything, and without being forced to cite the report
-    # itself as a workaround.
-    conclusion = ConclusionOutput(
-        **_base_conclusion(
-            ipe_completeness_accuracy_status="not_validated", ipe_completeness_accuracy_evidence=[]
-        )
-    )
-    assert conclusion.ipe_completeness_accuracy_status == "not_validated"
-
-
-def test_ipe_evidence_rejected_unless_validated():
-    with pytest.raises(ValidationError, match="must be empty when"):
-        ConclusionOutput(
-            **_base_conclusion(
-                ipe_completeness_accuracy_status="not_validated",
-                ipe_completeness_accuracy_evidence=["ev_002"],
-            )
-        )
+def test_ipe_is_no_longer_part_of_a_conclusion():
+    # IPE is performed by a human, so the model has no field to put it in
+    # and cannot be wrong about it. The workpaper still shows the row, as
+    # outstanding -- see summary_rows.
+    assert not any("ipe" in f for f in ConclusionOutput.model_fields)
 
 
 def test_fabricated_citation_rejected():
@@ -123,15 +91,6 @@ def test_citation_returned_by_search_passes():
     # Should not raise.
     validate_citations_against_transcript(conclusion, evidence_ids_returned_by_search={"ev_012"})
 
-
-def test_fabricated_ipe_citation_rejected():
-    conclusion = ConclusionOutput(
-        **_base_conclusion(
-            ipe_completeness_accuracy_status="validated", ipe_completeness_accuracy_evidence=["ev_999"]
-        )
-    )
-    with pytest.raises(ValueError, match="ev_999"):
-        validate_citations_against_transcript(conclusion, evidence_ids_returned_by_search={"ev_012"})
 
 
 # --------------------------------------------------------------------------
@@ -207,8 +166,6 @@ def _core(**overrides) -> dict:
             }
         ],
         procedures_performed=["p"],
-        ipe_completeness_accuracy_status="not_applicable",
-        ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
         confidence="high",

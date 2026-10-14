@@ -93,8 +93,6 @@ def _results(**overrides) -> dict:
                 "evidence_ids": ["ev_0001"],
             }
         ],
-        ipe_completeness_accuracy_status="not_applicable",
-        ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
         confidence="high",

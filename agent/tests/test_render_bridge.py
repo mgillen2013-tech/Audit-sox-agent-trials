@@ -118,8 +118,6 @@ def _conclusion(**overrides) -> ConclusionOutput:
                 "evidence_ids": ["ev_0001"],
             }
         ],
-        ipe_completeness_accuracy_status="not_applicable",
-        ipe_completeness_accuracy_evidence=[],
         exceptions=[],
         additional_support_requests=[],
         confidence="high",
@@ -346,14 +344,18 @@ def test_ipe_always_gets_its_own_row():
     assert rows[-1].test_step.startswith("IPE")
 
 
-def test_unvalidated_ipe_reads_as_an_exception_not_a_pass():
+def test_the_ipe_row_reads_as_outstanding_not_as_a_pass():
+    # The agent does not test IPE; a human does. The row stays because the
+    # procedure is required and a workpaper that omits it reads as
+    # forgotten rather than assigned -- but it must never render green, or
+    # a reviewer will take it as done.
     from agent.render_bridge import summary_rows
 
-    rows = summary_rows(
-        [("1.", _conclusion(ipe_completeness_accuracy_status="not_validated"))]
-    )
-    assert rows[-1].verdict_colour == "red"
-    assert "not validated" in rows[-1].result.lower()
+    ipe = summary_rows([("1.", _conclusion())])[-1]
+    assert ipe.test_step.startswith("IPE")
+    assert ipe.verdict_colour != "green"
+    assert "Not tested" in ipe.result
+    assert "IA" in " ".join(ipe.evidenced)
 
 
 def test_each_sample_gets_its_own_row_with_its_own_verdict():

@@ -626,10 +626,16 @@ _CONFIDENCE_STYLE = {
     "medium": (_FILL_WARN, _FONT_WARN),
     "low": (_FILL_BAD, _FONT_BAD),
 }
+# IPE is not tested by the agent -- a human performs it. One constant so
+# every surface says the same thing, and so a reviewer reads "owed to IA"
+# rather than an absence they have to interpret.
+_IPE_NOT_TESTED = "Not tested (IA)"
+
+# Amber, not red and certainly not green. Outstanding is not a failure --
+# nothing has gone wrong, the procedure simply has not been performed yet.
+# Red would read as an exception nobody raised; green would read as done.
 _IPE_STYLE = {
-    "validated": (_FILL_GOOD, _FONT_GOOD),
-    "not_validated": (_FILL_BAD, _FONT_BAD),
-    "not_applicable": (None, None),
+    _IPE_NOT_TESTED: (_FILL_WARN, _FONT_WARN),
 }
 
 
@@ -739,8 +745,9 @@ def _write_control_summary(ws, row: int, results: dict[str, dict]) -> int:
         if "error" in result:
             _styled(ws, row, 2 + i, "INCOMPLETE", (_FILL_BAD, _FONT_BAD))
             continue
-        status = result["conclusion"].ipe_completeness_accuracy_status
-        _styled(ws, row, 2 + i, status, _IPE_STYLE.get(status))
+        # Not tested by the agent -- a human performs IPE. The row stays
+        # so the procedure reads as assigned rather than forgotten.
+        _styled(ws, row, 2 + i, _IPE_NOT_TESTED, _IPE_STYLE.get(_IPE_NOT_TESTED))
     row += 1
 
     ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(headers))}{row - 1}"
@@ -790,13 +797,7 @@ def _write_step_summary_rows(ws, row: int, results: dict[str, dict]) -> int:
                     f"{sc.total_found}/{sc.total_required}",
                     (_FILL_GOOD, _FONT_GOOD) if sc.complete else (_FILL_BAD, _FONT_BAD),
                 )
-            _styled(
-                ws,
-                row,
-                5,
-                c.ipe_completeness_accuracy_status,
-                _IPE_STYLE.get(c.ipe_completeness_accuracy_status),
-            )
+            _styled(ws, row, 5, _IPE_NOT_TESTED, _IPE_STYLE.get(_IPE_NOT_TESTED))
             _styled(ws, row, 6, len(c.exceptions), _count_style(len(c.exceptions)))
             _styled(
                 ws,
@@ -1273,7 +1274,7 @@ def _write_step_sheet(
             + (f"; missing: {', '.join(sc.missing)}" if sc.missing else ""),
         )
     if not ipe_shown_in_matrix:
-        put("IPE status", conclusion.ipe_completeness_accuracy_status)
+        put("IPE status", _IPE_NOT_TESTED)
     row += 1
 
     # Attributes sit here, straight after the conclusion, for the same
@@ -1302,9 +1303,6 @@ def _write_step_sheet(
     section("PROCEDURES PERFORMED")
     put_list(conclusion.procedures_performed)
 
-    if conclusion.ipe_completeness_accuracy_evidence:
-        section("IPE COMPLETENESS & ACCURACY EVIDENCE")
-        put_list(conclusion.ipe_completeness_accuracy_evidence)
 
     if sheet_citations:
         section("EVIDENCE CITED")
@@ -1408,7 +1406,7 @@ def _build_pdf(
                     body,
                 )
             )
-        story.append(Paragraph(f"<b>IPE status:</b> {conclusion.ipe_completeness_accuracy_status}", body))
+        story.append(Paragraph(f"<b>IPE status:</b> {_IPE_NOT_TESTED}", body))
         story.append(Spacer(1, 6))
 
         # Tickmarks are lettered unconditionally, as on the sheets: they
@@ -1520,8 +1518,7 @@ def _build_pdf(
                     body,
                 )
             )
-        story.append(Paragraph(f"<b>IPE status:</b> {conclusion.ipe_completeness_accuracy_status}", body))
-        bullet_list("IPE C&A evidence", conclusion.ipe_completeness_accuracy_evidence)
+        story.append(Paragraph(f"<b>IPE status:</b> {_IPE_NOT_TESTED}", body))
         bullet_list("Exceptions", conclusion.exceptions)
         bullet_list("Additional support requested", conclusion.additional_support_requests)
 

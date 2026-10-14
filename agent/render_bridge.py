@@ -541,18 +541,19 @@ def summary_rows(
     tab_names: "dict[str, str] | None" = None,
     reviews: "dict[str, str] | None" = None,
 ) -> list:
-    """One row per SAMPLED ITEM, plus one for IPE.
+    """One row per SAMPLED ITEM, plus an outstanding IPE row.
 
     Per item rather than per test step: an exception is always about a
     specific selection, a reviewer clears selections one at a time, and
     each selection now has its own tab to link to. A per-step row can only
     say "one of these failed" and leaves the reviewer to find which.
 
-    IPE keeps its own row. It is a separate assertion -- whether the
-    population the sample came from is complete and accurate -- and a
-    control can have every item satisfied and still fail it.
+    IPE keeps its own row but is NOT tested here -- a human performs it.
+    The row stays because the procedure is required, and a workpaper that
+    omits it reads as forgotten rather than assigned.
     """
     from agent.ooxml.summary_sheet import SummaryRow
+    from agent.ooxml.summary_sheet import SummaryRow as _SR
 
     rows: list[SummaryRow] = []
     # Seeded EMPTY, not with a status. Seeding it with "not_applicable"
@@ -642,33 +643,18 @@ def summary_rows(
             )
             first_row_of_step = False
 
-        order = {"validated": 0, "not_applicable": 1, "not_validated": 2}
-        status = conclusion.ipe_completeness_accuracy_status
-        if worst_ipe is None or order.get(status, 2) > order.get(worst_ipe, 2):
-            worst_ipe = status
-
-    ipe_result = {
-        "validated": "Satisfied",
-        "not_validated": "Exception (not validated)",
-        "not_applicable": "N/A",
-    }.get(worst_ipe or "not_applicable", worst_ipe)
-    ipe_evidenced = {
-        "validated": "Completeness and accuracy of the population extract obtained and tested.",
-        "not_validated": (
-            "Reliance placed on a system-generated report WITHOUT completeness "
-            "and accuracy support."
-        ),
-        "not_applicable": "No IPE relied upon for this control.",
-    }.get(worst_ipe or "not_applicable", worst_ipe)
-
-    from agent.ooxml.summary_sheet import SummaryRow as _SR
-
+    # The agent does not test IPE -- a human does. The row STAYS, because
+    # completeness and accuracy of the population is a required procedure
+    # and a workpaper that simply omits it looks like the procedure was
+    # forgotten rather than assigned. Leaving it visibly outstanding is the
+    # honest version: a reviewer can see at a glance that it is owed and by
+    # whom, instead of discovering later that nobody did it.
     rows.append(
         _SR(
             test_step="IPE - completeness and accuracy of the population",
             attributes=["Population extract is complete", "Population extract is accurate"],
-            evidenced=[ipe_evidenced],
-            result=ipe_result,
+            evidenced=["Not tested by the agent -- to be performed and documented by IA."],
+            result="Not tested",
             evidence_label="Parameters",
             link_to="Parameters!A1",
         )
