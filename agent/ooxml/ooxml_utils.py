@@ -449,7 +449,7 @@ def check_template(work_dir: str, *, required_sheets: list[str], max_style_index
     return sheets
 
 
-def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str) -> int:
+def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str, *, after: str | None = None) -> int:
     """Duplicate a worksheet part under a new tab name; return its number.
 
     Used to give every sampled item its own tab. The prior-year workpaper
@@ -498,11 +498,16 @@ def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str) -> int:
     # so cloned sample tabs stay together in tab order. Appending at the end
     # scattered them after Population and Parameters, which reads as a
     # mistake in a workpaper a reviewer pages through in order.
+    #
+    # `after` names that tab explicitly. It is needed when the names do not
+    # share a prefix -- tabs "1", "2", "3" -- where the prefix rule found
+    # nothing and appended the clone after every other tab.
     prefix = new_name.rsplit(" ", 1)[0] if " " in new_name else new_name
     all_tabs = list(re.finditer(r"<sheet\b[^>]*/>", wb))
     siblings = [
         (i, m) for i, m in enumerate(all_tabs)
-        if re.search(rf'name="{re.escape(prefix)}[^"]*"', m.group(0))
+        if (re.search(rf'\bname="{re.escape(escape(after))}"', m.group(0)) if after
+            else re.search(rf'name="{re.escape(prefix)}[^"]*"', m.group(0)))
     ]
     if siblings:
         position, last = siblings[-1][0] + 1, siblings[-1][1]

@@ -37,8 +37,10 @@ building a control.json.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -537,9 +539,78 @@ def _render_result(test_step_id: str, result: dict) -> None:
         _render_conclusion(result["conclusion"])
 
 
+def _build_workpaper(spec, results, py_name, run_dir, manifests, pop_name, pop_tab, ledger) -> dict:
+    """Build the workpaper from whatever results exist; return what the page shows.
+
+    Used at the end of a run AND to recover an interrupted one, so a run
+    that was cut off still produces a file from the steps that finished.
+    Keeps only the BYTES: the download button must survive Streamlit's
+    reruns, and the staged files are deleted afterwards.
+    """
+    out = {
+        "results": results, "wp_bytes": None, "wp_name": None, "ledger": ledger,
+        "wp_mirrored": False, "wp_fallback_reason": "", "wp_nothing_concluded": False,
+        "wp_warnings": [],
+    }
+    try:
+        outcome = build_cy_workpaper(
+            spec,
+            results,
+            py_name,
+            Path(run_dir),
+            support_dir=Path(run_dir),
+            sample_manifests=manifests,
+            population_workbook=pop_name,
+            population_sheet=pop_tab,
+        )
+        out.update(
+            wp_bytes=outcome.path.read_bytes(),
+            wp_name=outcome.path.name,
+            wp_mirrored=outcome.mirrored_py,
+            wp_fallback_reason=outcome.fallback_reason,
+            wp_nothing_concluded=outcome.nothing_concluded,
+            wp_warnings=list(outcome.warnings) + [
+                f"Tickmark {letter} on {name}: {anchor!r} could not be located on the page, "
+                f"so no box was drawn (the legend still lists it)."
+                for name, letter, anchor, _reason in outcome.unplaced_callouts
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 -- the run's results must still show even if the file build breaks
+        st.warning(f"Couldn't generate the workpaper file: {exc}")
+    return out
+
+
 # ── Run ───────────────────────────────────────────────────────────────────
 st.header("5. Run")
 run_clicked = st.button("Run test steps", type="primary")
+st.caption(
+    "While it runs, don't click or change anything else on this page -- Streamlit "
+    "restarts the page on any click, which stops the run. If that happens, the "
+    "steps that already finished are kept and you can still build the workpaper."
+)
+
+# A run that was cut off part-way. Streamlit restarts the whole script on
+# any click, which silently abandons a run in progress: no message, no
+# workpaper, and the finished steps -- already paid for -- vanished with it.
+# Each finished step is now saved as it completes, so it can be recovered.
+_partial = st.session_state.get("partial_run")
+if _partial and not run_clicked:
+    _done = [t for t in _partial["step_ids"] if t in _partial["results"]]
+    _missing = [t for t in _partial["step_ids"] if t not in _partial["results"]]
+    st.warning(
+        "**The last run stopped before it finished** -- usually because something on "
+        "the page was clicked while it ran.\n\n"
+        f"Finished: {', '.join(_done) or 'none'}  ·  Not run: {', '.join(_missing) or 'none'}"
+    )
+    if _done and st.button("Build the workpaper from the finished steps"):
+        st.session_state["run_output"] = _build_workpaper(
+            _partial["spec"], _partial["results"], _partial["py_name"], _partial["run_dir"],
+            _partial["manifests"], _partial["pop_name"], _partial["pop_tab"], _partial["ledger"],
+        )
+        st.session_state.pop("partial_run", None)
+        st.session_state.pop("run_dir", None)
+        shutil.rmtree(_partial["run_dir"], ignore_errors=True)
+        st.rerun()
 if run_clicked:
     _remember({"resource": resource, "model": model})
     errors = []
@@ -563,7 +634,13 @@ if run_clicked:
         for e in errors:
             st.error(e)
     else:
-        with tempfile.TemporaryDirectory() as tmp:
+        # A staging folder that survives the page restarting mid-run, so an
+        # interrupted run can still be built into a workpaper. The previous
+        # run's folder is removed first; a finished run removes its own.
+        shutil.rmtree(st.session_state.pop("run_dir", ""), ignore_errors=True)
+        st.session_state.pop("partial_run", None)
+        with contextlib.nullcontext(tempfile.mkdtemp(prefix="cy_run_")) as tmp:
+            st.session_state["run_dir"] = tmp
             tmp_dir = Path(tmp)
             (tmp_dir / py_testing_file.name).write_bytes(py_testing_file.getvalue())
             for f in cy_support_files:
@@ -632,6 +709,14 @@ if run_clicked:
 
             ledger = TokenLedger(model)
             all_results = {}
+            # Saved BEFORE the first step, and updated as each finishes (the
+            # dict is shared, so filling all_results fills this too).
+            st.session_state["partial_run"] = {
+                "spec": spec, "results": all_results, "manifests": sample_manifests,
+                "py_name": py_testing_file.name, "pop_name": pop_sample_file.name,
+                "pop_tab": population_tab, "run_dir": tmp, "ledger": ledger,
+                "step_ids": [s["test_step_id"] for s in test_steps],
+            }
             for test_step_id, result in iter_control_results(
                 spec,
                 tmp_dir,
@@ -661,49 +746,15 @@ if run_clicked:
                         f"included in the workpaper below."
                     )
 
-            # Generate the CY workpaper (Excel) while the temp dir still
-            # exists -- exhibits re-read the support files from it -- and
-            # keep only the BYTES: the temp dir is gone the moment this
-            # with-block closes, and the download button must survive
-            # Streamlit's reruns.
-            wp_bytes = wp_name = None
-            wp_mirrored = False
-            wp_fallback_reason = ""
-            wp_nothing_concluded = False
-            wp_warnings: list[str] = []
-            try:
-                outcome = build_cy_workpaper(
-                    spec,
-                    all_results,
-                    py_testing_file.name,
-                    tmp_dir,
-                    support_dir=tmp_dir,
-                    sample_manifests=sample_manifests,
-                    population_workbook=pop_sample_file.name,
-                    population_sheet=population_tab,
-                )
-                wp_bytes, wp_name = outcome.path.read_bytes(), outcome.path.name
-                wp_mirrored = outcome.mirrored_py
-                wp_fallback_reason = outcome.fallback_reason
-                wp_nothing_concluded = outcome.nothing_concluded
-                wp_warnings = list(outcome.warnings) + [
-                    f"Tickmark {letter} on {name}: {anchor!r} could not be located on the page, "
-                    f"so no box was drawn (the legend still lists it)."
-                    for name, letter, anchor, _reason in outcome.unplaced_callouts
-                ]
-            except Exception as exc:  # noqa: BLE001 -- the run's results must still show even if the file build breaks
-                st.warning(f"Couldn't generate the workpaper file: {exc}")
+            st.session_state["run_output"] = _build_workpaper(
+                spec, all_results, py_testing_file.name, tmp_dir, sample_manifests,
+                pop_sample_file.name, population_tab, ledger,
+            )
+            # Finished normally: nothing to recover, and the staged copies of
+            # the evidence are no longer needed on disk.
+            st.session_state.pop("partial_run", None)
+            shutil.rmtree(st.session_state.pop("run_dir", ""), ignore_errors=True)
 
-        st.session_state["run_output"] = {
-            "results": all_results,
-            "wp_bytes": wp_bytes,
-            "wp_name": wp_name,
-            "ledger": ledger,
-            "wp_mirrored": wp_mirrored,
-            "wp_fallback_reason": wp_fallback_reason,
-            "wp_nothing_concluded": wp_nothing_concluded,
-            "wp_warnings": wp_warnings,
-        }
         st.success("Done.")
         _render_token_burn(ledger)
 

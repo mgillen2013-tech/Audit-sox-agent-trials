@@ -159,7 +159,7 @@ def _split_ref(ref: str) -> tuple[str, int]:
 
 
 def _resolve_styles(
-    work_dir: str, sample_sheet_path: str, population_sheet_path: str,
+    work_dir: str, sample_sheet_path: str, population_sheet_path: str | None,
     shared: list, *, population_first_row: int = 6,
 ) -> CellStyles:
     """Formats for every cell this builder writes, copied from the template
@@ -174,7 +174,7 @@ def _resolve_styles(
         if row == 2 and style is not None:
             styles.sample_columns[col] = style
 
-    population = _template_cells(population_sheet_path, shared)
+    population = _template_cells(population_sheet_path, shared) if population_sheet_path else {}
     for ref, (style, _text, _f) in population.items():
         col, row = _split_ref(ref)
         if row == population_first_row and style is not None:
@@ -225,6 +225,9 @@ def sample_tab_name(base: str, sample_id: str, index: int, total: int) -> str:
     """
     if total <= 1:
         return base
+    # A PY that names its per-selection tabs "1", "2", "3" gets the same.
+    if base.strip().isdigit():
+        return str(index + 1)
     # From the SAMPLE ID, never from a data column. The Summary tab builds
     # its hyperlink from the same id, and a first version named tabs after
     # the check number while the links used the id -- so every link pointed
@@ -236,66 +239,106 @@ def sample_tab_name(base: str, sample_id: str, index: int, total: int) -> str:
     return raw[:31].strip() or f"{base} {index + 1}"
 
 
-def adopt_prior_output(work_dir: str, sample_sheet: str = "Sample") -> list[str]:
-    """Make a previous CY workpaper usable as this run's template.
+@dataclass
+class TemplateTabs:
+    """Which tabs of a template this builder writes into."""
 
-    A workpaper this builder wrote is the natural template for the next
-    cycle -- it IS last year's file -- but it no longer has the shape the
-    builder looks for. Its single "Sample" tab became "Sample 1", "Sample
-    2", ... (one per sampled item) and a Summary was added in front. A real
-    run uploaded one as the prior year, the "Sample" tab was missing, and
-    the whole workpaper silently fell back to the standalone layout: no
-    tickmarks, no PY format, no explanation in the file.
+    sample: str | None
+    population: str | None
+    notes: list[str] = field(default_factory=list)
 
-    So, when -- and only when -- the named sample tab is absent:
-      - the numbered sample tabs are recognised by name ("Sample" + a
-        space + something containing a digit, which is what this builder
-        produces; "Sample Selections" does not qualify and is never touched)
-      - the FIRST becomes the layout every new sample tab is cloned from,
-        renamed back to the plain name
-      - the rest are DELETED. Leaving them would ship last year's sampled
-        items, with last year's exhibits, inside this year's workpaper.
 
-    Independently, a Summary tab this builder generated is deleted so a
-    fresh one can replace it. It is recognised by its HEADINGS, not its
-    name: a hand-built PY workpaper may have a "Summary" of its own, and
-    deleting that would destroy prior-year content.
+def _picture_count(work_dir: str, sheet_num: int) -> int:
+    import re as _re
 
-    Returns one plain-English line per change, for the run's notes. Empty
-    when the template was an ordinary PY workpaper and nothing was done.
+    rels = os.path.join(work_dir, "xl", "worksheets", "_rels", f"sheet{sheet_num}.xml.rels")
+    if not os.path.exists(rels):
+        return 0
+    with open(rels, encoding="utf-8") as fh:
+        m = _re.search(r'Target="[^"]*?drawings/(drawing\d+\.xml)"', fh.read())
+    path = os.path.join(work_dir, "xl", "drawings", m.group(1)) if m else ""
+    if not path or not os.path.exists(path):
+        return 0
+    with open(path, encoding="utf-8") as fh:
+        return len(_re.findall(r"<(?:\w+:)?pic>", fh.read()))
+
+
+def adopt_prior_output(work_dir: str, sample_sheet: str | None = "Sample") -> list[str]:
+    """Back-compatible wrapper: the notes from find_template_tabs."""
+    return find_template_tabs(work_dir, sample_sheet).notes
+
+
+def find_template_tabs(work_dir: str, sample_sheet: str | None = None) -> TemplateTabs:
+    """Find the sample and population tabs of a template, preparing it.
+
+    PY workpapers do not agree on tab names. The first real one used
+    "Sample"; the next control's used "1" (one tab per sampled item, named
+    by number) and had no population tab at all -- and the builder, which
+    only knew the exact names "Sample" and "Population", rejected it. With
+    172 controls written by different people, names have to be FOUND.
+
+    The sample tab, in order of preference:
+      1. the name the caller asked for, if given and present ("Sample")
+      2. numbered "Sample 1", "Sample 2"... -- a previous CY workpaper
+      3. tabs named only by number, "1", "2"... -- one tab per selection
+      4. otherwise, the tab carrying the most exhibit pictures
+    In cases 2 and 3 the FIRST of the family is the layout and the rest are
+    DELETED: they hold last cycle's sampled items and exhibits, which must
+    not travel inside this cycle's workpaper.
+
+    A Summary this builder generated is removed so a fresh one replaces it.
+    It is recognised by its HEADINGS, not its name: a hand-built PY may
+    have a "Summary" of its own, and that is never touched.
+
+    The population tab is optional: "Population", else any tab whose name
+    contains "population". Many PYs keep the population elsewhere.
     """
     import re as _re
     from agent.ooxml.summary_sheet import GENERATED_HEADINGS
 
     notes: list[str] = []
-    sheets = ox.resolve_sheets(work_dir)
-
-    for name, num in list(sheets.items()):
+    for name, num in list(ox.resolve_sheets(work_dir).items()):
         rows = ox.first_rows_text(work_dir, num, rows=2)
         if any(tuple(r[: len(GENERATED_HEADINGS)]) == GENERATED_HEADINGS for r in rows):
             ox.delete_sheet(work_dir, name)
             notes.append(f"removed the previous run's {name!r} tab; a new one replaces it")
 
     sheets = ox.resolve_sheets(work_dir)
-    if sample_sheet in sheets:
-        return notes
-
-    numbered = [
-        name for name in sheets
-        if _re.fullmatch(rf"{_re.escape(sample_sheet)} .*\d.*", name)
-    ]
-    if not numbered:
-        return notes
-    base, stale = numbered[0], numbered[1:]
-    for name in stale:
-        ox.delete_sheet(work_dir, name)
-    ox.rename_sheet(work_dir, ox.resolve_sheets(work_dir)[base], sample_sheet)
-    notes.append(
-        f"the prior-year file is a previous CY workpaper: used its {base!r} tab as the "
-        f"sample layout"
-        + (f" and removed last cycle's {', '.join(repr(n) for n in stale)}" if stale else "")
+    population = "Population" if "Population" in sheets else next(
+        (n for n in sheets if "population" in n.lower()), None
     )
-    return notes
+
+    def keep_first(family: list[str], why: str) -> str:
+        base, stale = family[0], family[1:]
+        for name in stale:
+            ox.delete_sheet(work_dir, name)
+        notes.append(
+            f"used the {base!r} tab as the sample layout ({why})"
+            + (f" and removed the prior year's {', '.join(repr(n) for n in stale)}" if stale else "")
+        )
+        return base
+
+    preferred = sample_sheet or "Sample"
+    if preferred in sheets:
+        return TemplateTabs(preferred, population, notes)
+
+    numbered = [n for n in sheets if _re.fullmatch(rf"{_re.escape(preferred)} .*\d.*", n)]
+    if numbered:
+        base = keep_first(numbered, "the prior-year file is a previous CY workpaper")
+        ox.rename_sheet(work_dir, ox.resolve_sheets(work_dir)[base], preferred)
+        return TemplateTabs(preferred, population, notes)
+
+    digits = sorted((n for n in sheets if n.strip().isdigit()), key=lambda n: int(n))
+    if digits:
+        return TemplateTabs(keep_first(digits, "the prior year has one numbered tab per selection"),
+                            population, notes)
+
+    pictures = {n: _picture_count(work_dir, num) for n, num in sheets.items() if n != population}
+    best = max(pictures, key=pictures.get, default=None)
+    if best is not None and pictures[best] > 0:
+        notes.append(f"used the {best!r} tab as the sample layout (it holds the prior year's exhibits)")
+        return TemplateTabs(best, population, notes)
+    return TemplateTabs(None, population, notes)
 
 
 def build_sample_sheet_xml(sheet_xml_path: str, sample_items: list[SampleItem],
@@ -547,7 +590,7 @@ def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingRe
 
 
 def build_workpaper(request: WorkpaperRequest,
-                     *, sample_sheet: str = "Sample", population_sheet: str = "Population",
+                     *, sample_sheet: str | None = None, population_sheet: str | None = None,
                      parameters_sheet: str = "Parameters",
                      on_unplaced=None, summary_rows=None,
                      draft_banner: str | None = DRAFT_BANNER) -> str:
@@ -570,30 +613,44 @@ def build_workpaper(request: WorkpaperRequest,
     """
     work_dir = request.output_path + ".workdir"
     ox.extract_template(request.template_path, work_dir)
-    adopt_prior_output(work_dir, sample_sheet)
+    tabs = find_template_tabs(work_dir, sample_sheet)
+    if tabs.sample is None:
+        raise ox.TemplateMismatch(
+            f"could not tell which tab is the sample tab -- it has "
+            f"{sorted(ox.resolve_sheets(work_dir))}, none named 'Sample' or numbered, "
+            f"and none holding exhibit pictures"
+        )
+    sample_sheet = tabs.sample
+    population_sheet = population_sheet or tabs.population
 
     # Refuse a template this builder cannot write correctly, before writing
     # anything. Across a population of controls a wrong-but-produced
     # workpaper costs far more than a refusal -- see check_template.
     sheets = ox.check_template(
         work_dir,
-        required_sheets=[sample_sheet, population_sheet],
+        required_sheets=[sample_sheet] + ([population_sheet] if population_sheet else []),
         # Formats are copied from the template or appended (see
         # _resolve_styles), so no particular count is required -- only a
         # styles.xml that exists.
         max_style_index=0,
     )
     sample_sheet_num = sheets[sample_sheet]
-    population_sheet_num = sheets[population_sheet]
+    population_sheet_num = sheets.get(population_sheet) if population_sheet else None
     parameters_sheet_num = sheets.get(parameters_sheet)
 
     sst = ox.SharedStrings(work_dir)
 
     sample_sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{sample_sheet_num}.xml")
-    pop_sheet_path = os.path.join(work_dir, "xl", "worksheets", f"sheet{population_sheet_num}.xml")
+    # Optional: plenty of PYs keep the population elsewhere. With no tab
+    # to write into, it is simply not written (the caller reports that).
+    pop_sheet_path = (
+        os.path.join(work_dir, "xl", "worksheets", f"sheet{population_sheet_num}.xml")
+        if population_sheet_num else None
+    )
 
     styles = _resolve_styles(work_dir, sample_sheet_path, pop_sheet_path, sst.strings)
-    build_population_sheet_xml(pop_sheet_path, request.population_rows, sst, styles=styles)
+    if pop_sheet_path:
+        build_population_sheet_xml(pop_sheet_path, request.population_rows, sst, styles=styles)
 
     # ONE TAB PER SAMPLED ITEM. The prior-year workpaper documents a single
     # selection on its Sample tab -- narrative, raw data row, exhibits,
@@ -613,6 +670,7 @@ def build_workpaper(request: WorkpaperRequest,
 
     template_layout = read_template_layout(work_dir, sample_sheet_path, column_layout)
 
+    previous_label = sample_sheet
     for i, item in enumerate(request.sample_items):
         label = sample_tab_name(sample_sheet, item.sample_id, i, len(request.sample_items))
         if i == 0:
@@ -620,9 +678,10 @@ def build_workpaper(request: WorkpaperRequest,
             if label != sample_sheet:
                 ox.rename_sheet(work_dir, num, label)
         else:
-            num = ox.clone_sheet(work_dir, sample_sheet_num, label)
+            num = ox.clone_sheet(work_dir, sample_sheet_num, label, after=previous_label)
             path = os.path.join(work_dir, "xl", "worksheets", f"sheet{num}.xml")
         sheets_for_sample[label] = label
+        previous_label = label
 
         build_sample_sheet_xml(path, [item], sst, styles)
         drawing = db.build_sample_drawing([item], column_layout, layout=template_layout)

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.ooxml import ooxml_utils as ox
-from agent.ooxml.build_workpaper import adopt_prior_output
+from agent.ooxml.build_workpaper import TemplateTabs, find_template_tabs, sample_tab_name
 from agent.ooxml.build_workpaper import build_workpaper as build_ooxml_workpaper
 from agent.ooxml.models import PopulationRow, WorkpaperRequest
 from agent.narrative_styles import NarrativeStyle
@@ -122,57 +122,57 @@ def _population_rows(
 
 
 def check_py_template(
-    py_path: Path, sample_sheet: str = "Sample", population_sheet: str = "Population"
+    py_path: Path, sample_sheet: str | None = None, population_sheet: str | None = None
 ) -> tuple[bool, str, list[str]]:
     """(usable, why not, notes) for a prior-year file, before anything runs.
 
     Public so the app can call it the moment the file is uploaded. Finding
     out AFTER a paid run that the PY file was unusable is the expensive
     order; a red message beside the upload box costs nothing.
+    """
+    ok, why, tabs = inspect_py_template(py_path, sample_sheet)
+    return ok, why, tabs.notes if tabs else []
+
+
+def inspect_py_template(
+    py_path: Path, sample_sheet: str | None = None
+) -> tuple[bool, str, TemplateTabs | None]:
+    """(usable, why not, the tabs that will be written into).
 
     Checked by actually unpacking and inspecting it rather than by
-    extension. A file can be named .xlsx and still be the wrong shape.
-    The probe applies adopt_prior_output exactly as the real build does,
-    so a previous CY workpaper is judged as the builder will see it.
+    extension. The probe runs find_template_tabs exactly as the real build
+    does, so the answer here is the answer the build will get.
     """
     if py_path.suffix.lower() not in (".xlsx", ".xlsm"):
         return False, (
             f"the PY workpaper is a {py_path.suffix or 'file with no extension'}, "
             "not an .xlsx/.xlsm workbook"
-        ), []
+        ), None
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         probe = str(Path(tmp) / "probe")
         try:
             ox.extract_template(str(py_path), probe)
-            notes = adopt_prior_output(probe, sample_sheet)
-            ox.check_template(
-                probe,
-                required_sheets=[sample_sheet, population_sheet],
-                max_style_index=0,  # formats are copied from the template, not addressed by position
-            )
+            tabs = find_template_tabs(probe, sample_sheet)
+            if tabs.sample is None:
+                return False, (
+                    "couldn't tell which tab holds the sampled item. It has tabs "
+                    f"{sorted(ox.resolve_sheets(probe))}; the builder looks for a tab "
+                    "named 'Sample', tabs numbered '1', '2'..., or a tab with the "
+                    "prior year's exhibit pictures on it"
+                ), None
+            ox.check_template(probe, required_sheets=[tabs.sample], max_style_index=0)
         except ox.TemplateMismatch as exc:
-            return False, _plain_mismatch(str(exc), sample_sheet, population_sheet), []
+            return False, str(exc), None
         except Exception as exc:  # noqa: BLE001 -- a corrupt or exotic file is a fallback, not a crash
-            return False, f"the PY workpaper could not be opened as a template: {exc}", []
-    return True, "", notes
-
-
-def _plain_mismatch(detail: str, sample_sheet: str, population_sheet: str) -> str:
-    """The template error, led by what to DO about it."""
-    if "no sheet named" in detail:
-        return (
-            f"it needs tabs named {sample_sheet!r} and {population_sheet!r} "
-            f"(or numbered '{sample_sheet} 1', '{sample_sheet} 2'... from a previous "
-            f"CY workpaper). Details: {detail}"
-        )
-    return detail
+            return False, f"the PY workpaper could not be opened as a template: {exc}", None
+    return True, "", tabs
 
 
 # Kept under its old name for callers and tests that use the two-value form.
-def _can_mirror(py_path: Path, sample_sheet: str, population_sheet: str) -> tuple[bool, str]:
-    ok, why, _notes = check_py_template(py_path, sample_sheet, population_sheet)
+def _can_mirror(py_path: Path, sample_sheet: str | None = None, population_sheet: str | None = None) -> tuple[bool, str]:
+    ok, why, _notes = check_py_template(py_path, sample_sheet)
     return ok, why
 
 
@@ -186,8 +186,8 @@ def build_cy_workpaper(
     sample_manifests: dict[str, SamplePopulationManifest] | None = None,
     population_workbook: str | None = None,
     population_sheet: str | None = None,
-    sample_sheet_name: str = "Sample",
-    population_sheet_name: str = "Population",
+    sample_sheet_name: str | None = None,
+    population_sheet_name: str | None = None,
     narrative_style: "NarrativeStyle" = "model",
     review_client: Any = None,
     review_model: str = "",
@@ -223,7 +223,8 @@ def build_cy_workpaper(
         outcome.nothing_concluded = True
         return outcome
 
-    can, why, adopted = check_py_template(py_path, sample_sheet_name, population_sheet_name)
+    can, why, tabs = inspect_py_template(py_path, sample_sheet_name)
+    adopted = tabs.notes if tabs else []
     if not can:
         return _legacy(spec, results, py_testing_filename, out_dir, support, population_workbook,
                        [f"could not mirror the prior-year layout: {why}"], reason=why)
@@ -292,6 +293,15 @@ def build_cy_workpaper(
                 if not result.all_supported and not result.error:
                     warnings.append(f"[{step_id}] reviewer: {result.summary}")
 
+    tab_names: dict[str, str] = {}
+    for i, item in enumerate(request.sample_items):
+        tab_names.setdefault(item.sample_id, sample_tab_name(tabs.sample, item.sample_id, i, len(request.sample_items)))
+    if request.population_rows and not tabs.population:
+        warnings.append(
+            "the population was not written into the workpaper: the prior-year file "
+            "has no Population tab to put it in"
+        )
+
     unplaced: list[tuple[str, str, str, str]] = []
     build_ooxml_workpaper(
         request,
@@ -299,7 +309,13 @@ def build_cy_workpaper(
         population_sheet=population_sheet_name,
         on_unplaced=unplaced.extend,
         summary_rows=summary_rows(
-            list(zip(step_labels, [c for _s, c in conclusions])), reviews=reviews
+            list(zip(step_labels, [c for _s, c in conclusions])),
+            reviews=reviews,
+            sample_sheet=tabs.sample,
+            # Named by the SAME function the builder names the tabs with, so
+            # every Summary link lands on a tab that exists -- whatever the
+            # PY's own convention ("Sample 2" or just "2").
+            tab_names=tab_names,
         ),
     )
     return WorkpaperOutcome(output_path, mirrored_py=True, warnings=warnings, unplaced_callouts=unplaced)

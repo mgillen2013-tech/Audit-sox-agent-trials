@@ -551,3 +551,108 @@ def test_an_unusable_prior_year_is_reported_before_the_run_and_after_it(tmp_path
     assert not outcome.mirrored_py
     assert ".pdf" in outcome.fallback_reason
     assert "NOT last year's format" in outcome.summary_line
+
+
+# --------------------------------------------------------------------------
+# PY workpapers that do not call their tabs "Sample" / "Population"
+#
+# The second control tried had tabs ['1', 'IA Lead'] -- one numbered tab
+# per selection, no population tab -- and was rejected outright.
+# --------------------------------------------------------------------------
+
+
+def _py_with_tabs(path: Path, names: list[str], *, pictures_on: str | None = None) -> Path:
+    from openpyxl.drawing.image import Image as XLImage
+    from PIL import Image as PILImage
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for n in names:
+        ws = wb.create_sheet(n)
+        ws["A1"] = "Invoice Number"
+        ws["A2"] = f"prior-year row on {n}"
+    if pictures_on:
+        png = path.parent / "pic.png"
+        PILImage.new("RGB", (400, 500), "white").save(png)
+        wb[pictures_on].add_image(XLImage(str(png)), "D4")
+    for i in range(20):  # realistic formats -- see _template
+        wb[names[0]].cell(50 + i, 1, i).number_format = f"0.{'0' * (i % 8)}#"
+    wb.save(path)
+    return path
+
+
+def _links_land(path: Path) -> list[str]:
+    wb = openpyxl.load_workbook(path)
+    ws = wb["Summary"]
+    targets = [ws.cell(r, 5).hyperlink.location.split("!")[0].strip("'")
+               for r in range(1, ws.max_row + 1) if ws.cell(r, 5).hyperlink]
+    missing = [t for t in targets if t not in wb.sheetnames]
+    wb.close()
+    assert targets and not missing, (targets, missing)
+    return targets
+
+
+def test_a_py_whose_sample_tab_is_numbered_and_has_no_population_tab(tmp_path: Path):
+    _py_with_tabs(tmp_path / "PY.xlsx", ["1", "IA Lead"])
+    ok, why, notes = check_py_template(tmp_path / "PY.xlsx")
+    assert ok, why
+    assert any("'1'" in n for n in notes)
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+    )
+    assert outcome.mirrored_py, outcome.fallback_reason
+    wb = openpyxl.load_workbook(outcome.path)
+    assert wb.sheetnames == ["Summary", "1", "IA Lead"]
+    assert wb["1"]["A2"].value != "prior-year row on 1"  # CY data written in
+    wb.close()
+    assert _links_land(outcome.path) == ["1"]
+
+
+def test_numbered_tabs_follow_the_pys_own_convention_for_several_samples(tmp_path: Path):
+    # PY: one tab per selection named 1, 2, 3. CY with two selections gets
+    # tabs 1 and 2, side by side; the PY's third tab (last year's item) goes.
+    _py_with_tabs(tmp_path / "PY.xlsx", ["1", "2", "3", "IA Lead"])
+    _real_pdf(tmp_path / "invoice.pdf")
+    outcome = build_cy_workpaper(
+        _spec(), _two_sample_results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_two_manifests(),
+    )
+    assert outcome.mirrored_py, outcome.fallback_reason
+    wb = openpyxl.load_workbook(outcome.path)
+    assert wb.sheetnames == ["Summary", "1", "2", "IA Lead"]
+    assert all(wb[n]["A2"].value and "prior-year" not in str(wb[n]["A2"].value) for n in ("1", "2"))
+    wb.close()
+    assert sorted(_links_land(outcome.path)) == ["1", "2"]
+
+
+def test_a_sample_tab_with_any_name_is_found_by_its_exhibits(tmp_path: Path):
+    _py_with_tabs(tmp_path / "PY.xlsx", ["Lead", "Testing", "Notes"], pictures_on="Testing")
+    ok, why, notes = check_py_template(tmp_path / "PY.xlsx")
+    assert ok, why
+    assert any("'Testing'" in n for n in notes)
+
+
+def test_population_without_a_population_tab_is_reported_not_lost_silently(tmp_path: Path):
+    _py_with_tabs(tmp_path / "PY.xlsx", ["1", "IA Lead"])
+    _real_pdf(tmp_path / "invoice.pdf")
+    pop = openpyxl.Workbook()
+    pop.active.title = "Pop"
+    pop.active.append(["Invoice Number"])
+    pop.active.append(["21022452"])
+    pop.save(tmp_path / "listing.xlsx")
+    outcome = build_cy_workpaper(
+        _spec(), _results(), "PY.xlsx", tmp_path / "out",
+        support_dir=tmp_path, sample_manifests=_manifests(),
+        population_workbook="listing.xlsx", population_sheet="Pop",
+    )
+    assert outcome.mirrored_py
+    assert any("population was not written" in w for w in outcome.warnings)
+
+
+def test_a_workbook_with_no_recognisable_sample_tab_says_what_it_looked_for(tmp_path: Path):
+    _py_with_tabs(tmp_path / "PY.xlsx", ["Lead", "Notes"])
+    ok, why, _notes = check_py_template(tmp_path / "PY.xlsx")
+    assert not ok
+    assert "Lead" in why and "'Sample'" in why and "numbered" in why

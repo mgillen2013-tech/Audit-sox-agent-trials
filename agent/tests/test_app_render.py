@@ -320,3 +320,40 @@ def test_a_wrong_deployment_name_gets_a_plain_english_fix():
 
     hint = cy_testing_app._hint_for("Error code: 404 - {'error': {'code': 'DeploymentNotFound'}}")
     assert "Deployments page" in hint
+
+
+def test_a_run_cut_off_part_way_can_still_be_built_into_a_workpaper(tmp_path):
+    # Streamlit restarts the page on any click, which silently abandoned a
+    # run in progress: the finished step (already paid for) and the
+    # workpaper both vanished with no message.
+    from agent.costs import TokenLedger
+    from agent.tests.test_build_cy_workpaper import _manifests, _real_pdf, _results, _spec, _template
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _template(run_dir / "PY.xlsx")
+    _real_pdf(run_dir / "invoice.pdf")
+    spec = _spec()
+    spec["test_steps"].append({"test_step_id": "TS-2", "test_step_text": "Second step."})
+
+    at = _app()
+    at.session_state["partial_run"] = {
+        "spec": spec, "results": _results(), "manifests": _manifests(),
+        "py_name": "PY.xlsx", "pop_name": None, "pop_tab": None,
+        "run_dir": str(run_dir), "ledger": TokenLedger("claude-opus-5"),
+        "step_ids": ["TS-1", "TS-2"],
+    }
+    at.run()
+    assert not at.exception, at.exception
+    warning = " ".join(w.value for w in at.warning)
+    assert "stopped before it finished" in warning
+    assert "Finished: TS-1" in warning and "Not run: TS-2" in warning
+
+    next(b for b in at.button if b.label == "Build the workpaper from the finished steps").click()
+    at.run()
+    assert not at.exception, at.exception
+    out = at.session_state["run_output"]
+    assert out["wp_bytes"] and out["wp_mirrored"]
+    assert "partial_run" not in at.session_state
+    assert not run_dir.exists()  # staged evidence removed once used
+    assert any(b.label.startswith("⬇️ Download") for b in at.get("download_button"))
