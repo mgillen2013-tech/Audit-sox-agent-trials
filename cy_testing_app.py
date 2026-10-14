@@ -11,22 +11,23 @@ a temp folder, then calls the exact same iter_control_results() the
 command-line runner uses, so the orchestration logic here is the same logic
 proven by the CLI runs, not a second implementation of it.
 
-One workbook covers both the population and the sample selections for a
-control -- the common real shape (one file, one tab per concept) rather
-than two separate uploads. Its sheets accept ANY columns (see
-agent.intake.build_manifest_from_any_columns): a real export straight out
-of E1 has columns like "invoice number f0411.vinv", not
-"identifying_details". The whole workbook is also added to CY support
-evidence, so the population tab is searchable and can back an IPE
-completeness/accuracy conclusion, not just the sample tab.
+One upload: the sample listing. Its sheets accept ANY columns (see
+agent.intake.build_manifest_from_any_columns), because a real export
+straight out of E1 has columns like "invoice number f0411.vinv", not
+"identifying_details". The whole workbook is added to CY support evidence,
+so its tabs are searchable rather than only parsed.
 
-Selection method and population description are no longer collected as
-manual fields -- they were never actually surfaced to the model or the
-workpaper, and forcing an answer just produced noise. Population size,
-when a population tab is picked, is computed by counting that tab's rows
-rather than typed -- and it IS passed to the model now, specifically so it
-can tell a genuinely complete small sample from a partial one instead of
-guessing off a support filename (see agent.loop.build_user_turn).
+The population is OPTIONAL and behind a toggle. It used to be the headline
+of this section because IPE completeness/accuracy was tested here; a human
+performs that now, so what is left is worth having and not worth asking
+for every run: the population SIZE reaches the model, which is how it
+tells a deliberate 1-item sample from a partial upload (a real run treated
+a correct sample as suspicious without it), and the rows are carried into
+the workpaper's Population tab.
+
+Selection method and population description are not collected at all --
+they were never surfaced to the model or the workpaper, and forcing an
+answer just produced noise.
 
 This is still a shell, not the full review UI from the design doc (no
 approve/edit/reject, no citation-card source previews) -- it's the intake
@@ -122,16 +123,14 @@ control_objective_text = st.text_area(
     "Control objective", placeholder="What this control is supposed to accomplish."
 )
 
-# ── 2. Population & sample workbook ─────────────────────────────────────────
-st.header("2. Population & sample workbook")
+# ── 2. Sample selections ────────────────────────────────────────────────────
+st.header("2. Sample selections")
 st.caption(
-    "One Excel file for the whole control -- one tab holds the full population "
-    "(used to check IPE completeness/accuracy), another tab holds the items "
-    "selected for testing. Only one tab? Just pick it for both, or leave "
-    "population unset if you don't have one."
+    "The Excel file listing the items selected for testing. One tab per test "
+    "step, with whatever columns your extract happens to have."
 )
 pop_sample_file = st.file_uploader(
-    "Population & sample workbook", type=["xlsx", "xls", "xlsm"], key="pop_sample_file"
+    "Sample listing", type=["xlsx", "xls", "xlsm"], key="pop_sample_file"
 )
 
 sheet_names: list[str] = []
@@ -143,15 +142,23 @@ if pop_sample_file is not None:
     except Exception as exc:  # noqa: BLE001 -- surfaced inline, not a crash
         st.error(f"Couldn't read tabs from {pop_sample_file.name}: {exc}")
 
+# Optional, and behind a toggle so the common case is one upload and one
+# tab pick. IPE is performed by a human now, which is what the population
+# tab mainly existed for; what remains is worth having but is not worth
+# asking for every run:
+#   - the population SIZE reaches the model, so it can tell a deliberate
+#     1-item sample from a partial upload (a real run treated a correct
+#     sample as suspicious without it)
+#   - the rows are carried into the workpaper's Population tab
 population_tab = None
-if sheet_names:
-    population_tab = st.selectbox(
-        "Which tab is the full population?",
-        ["(none)"] + sheet_names,
-        key="population_tab",
-        help="Used for IPE completeness/accuracy -- e.g. record counts, report parameters, tie-outs.",
-    )
-    population_tab = None if population_tab == "(none)" else population_tab
+if sheet_names and st.checkbox(
+    "This file also contains the full population",
+    key="has_population",
+    help="Optional. Adds the population to the workpaper and tells the agent "
+         "how large the population was, so it can tell a small-but-complete "
+         "sample from a partial one.",
+):
+    population_tab = st.selectbox("Which tab is the full population?", sheet_names, key="population_tab")
 
 # ── 3. Test steps ────────────────────────────────────────────────────────────
 st.header("3. Test steps")
@@ -175,7 +182,7 @@ for i in range(int(num_steps)):
                 key=f"sampletab_{i}",
             )
         else:
-            st.info("Upload the population & sample workbook above to pick this step's sample tab.")
+            st.info("Upload the sample listing above to pick this step's tab.")
 
         test_steps.append(
             {
@@ -395,7 +402,7 @@ if run_clicked:
     if not control_id or not control_objective_ref or not control_objective_text:
         errors.append("Fill in all of the control details.")
     if pop_sample_file is None:
-        errors.append("Upload the population & sample workbook.")
+        errors.append("Upload the sample listing.")
     for s in test_steps:
         if not s["test_step_text"]:
             errors.append(f"Fill in the test step text for test step {s['test_step_id']}.")
