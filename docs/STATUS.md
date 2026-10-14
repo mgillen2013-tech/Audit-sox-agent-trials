@@ -74,6 +74,15 @@ the PY, verify in code":
   actually evidences the attribute the PY used it for
 - a stronger final review pass over the whole CY workpaper against the PY
 
+Baseline from a real mirror-engine run (Sonnet): about **$0.27 for the
+whole control** -- output 15,885 tokens ($0.16, 60% of cost), fresh input
+24,367 ($0.05), cache writes 18,848 ($0.05), cache reads 54,512 ($0.01).
+Roughly 130K cost-weighted units against a 300K cap PER STEP. Dollar
+figures use the price table in agent/costs.py, an estimate -- Foundry
+billing is authoritative. Shape of the spend: output is ~5x the price of
+input, so calls that READ more (images, more of the PY) are cheap; calls
+that WRITE more are what cost. Prefer extra calls with short answers.
+
 Guardrails still apply: every model answer is validated by code before it
 is used, nothing is deleted on a model's say-so without being reported,
 and the per-run token caps stay. Watch the token breakdown as calls are
