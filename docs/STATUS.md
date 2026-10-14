@@ -56,6 +56,29 @@ decides every element; code applies) -> Mirror Check + Support Check tabs
 (leftover scan over every cell and shape, support comparison, final model
 pass). Fallbacks: layout builder (`agent/ooxml/`), then standalone layout.
 
+## Model calls: we have room to use more
+
+Run costs have been kept low (Sonnet deployment, prompt caching, and the
+token breakdown after each run shows where every token goes). That leaves
+headroom to lean on the model more where JUDGMENT is the bottleneck,
+instead of writing code to approximate it -- which is exactly where the
+rule-based versions went wrong. Candidates, in the spirit of "read it from
+the PY, verify in code":
+
+- a second look when a check flags something (re-place a tickmark that was
+  not found, re-read a support page the first pass missed) rather than
+  leaving it for the reviewer
+- reading support pages directly (vision) to match them to PY documents
+  and to choose crops, instead of relying on OCR text alone
+- a per-selection Support Check that also confirms each CY document
+  actually evidences the attribute the PY used it for
+- a stronger final review pass over the whole CY workpaper against the PY
+
+Guardrails still apply: every model answer is validated by code before it
+is used, nothing is deleted on a model's say-so without being reported,
+and the per-run token caps stay. Watch the token breakdown as calls are
+added -- spend should go where it buys accuracy.
+
 ## Status
 
 - **Proven with a real model:** the reviewer ran the mirror engine end to
