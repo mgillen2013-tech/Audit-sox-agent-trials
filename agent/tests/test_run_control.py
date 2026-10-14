@@ -78,6 +78,7 @@ def _submit_conclusion_input(**overrides) -> dict:
             }
         ],
         procedures_performed=["recalculation"],
+        sample_results=[{"sample_id": "S01", "conclusion": "satisfied"}],
         ipe_completeness_accuracy_status="not_applicable",
         ipe_completeness_accuracy_evidence=[],
         exceptions=[],
@@ -99,15 +100,6 @@ def test_iter_control_results_yields_incrementally(control_dir: tuple[Path, dict
     client = FakeClient(
         responses=[
             response([tool_use("t1", "search_cy_support", {"query": "accrual recalculation GL", "top_k": 5})]),
-            response(
-                [
-                    tool_use(
-                        "t2",
-                        "check_sample_coverage",
-                        {"required_sample_ids": [], "found_evidence_ids": ["S01"]},
-                    )
-                ]
-            ),
             response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
@@ -127,15 +119,6 @@ def test_run_control_wires_real_files_through_the_loop(control_dir: tuple[Path, 
     client = FakeClient(
         responses=[
             response([tool_use("t1", "search_cy_support", {"query": "accrual recalculation GL", "top_k": 5})]),
-            response(
-                [
-                    tool_use(
-                        "t2",
-                        "check_sample_coverage",
-                        {"required_sample_ids": [], "found_evidence_ids": ["S01"]},
-                    )
-                ]
-            ),
             response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
@@ -148,7 +131,7 @@ def test_run_control_wires_real_files_through_the_loop(control_dir: tuple[Path, 
     assert conclusion.conclusion == "satisfied"
     assert conclusion.sample_coverage.complete is True
     assert conclusion.evidence_citations[0].evidence_id == "ev_0001"
-    assert len(results["TS-4.2"]["audit_log"]) == 3
+    assert len(results["TS-4.2"]["audit_log"]) == 2
 
     # The manifest's sample_size (1 row) and population_size (12, from the
     # sample list fixture) must reach the model's first turn -- without
@@ -167,7 +150,7 @@ def test_run_control_wires_real_files_through_the_loop(control_dir: tuple[Path, 
 
 def test_run_control_missing_sample_list_row_still_runs(control_dir: tuple[Path, dict]):
     # A test step with no matching rows in the sample list -> empty manifest
-    # lookup -> check_sample_coverage should hit the no_sample_list_found path.
+    # lookup -> the step runs with an empty sample list and no coverage gate.
     base_dir, spec = control_dir
     spec["test_steps"].append(
         {
@@ -181,20 +164,8 @@ def test_run_control_missing_sample_list_row_still_runs(control_dir: tuple[Path,
             # TS-4.2 first (dict preserves insertion order, and run_control
             # iterates spec["test_steps"] in order)
             response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
-            response(
-                [tool_use("t1b", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
-            ),
             response([tool_use("t2", "submit_conclusion", _submit_conclusion_input())]),
             # TS-9.9
-            response(
-                [
-                    tool_use(
-                        "t3",
-                        "check_sample_coverage",
-                        {"required_sample_ids": [], "found_evidence_ids": []},
-                    )
-                ]
-            ),
             response(
                 [
                     tool_use(
@@ -232,9 +203,6 @@ def test_run_ceiling_stops_later_steps_but_keeps_finished_ones(control_dir: tupl
                 [tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})],
                 usage=fake_usage(input_tokens=60_000),
             ),
-            response(
-                [tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
-            ),
             response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
             # TS-9.9 would run next, but the ceiling is already passed.
             response([tool_use("t4", "submit_conclusion", _submit_conclusion_input(test_step_id="TS-9.9"))]),
@@ -249,8 +217,8 @@ def test_run_ceiling_stops_later_steps_but_keeps_finished_ones(control_dir: tupl
     assert results["TS-9.9"]["reason"] == "run_budget_exceeded"
     assert "skipped" in results["TS-9.9"]["error"]
     # And it really did not call the model for that step -- only TS-4.2's
-    # three turns were spent.
-    assert len(client.calls) == 3
+    # two turns were spent.
+    assert len(client.calls) == 2
 
 
 def test_run_control_preserves_audit_log_on_incomplete_run(control_dir: tuple[Path, dict]):
@@ -295,10 +263,6 @@ def test_the_ledger_captures_a_whole_control_run(control_dir: tuple[Path, dict])
                 usage=fake_usage(input_tokens=8_000, output_tokens=300),
             ),
             response(
-                [tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})],
-                usage=fake_usage(input_tokens=200, cache_read_input_tokens=8_200, output_tokens=150),
-            ),
-            response(
                 [tool_use("t3", "submit_conclusion", _submit_conclusion_input())],
                 usage=fake_usage(input_tokens=250, cache_read_input_tokens=8_600, output_tokens=1_400),
             ),
@@ -309,7 +273,7 @@ def test_the_ledger_captures_a_whole_control_run(control_dir: tuple[Path, dict])
     run_control(spec, base_dir, client, model="claude-opus-5", ledger=ledger)
 
     assert [g.group for g in ledger.group_rows()] == ["TS-4.2"]
-    assert len(ledger.records) == 3
+    assert len(ledger.records) == 2
     assert ledger.dollars > 0
     # The step's first prompt was itemised, so "why was turn 1 expensive"
     # is answerable without re-running anything.
@@ -326,7 +290,6 @@ def test_ocr_says_what_it_did_even_when_it_did_nothing(control_dir: tuple[Path, 
     base_dir, spec = control_dir
     responses = [
         response([tool_use("t1", "search_cy_support", {"query": "accrual recalculation GL", "top_k": 5})]),
-        response([tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]),
         response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
     ]
 

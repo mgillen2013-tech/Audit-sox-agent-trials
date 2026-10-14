@@ -301,9 +301,9 @@ def test_sample_roster_names_each_selected_item(request_: TestStepRequest):
     assert "sample_id '1'" in turn and "sample_id '2'" in turn
     assert "Premiere Onboard LLC" in turn
     assert "Lockton Companies" in turn
-    # The ids must be presented as what check_sample_coverage expects, so
-    # the model doesn't have to discover them from a failed call.
-    assert "found_evidence_ids" in turn
+    # The ids must be presented as the ones every sample_result and
+    # citation has to use, so the model never has to guess them.
+    assert "every sample_result" in turn
     # Their support files were named "sample 2 support" -- matching on
     # filenames rather than field values is the trap.
     assert "NOT on a filename" in turn
@@ -446,6 +446,9 @@ def _submit_conclusion_input(**overrides) -> dict:
             }
         ],
         procedures_performed=["recalculation"],
+        # Coverage is computed from what the conclusion ADDRESSES, so a
+        # fixture that concludes on nothing is correctly rejected.
+        sample_results=[{"sample_id": "S01", "conclusion": "satisfied"}],
         ipe_completeness_accuracy_status="not_applicable",
         ipe_completeness_accuracy_evidence=[],
         exceptions=[],
@@ -467,16 +470,13 @@ def test_cache_breakpoint_on_newest_message_never_accumulates(evidence_items, sa
         responses=[
             response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
             response([tool_use("t2", "search_cy_support", {"query": "accrual again", "top_k": 5})]),
-            response(
-                [tool_use("t3", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
-            ),
             response([tool_use("t4", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
 
     run_test_step(request_, evidence_items, sample_manifest, client)
 
-    assert len(client.calls) == 4
+    assert len(client.calls) == 3
     for call in client.calls:
         last_content = call["messages"][-1]["content"]
         assert isinstance(last_content, list), "last message should be in block form, not a bare string"
@@ -492,19 +492,10 @@ def test_cache_breakpoint_on_newest_message_never_accumulates(evidence_items, sa
         assert total_markers == 1, "messages[] should never carry more than one active breakpoint"
 
 
-def test_happy_path_search_then_coverage_then_submit(evidence_items, sample_manifest, request_):
+def test_happy_path_search_then_submit(evidence_items, sample_manifest, request_):
     client = FakeClient(
         responses=[
             response([tool_use("t1", "search_cy_support", {"query": "accrual recalculation", "top_k": 5})]),
-            response(
-                [
-                    tool_use(
-                        "t2",
-                        "check_sample_coverage",
-                        {"required_sample_ids": [], "found_evidence_ids": ["S01"]},
-                    )
-                ]
-            ),
             response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
@@ -515,19 +506,19 @@ def test_happy_path_search_then_coverage_then_submit(evidence_items, sample_mani
     assert conclusion.conclusion == "satisfied"
     assert conclusion.sample_coverage is not None
     assert conclusion.sample_coverage.complete is True
-    assert conclusion.model_metadata.tool_call_count == 3
-    assert len(audit_log) == 3
+    assert conclusion.model_metadata.tool_call_count == 2
+    assert len(audit_log) == 2
     assert [e.tool_name for e in audit_log] == [
         "search_cy_support",
-        "check_sample_coverage",
         "submit_conclusion",
     ]
     assert all(not e.is_error for e in audit_log)
 
 
-def test_required_sample_ids_overridden_server_side(evidence_items, sample_manifest, request_):
-    # The model passes a made-up required_sample_ids list; the loop must
-    # ignore it and use the real manifest (["S01"]) instead.
+def test_coverage_comes_from_the_manifest_not_from_the_model(evidence_items, sample_manifest, request_):
+    # Coverage is computed from the sample listing against what the
+    # conclusion addresses. The model has no way to assert it -- which is
+    # the point of having removed the tool that let it.
     client = FakeClient(
         responses=[
             response(
@@ -565,9 +556,8 @@ def test_required_sample_ids_overridden_server_side(evidence_items, sample_manif
 
     conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
 
-    coverage_entry = audit_log[0]
-    assert coverage_entry.output["total_required"] == 1  # from the real manifest, not the bogus list
-    assert coverage_entry.output["missing"] == []
+    assert conclusion.sample_coverage.total_required == 1  # from the manifest
+    assert conclusion.sample_coverage.missing == []
     assert conclusion.conclusion == "insufficient_evidence"
 
 
@@ -596,9 +586,6 @@ def test_fabricated_citation_is_rejected_and_model_can_retry(evidence_items, sam
             ),
             # Retry: search first, then cite a real evidence_id.
             response([tool_use("t2", "search_cy_support", {"query": "accrual", "top_k": 5})]),
-            response(
-                [tool_use("t3", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
-            ),
             response([tool_use("t4", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
@@ -650,18 +637,17 @@ def test_tool_call_count_matches_audit_log_even_after_invalid_input(evidence_ite
     assert conclusion.model_metadata.tool_call_count == 2
 
 
-def test_satisfied_without_coverage_check_is_rejected(evidence_items, sample_manifest, request_):
-    # The system prompt ASKS for check_sample_coverage before concluding; this
-    # proves the backend REFUSES a sampled "satisfied" that skipped it -- the
-    # model is pushed to check coverage and only then gets accepted.
+def test_satisfied_that_skips_a_sampled_item_is_rejected(evidence_items, sample_manifest, request_):
+    # Coverage used to be a TOOL the model called, passing in the samples it
+    # believed it had covered -- so the check confirmed what it was told.
+    # It is now computed from what the conclusion actually addresses, which
+    # is both free and harder to satisfy by assertion.
     client = FakeClient(
         responses=[
             response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
-            response([tool_use("t2", "submit_conclusion", _submit_conclusion_input())]),  # no coverage call yet
-            response(
-                [tool_use("t3", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
-            ),
-            response([tool_use("t4", "submit_conclusion", _submit_conclusion_input())]),
+            # Concludes "satisfied" while saying nothing about S01.
+            response([tool_use("t2", "submit_conclusion", _submit_conclusion_input(sample_results=[]))]),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
         ]
     )
 
@@ -670,8 +656,10 @@ def test_satisfied_without_coverage_check_is_rejected(evidence_items, sample_man
     rejected = audit_log[1]
     assert rejected.tool_name == "submit_conclusion"
     assert rejected.is_error is True
-    assert "check_sample_coverage" in rejected.output["error"]
+    assert "S01" in rejected.output["error"]
     assert conclusion.conclusion == "satisfied"
+    # Coverage still reaches the stored record, computed rather than claimed.
+    assert conclusion.sample_coverage.complete is True
 
 
 def test_satisfied_with_incomplete_coverage_is_rejected(evidence_items, request_):
@@ -691,9 +679,6 @@ def test_satisfied_with_incomplete_coverage_is_rejected(evidence_items, request_
     client = FakeClient(
         responses=[
             response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
-            response(
-                [tool_use("t2", "check_sample_coverage", {"required_sample_ids": [], "found_evidence_ids": ["S01"]})]
-            ),
             response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),  # satisfied, 1/2 covered
             response(
                 [
@@ -709,10 +694,10 @@ def test_satisfied_with_incomplete_coverage_is_rejected(evidence_items, request_
 
     conclusion, audit_log = run_test_step(request_, evidence_items, manifest, client)
 
-    rejected = audit_log[2]
+    rejected = audit_log[1]
     assert rejected.is_error is True
     assert "S02" in rejected.output["error"]
-    assert "1/2" in rejected.output["error"]
+    assert "1 of 2" in rejected.output["error"]
     assert conclusion.conclusion == "insufficient_evidence"
 
 
@@ -974,3 +959,138 @@ def test_token_budget_does_not_abort_the_turn_that_actually_concludes(
     )
     assert conclusion.conclusion == "insufficient_evidence"
     assert len(audit_log) == 1
+
+
+# --------------------------------------------------------------------------
+# locate_value: letting the model check an anchor before committing to it
+# --------------------------------------------------------------------------
+
+
+def test_locate_value_finds_a_value_however_it_is_punctuated(evidence_items, sample_manifest, request_):
+    # "11,193.00" on the page and "11193.00" in the model's head are the
+    # same number. Being strict here would send it hunting for a different
+    # anchor when the one it had was fine.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([tool_use("t2", "locate_value", {"evidence_id": "ev_001", "value": "482110"})]),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+        ]
+    )
+    _conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
+    located = audit_log[1]
+    assert located.tool_name == "locate_value"
+    assert located.output["found"] is True
+
+
+def test_a_miss_returns_what_is_actually_on_the_page(evidence_items, sample_manifest, request_):
+    # The whole point of asking first. A bare "no" leaves the model
+    # guessing again; naming what IS there lets it pick an anchor that
+    # will work. The real failure this prevents: an approval email that
+    # spells the date "February 9, 2026" while the model wrote
+    # "02/09/2026", losing the tickmark silently.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([tool_use("t2", "locate_value", {"evidence_id": "ev_001", "value": "02/09/2026"})]),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input())]),
+        ]
+    )
+    _conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
+    out = audit_log[1].output
+    assert out["found"] is False
+    assert out["nearby"], "a miss must say what IS on the page, or it teaches nothing"
+    assert any("482" in n for n in out["nearby"])
+
+
+def test_locating_on_an_unreadable_page_is_not_reported_as_a_plain_miss(sample_manifest, request_):
+    # An image-only page that was never OCR'd has NOTHING findable on it.
+    # Reporting that as "not found" would send the model looking for a
+    # different anchor, when the real problem is that this evidence cannot
+    # carry a tickmark at all.
+    blank = [
+        EvidenceItem(
+            evidence_id="ev_001",
+            source_file="scan.pdf",
+            source_type="image_ocr",
+            location="scan.pdf p.1",
+            extraction_confidence=0.0,
+            preview_ref="p1",
+        )
+    ]
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "locate_value", {"evidence_id": "ev_001", "value": "anything"})]),
+            response(
+                [
+                    tool_use(
+                        "t2",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+    _conclusion, audit_log = run_test_step(request_, blank, sample_manifest, client)
+    out = audit_log[0].output
+    assert out["found"] is False
+    assert "no readable text" in out["note"]
+
+
+def test_locating_on_an_unknown_evidence_id_says_so(evidence_items, sample_manifest, request_):
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "locate_value", {"evidence_id": "ev_nope", "value": "x"})]),
+            response(
+                [
+                    tool_use(
+                        "t2",
+                        "submit_conclusion",
+                        _submit_conclusion_input(conclusion="insufficient_evidence", evidence_citations=[]),
+                    )
+                ]
+            ),
+        ]
+    )
+    _conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
+    assert "no evidence item" in audit_log[0].output["note"]
+
+
+def test_coverage_counts_an_item_addressed_by_an_attribute_alone(evidence_items, request_):
+    # A selection concluded on via attribute_results but with no
+    # sample_results entry is still covered -- the workpaper will document
+    # it. Requiring one specific field would reject honest work.
+    manifest = SamplePopulationManifest(
+        test_step_id="TS-4.2",
+        sample_size=1,
+        samples=[SampleItem(sample_id="S01", test_step_id="TS-4.2", identifying_details="October accrual")],
+    )
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response(
+                [
+                    tool_use(
+                        "t2",
+                        "submit_conclusion",
+                        _submit_conclusion_input(
+                            sample_results=[],
+                            attribute_results=[
+                                {
+                                    "attribute": "Accrual recalculates",
+                                    "sample_id": "S01",
+                                    "result": "satisfied",
+                                    "value_observed": "482,110",
+                                    "evidence_ids": ["ev_001"],
+                                }
+                            ],
+                        ),
+                    )
+                ]
+            ),
+        ]
+    )
+    conclusion, audit_log = run_test_step(request_, evidence_items, manifest, client)
+    assert conclusion.conclusion == "satisfied"
+    assert conclusion.sample_coverage.complete is True

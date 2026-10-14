@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from rank_bm25 import BM25Okapi
 
 from agent.schemas import (
+    LocateValueInput,
+    LocateValueOutput,
     CheckSampleCoverageError,
     CheckSampleCoverageInput,
     CheckSampleCoverageOutput,
@@ -195,3 +197,72 @@ def request_additional_support(
     request_id = f"req_{next(ctx._request_counter):04d}"
     ctx.support_requests[request_id] = inp
     return RequestAdditionalSupportOutput(request_id=request_id)
+
+
+def locate_value(parsed: "LocateValueInput", ctx: ToolContext) -> "LocateValueOutput":
+    """Is this value literally printed on this evidence item?
+
+    Exists because the model otherwise picks tickmark anchors BLIND. It
+    writes "approved 02/09/2026" having never seen the page; the renderer
+    then tries to find that text on the document, fails, and the callout is
+    silently dropped -- reported to a human afterwards, too late to fix.
+    A real run lost its approval tickmark exactly this way: the email
+    writes the date as "February 9, 2026", and the invoice number sitting
+    beside it would have matched perfectly.
+
+    So: let it check first. A failed lookup returns what IS on the page, so
+    the model can pick an anchor that will actually work rather than
+    guessing twice.
+
+    Matching is deliberately loose about punctuation and case but strict
+    about the digits -- "11,193.00" should find "11193.00", and neither
+    should find "11,194.00".
+    """
+    from agent.schemas import LocateValueOutput
+
+    item = ctx._evidence_by_id.get(parsed.evidence_id)
+    if item is None:
+        return LocateValueOutput(
+            found=False, note=f"no evidence item {parsed.evidence_id!r} -- use an id from a search result"
+        )
+
+    # Read the item's OWN text, not _searchable_text -- that helpfully
+    # substitutes a placeholder ("[no extractable text -- likely a scanned
+    # page...]") for an un-OCR'd image, which reads as real content here
+    # and would make this tool answer "not found, try one of these"
+    # about a page that has nothing on it at all.
+    text = item.extracted_text or (
+        "\n".join(" | ".join(row) for row in item.extracted_table) if item.extracted_table else ""
+    )
+    if not text.strip():
+        # An image-only page that was never OCR'd. "Not found" would be
+        # misleading: nothing is findable here, which is a different
+        # problem and a different fix.
+        return LocateValueOutput(
+            found=False,
+            note="this evidence has no readable text (an image-only page that was not "
+                 "transcribed), so nothing can be located on it. Do not anchor a tickmark here.",
+        )
+
+    def norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    needle = norm(parsed.value)
+    if needle and needle in norm(text):
+        return LocateValueOutput(found=True)
+
+    # Offer what is actually there: the distinctive-looking tokens, which
+    # are what a tickmark would want to anchor on anyway.
+    candidates: list[str] = []
+    for token in re.findall(r"[^\s|]+", text):
+        cleaned = token.strip(".,;:()[]")
+        if len(cleaned) >= 4 and any(ch.isdigit() for ch in cleaned) and cleaned not in candidates:
+            candidates.append(cleaned)
+        if len(candidates) >= 12:
+            break
+    return LocateValueOutput(
+        found=False,
+        nearby=candidates,
+        note=f"{parsed.value!r} is not printed on this item. Anchor on one of `nearby` instead, "
+             f"or pick different evidence.",
+    )

@@ -3,8 +3,8 @@
 This is "the backend" the design doc keeps referring to: it's what appends
 every tool call+result to the audit log automatically, what enforces the
 forced-close-via-submit_conclusion rule, and what overrides
-check_sample_coverage's required_sample_ids server-side rather than trusting
-the model to restate the sample list correctly.
+sample coverage server-side from the submitted conclusion rather than
+trusting the model to report what it covered.
 
 The Anthropic client is a constructor argument, not a module-level global,
 specifically so this can be tested against a fake client with no network
@@ -21,8 +21,6 @@ from typing import Any, Callable, Protocol
 
 from agent.costs import TokenLedger
 from agent.schemas import (
-    CheckSampleCoverageError,
-    CheckSampleCoverageInput,
     ConclusionOutput,
     EvidenceItem,
     FlagExceptionInput,
@@ -31,13 +29,14 @@ from agent.schemas import (
     SampleCoverage,
     SampleItem,
     SamplePopulationManifest,
+    LocateValueInput,
     SearchCySupportInput,
     SubmitConclusionInput,
 )
 from agent.tools import (
     ToolContext,
-    check_sample_coverage,
     flag_exception,
+    locate_value,
     request_additional_support,
     search_cy_support,
 )
@@ -168,8 +167,8 @@ class TestStepRequest:
     # itself, so there's no need to make a human retype it.
     py_conclusion_text: str = ""
     # From the SamplePopulationManifest, when one exists. Without this the
-    # model's ONLY signal about sample size is check_sample_coverage's
-    # total_required count, with zero context for why it's that size -- a
+    # model's ONLY signal about sample size would be the roster length,
+    # with zero context for why it's that size -- a
     # real run saw the model treat a correct, intentional 1-item sample as
     # suspicious (a CY support filename said "selection 1", implying more
     # might exist) purely because it had no population figure to check that
@@ -179,8 +178,7 @@ class TestStepRequest:
     population_size: int | None = None
     # The actual selected items, from the SamplePopulationManifest. Without
     # these the model gets a bare COUNT and has to discover both the
-    # sample_ids (by calling check_sample_coverage and reading `missing`)
-    # and what each item even is (by fishing with searches). With one
+    # sample_ids and what each item even is (by fishing with searches). With one
     # sample that was survivable -- everything in CY support related to it.
     # With two it burned a real run's whole budget.
     samples: list[SampleItem] = field(default_factory=list)
@@ -365,8 +363,8 @@ def _render_sample_roster(samples: list[SampleItem]) -> str:
 
     return (
         "The selected items, exactly as they appear in the sample listing. These "
-        "sample_id values are what check_sample_coverage expects in "
-        "found_evidence_ids:\n"
+        "sample_id values are what every sample_result, attribute_result and "
+        "citation must use:\n"
         + "\n".join(lines)
         + "\nFind CY support for EACH of these separately. Match evidence to an item on "
         "its field values (invoice number, vendor, amount, dates), NOT on a filename -- a "
@@ -414,13 +412,16 @@ TOOLS = [
         SearchCySupportInput,
     ),
     _tool_def(
-        "check_sample_coverage",
-        "Check which of this test step's required samples you have evidence "
-        "for. Pass the sample_ids (not evidence_ids) you believe you've found "
-        "evidence for as found_evidence_ids. Always call this before "
-        "submit_conclusion when the test step has a sample -- do not eyeball "
-        "sample coverage yourself.",
-        CheckSampleCoverageInput,
+        "locate_value",
+        "Check whether a value is literally PRINTED on one piece of evidence, "
+        "before you rely on it as a tickmark anchor. The workpaper draws a red "
+        "box around each attribute's value on the exhibit by searching the page "
+        "for the text you report in attribute_results -- so if you report a date "
+        "as '02/09/2026' and the document spells it 'February 9, 2026', the box "
+        "cannot be drawn and the tickmark is lost. Use this whenever you are not "
+        "certain of the exact printed form, especially for dates and names. A "
+        "miss returns what IS on the page so you can anchor on that instead.",
+        LocateValueInput,
     ),
     _tool_def(
         "flag_exception",
@@ -443,8 +444,9 @@ TOOLS = [
         "way to end the conversation -- call it once you've gathered enough "
         "evidence (via search_cy_support) to conclude, including concluding "
         "insufficient_evidence. Note: when the test step has a sample, a "
-        "'satisfied' conclusion is only accepted after a check_sample_coverage "
-        "call showing complete coverage. Set each citation's sample_id to the "
+        "'satisfied' conclusion is only accepted if you conclude on EVERY "
+        "sampled item -- the backend checks that against the sample listing "
+        "and rejects a conclusion that silently skips one. Set each citation's sample_id to the "
         "sampled item it supports, so the workpaper can document each selection "
         "separately; leave it null only for evidence covering the step as a "
         "whole (a policy, the population extract, IPE parameters). Also fill "
@@ -476,7 +478,7 @@ TOOLS = [
 
 _INPUT_MODELS: dict[str, Any] = {
     "search_cy_support": SearchCySupportInput,
-    "check_sample_coverage": CheckSampleCoverageInput,
+    "locate_value": LocateValueInput,
     "flag_exception": FlagExceptionInput,
     "request_additional_support": RequestAdditionalSupportInput,
     "submit_conclusion": SubmitConclusionInput,
@@ -594,6 +596,36 @@ def _usage_tokens(usage: Any) -> int:
     )
 
 
+def _coverage_of(
+    conclusion: SubmitConclusionInput, required_sample_ids: list[str]
+) -> "SampleCoverage | None":
+    """Which required samples this conclusion actually concludes on.
+
+    "Addressed" means the conclusion says something about that selection:
+    a sample_result, an attribute_result, or a citation pinned to it. A
+    sample the model searched for and then said nothing about is NOT
+    covered -- the workpaper would show an empty tab for it.
+
+    None when the step has no sample list, which is a real case (a
+    step-wide procedure with nothing to select) and must not be treated as
+    zero coverage.
+    """
+    if not required_sample_ids:
+        return None
+    addressed = {r.sample_id for r in conclusion.sample_results}
+    addressed |= {a.sample_id for a in conclusion.attribute_results if a.sample_id}
+    addressed |= {c.sample_id for c in conclusion.evidence_citations if c.sample_id}
+    missing = [sid for sid in required_sample_ids if sid not in addressed]
+    found = len(required_sample_ids) - len(missing)
+    return SampleCoverage(
+        total_required=len(required_sample_ids),
+        total_found=found,
+        missing=missing,
+        coverage_pct=round(100.0 * found / len(required_sample_ids), 1),
+        complete=not missing,
+    )
+
+
 def _execute_tool(
     block: Any, ctx: ToolContext, turn: int, audit_log: list[AuditLogEntry]
 ) -> tuple[dict, bool, ConclusionOutput | None]:
@@ -631,17 +663,10 @@ def _execute_tool(
         content = output.model_dump()
         is_error = False
 
-    elif block.name == "check_sample_coverage":
-        # Server-side override: never trust the model's own required_sample_ids
-        # echo, even though the tool's public schema (matching the design doc)
-        # accepts one. ctx.required_sample_ids is the truth from the
-        # SamplePopulationManifest for this test step.
-        parsed = parsed.model_copy(update={"required_sample_ids": ctx.required_sample_ids})
-        output = check_sample_coverage(parsed)
+    elif block.name == "locate_value":
+        output = locate_value(parsed, ctx)
         content = output.model_dump()
-        is_error = isinstance(output, CheckSampleCoverageError)
-        if not is_error:
-            ctx.last_sample_coverage = SampleCoverage(**output.model_dump())
+        is_error = False
 
     elif block.name == "flag_exception":
         output = flag_exception(parsed, ctx)
@@ -660,28 +685,32 @@ def _execute_tool(
         except ValueError as exc:
             gate_error = str(exc)
 
-        # Server-enforced, like the fabrication guard: the system prompt and
-        # tool descriptions ASK for check_sample_coverage before concluding,
-        # but a "satisfied" on a sampled test step with unverified or
-        # incomplete coverage is exactly the conclusion an audit reviewer
-        # can't accept, so the backend refuses it rather than trusting the
-        # model to have followed the instruction.
-        if gate_error is None and parsed.conclusion == "satisfied" and ctx.required_sample_ids:
-            if ctx.last_sample_coverage is None:
-                gate_error = (
-                    "a 'satisfied' conclusion for a test step with a sample requires a "
-                    "successful check_sample_coverage call first. Call it, then resubmit -- "
-                    "or, if coverage can't be established, conclude not_satisfied or "
-                    "insufficient_evidence and use request_additional_support for what's missing."
-                )
-            elif not ctx.last_sample_coverage.complete:
-                sc = ctx.last_sample_coverage
-                gate_error = (
-                    f"sample coverage is incomplete ({sc.total_found}/{sc.total_required}; "
-                    f"missing: {sc.missing}) -- 'satisfied' is not supportable. Search for "
-                    "evidence covering the missing samples and re-run check_sample_coverage, "
-                    "or conclude not_satisfied/insufficient_evidence and request additional support."
-                )
+        # Coverage is COMPUTED here, not asked for.
+        #
+        # This used to be a tool the model called, passing in the sample_ids
+        # it believed it had covered -- so the check confirmed what it was
+        # told, which is the model marking its own homework with an extra
+        # API call in between. The backend already knows the required
+        # sample_ids (from the sample listing) and can see exactly which
+        # ones the submitted conclusion actually addresses, so the honest
+        # check is free, needs no turn, and tests what was CONCLUDED rather
+        # than what was claimed.
+        coverage = _coverage_of(parsed, ctx.required_sample_ids)
+        ctx.last_sample_coverage = coverage
+        if (
+            gate_error is None
+            and parsed.conclusion == "satisfied"
+            and coverage is not None
+            and not coverage.complete
+        ):
+            gate_error = (
+                f"this conclusion only addresses {coverage.total_found} of "
+                f"{coverage.total_required} sampled item(s) -- missing {coverage.missing}. "
+                "'satisfied' is not supportable for a sample you did not conclude on. "
+                "Either add sample_results and attribute_results for the missing "
+                "selection(s), or conclude not_satisfied/insufficient_evidence and use "
+                "request_additional_support for what could not be obtained."
+            )
 
         if gate_error is not None:
             content = {"error": gate_error}

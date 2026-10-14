@@ -96,6 +96,29 @@ class SearchCySupportOutput(BaseModel):
     results: list[SearchResult]
 
 
+class LocateValueInput(BaseModel):
+    """Ask whether a value is literally printed on one evidence item."""
+
+    evidence_id: str = Field(
+        description="The evidence item to look on, from a search_cy_support result."
+    )
+    value: str = Field(
+        description="The exact text to look for, as it would be PRINTED on the "
+                    "document -- '35713082', '11,193.00', '02/09/2026'. One token, "
+                    "no spaces."
+    )
+
+
+class LocateValueOutput(BaseModel):
+    found: bool
+    # What is actually on the page near the miss. The point of this tool is
+    # to let a failed lookup be useful: "not found, but '35713082' and
+    # 'February' are there" tells the model what to anchor on instead,
+    # which is the whole reason it is asking before committing.
+    nearby: list[str] = []
+    note: str = ""
+
+
 class CheckSampleCoverageInput(BaseModel):
     required_sample_ids: list[str]
     found_evidence_ids: list[str]
