@@ -25,6 +25,17 @@ from agent.tests.conftest import fake_usage
 st_testing = pytest.importorskip("streamlit.testing.v1")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    # The app remembers the last inputs in the user's home folder. Tests
+    # must neither read a developer's real file nor write into it.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    for var in ("ANTHROPIC_MODEL", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    return tmp_path
+
+
 def _app():
     # default_timeout is generous: the app imports openpyxl, pdfplumber and
     # the anthropic SDK at module scope, which is slow but not hung.
@@ -247,6 +258,64 @@ def test_a_run_where_no_step_concluded_does_not_blame_the_py_file():
     errors = " ".join(e.value for e in at.error)
     assert "didn't finish" in errors
     assert "DeploymentNotFound" in errors
-    assert "deployment name" in errors  # the plain-English fix
+    assert "Deployments page" in errors  # the plain-English fix
     assert "re-run with the original prior-year workpaper" not in errors
     assert "NOT in last year's format" not in errors
+
+
+def test_the_trial_control_is_prefilled():
+    at = _app().run()
+    assert not at.exception, at.exception
+    inputs = {t.label: t.value for t in at.text_input}
+    assert inputs["Control ID"] == "SS.PTP.AP.156"
+    assert inputs["Control objective reference"] == "Non-PO Invoice Review and Approval"
+    steps = [a.value for a in at.text_area if a.label == "Test step text"]
+    assert steps[0].startswith("1. Verify the invoice was timely reviewed")
+
+
+def test_what_was_typed_last_time_is_remembered_but_never_the_key(_isolated_home):
+    import json
+
+    saved = _isolated_home / ".cy_testing_agent" / "last_inputs.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({
+        "model": "claude-sonnet-5-5",
+        "resource": "my-resource",
+        "control_objective_text": "Invoices over the threshold are approved.",
+    }))
+    at = _app().run()
+    assert not at.exception, at.exception
+    inputs = {t.label: t.value for t in at.text_input}
+    assert inputs["Model"] == "claude-sonnet-5-5"
+    assert inputs["Resource name"] == "my-resource"
+    assert inputs["API key"] == ""
+    assert [a.value for a in at.text_area if a.label == "Control objective"] == [
+        "Invoices over the threshold are approved."
+    ]
+
+
+def test_run_saves_the_inputs_without_the_api_key(_isolated_home):
+    import json
+
+    at = _app().run()
+    next(t for t in at.text_input if t.label == "API key").input("secret-key-123")
+    next(b for b in at.button if b.label == "Run test steps").click()
+    at.run()
+    saved = (_isolated_home / ".cy_testing_agent" / "last_inputs.json").read_text()
+    assert "SS.PTP.AP.156" in json.loads(saved)["control_id"]
+    assert "secret-key-123" not in saved
+
+
+def test_test_connection_asks_for_missing_details_instead_of_calling():
+    at = _app().run()
+    next(b for b in at.button if b.label == "Test connection").click()
+    at.run()
+    assert not at.exception, at.exception
+    assert any("Fill in the API key" in e.value for e in at.error)
+
+
+def test_a_wrong_deployment_name_gets_a_plain_english_fix():
+    import cy_testing_app  # noqa: F401 -- the hint helper lives in the app module
+
+    hint = cy_testing_app._hint_for("Error code: 404 - {'error': {'code': 'DeploymentNotFound'}}")
+    assert "Deployments page" in hint

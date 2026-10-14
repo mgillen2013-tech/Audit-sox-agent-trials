@@ -37,6 +37,7 @@ building a control.json.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from io import BytesIO
@@ -53,6 +54,90 @@ from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
 from agent.build_cy_workpaper import build_cy_workpaper, check_py_template
 
+# Plain-English next steps for the ways a test step commonly fails. Keyed by
+# the runner's "reason" code where it has one, and matched on the error
+# text otherwise (API errors carry no code of ours).
+_FAILURE_HINTS = {
+    "token_budget_exceeded": (
+        "it hit the per-step token cap before finishing. Raise "
+        "\"Max cost-weighted tokens per test step\" in the sidebar and re-run."
+    ),
+    "run_budget_exceeded": (
+        "the whole control hit its token cap. Raise \"Max cost-weighted tokens "
+        "for the whole control\" in the sidebar and re-run."
+    ),
+    "model_refusal": (
+        "the model declined to answer. Re-run; if it repeats, send the error text."
+    ),
+    "max_iterations": (
+        "it used every allowed turn without submitting a conclusion. Re-run; if "
+        "it repeats, the support may not contain what the step asks for."
+    ),
+}
+
+
+def _hint_for(error: str) -> str:
+    text = error.lower()
+    if "deploymentnotfound" in text or "404" in text:
+        return (
+            "Foundry has no deployment with the name in the sidebar's Model box. "
+            "Copy the Name column from your resource's Deployments page exactly -- "
+            "it can differ from the model's own name -- and check Resource name "
+            "is the resource that deployment lives on."
+        )
+    if any(k in text for k in ("connection error", "getaddrinfo", "name or service", "nodename", "failed to resolve")):
+        return (
+            "couldn't reach the resource. Check Resource name: it's the part "
+            "before .services.ai.azure.com in your endpoint URL."
+        )
+    if "401" in text or "authentication" in text or "api key" in text:
+        return "the API key was rejected. Re-enter it in the sidebar."
+    if "429" in text or "rate limit" in text:
+        return "Foundry rate-limited the run. Wait a minute and re-run."
+    if "overloaded" in text or "529" in text or "timeout" in text or "timed out" in text:
+        return "the model service was busy or slow. Re-run."
+    return ""
+
+
+# What this computer last ran, so the form does not have to be retyped
+# every session. Stored in the user's home folder, NOT the app folder: the
+# code arrives as a fresh ZIP each time and anything beside it would be lost.
+# The API key is never written here.
+_REMEMBER_PATH = Path.home() / ".cy_testing_agent" / "last_inputs.json"
+
+
+def _remembered() -> dict:
+    try:
+        return json.loads(_REMEMBER_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 -- missing or unreadable just means no memory
+        return {}
+
+
+def _remember(values: dict) -> None:
+    try:
+        _REMEMBER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _REMEMBER_PATH.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001 -- convenience only; never break a run over it
+        pass
+
+
+# Pre-filled for the control currently being trialled, so a re-run after a
+# fix does not mean retyping it. Anything typed since replaces these.
+_DEMO = {
+    "control_id": "SS.PTP.AP.156",
+    "control_objective_ref": "Non-PO Invoice Review and Approval",
+    "test_steps": [
+        "1. Verify the invoice was timely reviewed and approved by appropriate "
+        "independent personnel (i.e. Branch Designee)."
+    ],
+}
+_last = _remembered()
+
+
+def _prefill(key: str, fallback: str = ""):
+    return _last.get(key) or _DEMO.get(key) or fallback
+
+
 st.set_page_config(page_title="CY Testing Agent", page_icon="🧾", layout="wide")
 st.title("🧾 CY Testing Agent")
 st.caption("Upload PY testing + CY support for one control, run it, review draft conclusions.")
@@ -68,15 +153,34 @@ with st.sidebar:
     )
     resource = st.text_input(
         "Resource name",
-        value=os.environ.get("ANTHROPIC_FOUNDRY_RESOURCE", ""),
+        value=os.environ.get("ANTHROPIC_FOUNDRY_RESOURCE") or _prefill("resource"),
         help='The subdomain in your endpoint URL, e.g. "example-resource".',
     )
     model = st.text_input(
         "Model",
-        value=os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL),
-        help="Must match a model actually deployed on this resource.",
+        value=os.environ.get("ANTHROPIC_MODEL") or _prefill("model", DEFAULT_MODEL),
+        help=(
+            "The deployment NAME from your resource's Deployments page in "
+            "Foundry -- any Claude model works (Sonnet, Opus, ...), but the "
+            "name must match exactly."
+        ),
     )
-    st.caption("These are only used for this session -- nothing is saved to disk.")
+    st.caption("Resource and model are remembered on this computer. The API key is never saved.")
+
+    # One tiny request (1 output token, a fraction of a cent) that proves
+    # key + resource + deployment name before a run is spent finding out.
+    if st.button("Test connection"):
+        if not api_key or not resource or not model:
+            st.error("Fill in the API key, resource name and model first.")
+        else:
+            try:
+                AnthropicFoundry(api_key=api_key, resource=resource).messages.create(
+                    model=model, max_tokens=1, messages=[{"role": "user", "content": "ping"}]
+                )
+                st.success(f"✅ Connected: '{model}' answered on {resource}.")
+            except Exception as exc:  # noqa: BLE001 -- shown to the user, not raised
+                _hint = _hint_for(str(exc))
+                st.error(f"Couldn't connect: {exc}" + (f"\n\n**What to do:** {_hint}" if _hint else ""))
 
     st.header("Spending cap")
     max_total_tokens = st.number_input(
@@ -116,11 +220,15 @@ with st.sidebar:
 st.header("1. Control details")
 col1, col2 = st.columns(2)
 with col1:
-    control_id = st.text_input("Control ID", placeholder="C-14")
+    control_id = st.text_input("Control ID", value=_prefill("control_id"), placeholder="C-14")
 with col2:
-    control_objective_ref = st.text_input("Control objective reference", placeholder="CO-4")
+    control_objective_ref = st.text_input(
+        "Control objective reference", value=_prefill("control_objective_ref"), placeholder="CO-4"
+    )
 control_objective_text = st.text_area(
-    "Control objective", placeholder="What this control is supposed to accomplish."
+    "Control objective",
+    value=_prefill("control_objective_text"),
+    placeholder="What this control is supposed to accomplish.",
 )
 
 # ── 2. Sample selections ────────────────────────────────────────────────────
@@ -162,7 +270,11 @@ if sheet_names and st.checkbox(
 
 # ── 3. Test steps ────────────────────────────────────────────────────────────
 st.header("3. Test steps")
-num_steps = st.number_input("How many test steps does this control have?", min_value=1, max_value=10, value=1, step=1)
+_remembered_steps = _last.get("test_steps") or _DEMO["test_steps"]
+num_steps = st.number_input(
+    "How many test steps does this control have?",
+    min_value=1, max_value=10, value=max(1, min(10, len(_remembered_steps))), step=1,
+)
 
 test_steps = []
 for i in range(int(num_steps)):
@@ -172,7 +284,12 @@ for i in range(int(num_steps)):
         # everything downstream only needs it to be unique and stable
         # within the run, and "TS-1" is what everyone typed anyway.
         tsid = f"TS-{i + 1}"
-        tstext = st.text_area("Test step text", key=f"tstext_{i}", placeholder="What this step requires you to test.")
+        tstext = st.text_area(
+            "Test step text",
+            key=f"tstext_{i}",
+            value=_remembered_steps[i] if i < len(_remembered_steps) else "",
+            placeholder="What this step requires you to test.",
+        )
 
         sample_tab = None
         if sheet_names:
@@ -407,45 +524,6 @@ def _render_token_burn(ledger: TokenLedger) -> None:
     )
 
 
-# Plain-English next steps for the ways a test step commonly fails. Keyed by
-# the runner's "reason" code where it has one, and matched on the error
-# text otherwise (API errors carry no code of ours).
-_FAILURE_HINTS = {
-    "token_budget_exceeded": (
-        "it hit the per-step token cap before finishing. Raise "
-        "\"Max cost-weighted tokens per test step\" in the sidebar and re-run."
-    ),
-    "run_budget_exceeded": (
-        "the whole control hit its token cap. Raise \"Max cost-weighted tokens "
-        "for the whole control\" in the sidebar and re-run."
-    ),
-    "model_refusal": (
-        "the model declined to answer. Re-run; if it repeats, send the error text."
-    ),
-    "max_iterations": (
-        "it used every allowed turn without submitting a conclusion. Re-run; if "
-        "it repeats, the support may not contain what the step asks for."
-    ),
-}
-
-
-def _hint_for(error: str) -> str:
-    text = error.lower()
-    if "deploymentnotfound" in text or "404" in text:
-        return (
-            "the Model name in the sidebar isn't a deployment on your Foundry "
-            "resource. Use the deployment name exactly as Foundry shows it "
-            "(e.g. claude-opus-5)."
-        )
-    if "401" in text or "authentication" in text or "api key" in text:
-        return "the API key was rejected. Re-enter it in the sidebar."
-    if "429" in text or "rate limit" in text:
-        return "Foundry rate-limited the run. Wait a minute and re-run."
-    if "overloaded" in text or "529" in text or "timeout" in text or "timed out" in text:
-        return "the model service was busy or slow. Re-run."
-    return ""
-
-
 def _render_result(test_step_id: str, result: dict) -> None:
     """One test step's outcome -- success or preserved failure. Used both
     for live rendering during a run and for re-rendering from
@@ -477,6 +555,16 @@ def _render_result(test_step_id: str, result: dict) -> None:
 st.header("5. Run")
 run_clicked = st.button("Run test steps", type="primary")
 if run_clicked:
+    _remember(
+        {
+            "resource": resource,
+            "model": model,
+            "control_id": control_id,
+            "control_objective_ref": control_objective_ref,
+            "control_objective_text": control_objective_text,
+            "test_steps": [s["test_step_text"] for s in test_steps],
+        }
+    )
     errors = []
     if not control_id or not control_objective_ref or not control_objective_text:
         errors.append("Fill in all of the control details.")
