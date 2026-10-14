@@ -303,6 +303,25 @@ def build_cy_workpaper(
         )
 
     unplaced: list[tuple[str, str, str, str]] = []
+    try:
+        _build_mirrored(request, sample_sheet_name, population_sheet_name, unplaced, warnings,
+                        summary_rows(
+                            list(zip(step_labels, [c for _s, c in conclusions])),
+                            reviews=reviews,
+                            sample_sheet=tabs.sample,
+                            tab_names=tab_names,
+                        ))
+    except Exception as exc:  # noqa: BLE001
+        # Mirroring failed part-way -- including the final integrity check
+        # refusing a file Excel would not open. The conclusions are already
+        # paid for: fall back to the standalone layout, and say why.
+        why = str(exc)
+        return _legacy(spec, results, py_testing_filename, out_dir, support, population_workbook,
+                       warnings + [f"could not mirror the prior-year layout: {why}"], reason=why)
+    return WorkpaperOutcome(output_path, mirrored_py=True, warnings=warnings, unplaced_callouts=unplaced)
+
+
+def _build_mirrored(request, sample_sheet_name, population_sheet_name, unplaced, warnings, rows) -> None:
     build_ooxml_workpaper(
         request,
         sample_sheet=sample_sheet_name,
@@ -311,17 +330,10 @@ def build_cy_workpaper(
         # How the PY tab was read (which row holds the headings, which
         # columns were added). Tab notes already came from the pre-check.
         on_notes=lambda notes: warnings.extend(n for n in notes if n not in warnings),
-        summary_rows=summary_rows(
-            list(zip(step_labels, [c for _s, c in conclusions])),
-            reviews=reviews,
-            sample_sheet=tabs.sample,
-            # Named by the SAME function the builder names the tabs with, so
-            # every Summary link lands on a tab that exists -- whatever the
-            # PY's own convention ("Sample 2" or just "2").
-            tab_names=tab_names,
-        ),
+        # Summary links are named by the SAME function as the tabs, so every
+        # one lands on a tab that exists, whatever the PY's convention.
+        summary_rows=rows,
     )
-    return WorkpaperOutcome(output_path, mirrored_py=True, warnings=warnings, unplaced_callouts=unplaced)
 
 
 def _mirrored_filename(control_id: str) -> str:

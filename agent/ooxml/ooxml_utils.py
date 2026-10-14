@@ -470,8 +470,7 @@ def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str, *, after: str 
 
     with open(os.path.join(sheets_dir, f"sheet{src_sheet_num}.xml"), encoding="utf-8") as fh:
         body = fh.read()
-    # Strip the inherited drawing link -- a fresh one is added per clone.
-    body = re.sub(r"<drawing[^>]*/>", "", body)
+    body = _detach_clone(work_dir, src_sheet_num, new_num, body)
     with open(os.path.join(sheets_dir, f"sheet{new_num}.xml"), "w", encoding="utf-8") as fh:
         fh.write(body)
 
@@ -530,6 +529,101 @@ def clone_sheet(work_dir: str, src_sheet_num: int, new_name: str, *, after: str 
     with open(ct_path, "w", encoding="utf-8") as fh:
         fh.write(ct)
     return new_num
+
+
+# Sheet elements that point at another part through r:id and are NOT
+# carried to a copied tab: tables need workbook-unique names and ids,
+# comments and form controls are per-tab objects, and the drawing is
+# written fresh per tab. Removed whole.
+_UNCOPYABLE = ("drawing", "legacyDrawing", "legacyDrawingHF", "drawingHF", "picture",
+               "oleObjects", "controls", "tableParts")
+
+
+def _detach_clone(work_dir: str, src_num: int, new_num: int, body: str) -> str:
+    """Make a copied sheet stand on its own.
+
+    A sheet's XML refers to other parts by r:id, resolved through ITS OWN
+    .rels file -- which a copy does not have. Every such reference left in
+    the copy points at nothing, and Excel's verdict on that is "cannot be
+    opened or repaired" with no detail. The first version stripped only the
+    drawing; a real PY tab with printer settings (an r:id on <pageSetup>,
+    which most Excel-saved tabs have) then produced exactly that.
+
+    So: printer settings are copied with the tab (a part of its own, since
+    two tabs sharing one is not something to rely on); hyperlinks to
+    outside files keep their target by copying the relationship; everything
+    in _UNCOPYABLE is removed; any r:id still left is dropped. Also removed:
+    the tab's unique id (xr:uid) and VBA codeName, which must not repeat
+    within a workbook.
+    """
+    src_rels_path = os.path.join(work_dir, "xl", "worksheets", "_rels", f"sheet{src_num}.xml.rels")
+    src_rels: dict[str, tuple[str, str, str]] = {}
+    if os.path.exists(src_rels_path):
+        with open(src_rels_path, encoding="utf-8") as fh:
+            for rel in re.finditer(r"<Relationship\b[^>]*/>", fh.read()):
+                tag = rel.group(0)
+                rid = re.search(r'\bId="([^"]+)"', tag)
+                typ = re.search(r'\bType="([^"]+)"', tag)
+                tgt = re.search(r'\bTarget="([^"]+)"', tag)
+                mode = re.search(r'\bTargetMode="([^"]+)"', tag)
+                if rid and typ and tgt:
+                    src_rels[rid.group(1)] = (typ.group(1), tgt.group(1), mode.group(1) if mode else "")
+
+    for tag in _UNCOPYABLE:
+        body = re.sub(rf"<{tag}\b[^>]*/>", "", body)
+        body = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", body, flags=re.S)
+    body = re.sub(r'\s(?:xr:uid|codeName)="[^"]*"', "", body)
+
+    kept: list[str] = []
+
+    def keep(m: re.Match) -> str:
+        element, rid = m.group(0), m.group(1)
+        typ, target, mode = src_rels.get(rid, ("", "", ""))
+        if typ.endswith("/printerSettings") and mode != "External":
+            src_part = os.path.normpath(os.path.join(work_dir, "xl", "worksheets", target))
+            if os.path.exists(src_part):
+                folder = os.path.dirname(src_part)
+                ext = os.path.splitext(src_part)[1]
+                k = 1
+                while os.path.exists(os.path.join(folder, f"printerSettings{k}{ext}")):
+                    k += 1
+                shutil.copyfile(src_part, os.path.join(folder, f"printerSettings{k}{ext}"))
+                # Its content type: covered by a Default for the extension
+                # in Excel-saved files; otherwise it needs an Override.
+                ct_path = os.path.join(work_dir, "[Content_Types].xml")
+                with open(ct_path, encoding="utf-8") as fh:
+                    ct = fh.read()
+                if not re.search(rf'<Default\b[^>]*Extension="{ext.lstrip(".")}"', ct, re.I):
+                    ct = ct.replace(
+                        "</Types>",
+                        f'<Override PartName="/xl/printerSettings/printerSettings{k}{ext}" '
+                        'ContentType="application/vnd.openxmlformats-officedocument.'
+                        'spreadsheetml.printerSettings"/></Types>', 1)
+                    with open(ct_path, "w", encoding="utf-8") as fh:
+                        fh.write(ct)
+                kept.append(f'<Relationship Id="{rid}" Type="{typ}" '
+                            f'Target="../printerSettings/printerSettings{k}{ext}"/>')
+                return element
+        if typ.endswith("/hyperlink") and mode == "External":
+            kept.append(f'<Relationship Id="{rid}" Type="{typ}" Target="{target}" TargetMode="External"/>')
+            return element
+        # Nothing to carry it to: drop the reference, keep the element.
+        return re.sub(r'\sr:id="[^"]*"', "", element)
+
+    body = re.sub(r'<\w+\b[^>]*?\sr:id="([^"]+)"[^>]*?/?>', keep, body)
+    # A hyperlink with neither a target nor an in-workbook location is
+    # invalid on its own.
+    body = re.sub(r'<hyperlink\b(?![^>]*\b(?:r:id|location)=)[^>]*/>', "", body)
+    body = re.sub(r"<hyperlinks>\s*</hyperlinks>", "", body)
+
+    if kept:
+        rels_dir = os.path.join(work_dir, "xl", "worksheets", "_rels")
+        os.makedirs(rels_dir, exist_ok=True)
+        with open(os.path.join(rels_dir, f"sheet{new_num}.xml.rels"), "w", encoding="utf-8") as fh:
+            fh.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
+                     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                     + "".join(kept) + "</Relationships>")
+    return body
 
 
 def rename_sheet(work_dir: str, sheet_num: int, new_name: str) -> None:
@@ -865,3 +959,100 @@ def repair_builtin_name_scopes(work_dir: str) -> list[str]:
         with open(wb_path, "w", encoding="utf-8") as fh:
             fh.write(fixed)
     return notes
+
+
+# ---------------------------------------------------------------------------
+# Final integrity check
+# ---------------------------------------------------------------------------
+
+_INVALID_SHEET_CHARS = set(':\\/?*[]')
+
+
+def package_problems(work_dir: str) -> list[str]:
+    """Everything in an unzipped workbook that makes Excel refuse to open it.
+
+    Run on the finished package, just before it is zipped. Each check here
+    is a way a generated file has actually been, or could plainly be,
+    unopenable -- "cannot be opened or repaired" names none of them, so the
+    only useful place to catch them is before the file leaves this code.
+    An empty list means none were found; it is not proof Excel will be
+    happy, but every problem it reports is a definite one.
+    """
+    problems: list[str] = []
+    all_files = set()
+    for root, _dirs, files in os.walk(work_dir):
+        for fn in files:
+            all_files.add(os.path.relpath(os.path.join(root, fn), work_dir).replace(os.sep, "/"))
+
+    # Every XML part parses.
+    for part in sorted(all_files):
+        if part.endswith((".xml", ".rels")) or part == "[Content_Types].xml":
+            try:
+                ET.parse(os.path.join(work_dir, part))
+            except ET.ParseError as exc:
+                problems.append(f"{part} is not well-formed XML ({exc})")
+    if problems:
+        return problems
+
+    # Every r:id / r:embed used by a part exists in that part's rels, and
+    # every internal relationship target exists.
+    for part in sorted(all_files):
+        if not part.endswith(".xml") or "/_rels/" in part:
+            continue
+        folder, name = os.path.split(part)
+        rels_part = f"{folder}/_rels/{name}.rels" if folder else f"_rels/{name}.rels"
+        with open(os.path.join(work_dir, part), encoding="utf-8") as fh:
+            body = fh.read()
+        used = set(re.findall(r'\br:(?:id|embed|link|pict)="([^"]+)"', body))
+        defined: dict[str, tuple[str, str]] = {}
+        if rels_part in all_files:
+            with open(os.path.join(work_dir, rels_part), encoding="utf-8") as fh:
+                for rel in re.finditer(r"<Relationship\b[^>]*/>", fh.read()):
+                    tag = rel.group(0)
+                    rid = re.search(r'\bId="([^"]+)"', tag)
+                    tgt = re.search(r'\bTarget="([^"]+)"', tag)
+                    mode = re.search(r'\bTargetMode="External"', tag)
+                    if rid:
+                        if rid.group(1) in defined:
+                            problems.append(f"{rels_part} defines {rid.group(1)} twice")
+                        defined[rid.group(1)] = (tgt.group(1) if tgt else "", "ext" if mode else "")
+        for rid in sorted(used - set(defined)):
+            problems.append(f"{part} refers to {rid}, which {rels_part} does not define")
+        for rid, (target, mode) in defined.items():
+            if mode or not target or target.startswith("#"):
+                continue
+            resolved = target.lstrip("/") if target.startswith("/") else os.path.normpath(
+                os.path.join(folder, target)).replace(os.sep, "/")
+            if resolved not in all_files:
+                problems.append(f"{rels_part}: {rid} points at {target}, which is not in the file")
+
+    # Content types: every override names a part that exists, and every
+    # worksheet / drawing part has a content type.
+    with open(os.path.join(work_dir, "[Content_Types].xml"), encoding="utf-8") as fh:
+        ct = fh.read()
+    overrides = set(re.findall(r'PartName="/([^"]+)"', ct))
+    defaults = {e.lower() for e in re.findall(r'<Default\b[^>]*Extension="([^"]+)"', ct)}
+    for o in sorted(overrides - all_files):
+        problems.append(f"[Content_Types].xml lists /{o}, which is not in the file")
+    for part in sorted(all_files):
+        if re.fullmatch(r"xl/(worksheets/sheet|drawings/drawing)\d+\.xml", part) and part not in overrides:
+            problems.append(f"{part} has no content type")
+        ext = part.rsplit(".", 1)[-1].lower()
+        if part.startswith("xl/media/") and ext not in defaults and part not in overrides:
+            problems.append(f"{part} has no content type (no Default for .{ext})")
+
+    # Tab names: unique, at most 31 characters, none of : \ / ? * [ ].
+    with open(os.path.join(work_dir, "xl", "workbook.xml"), encoding="utf-8") as fh:
+        wb = fh.read()
+    names = [unescape(n, {"&quot;": '"', "&apos;": "'"}) for n in re.findall(r'<sheet\b[^>]*?\bname="([^"]*)"', wb)]
+    seen: set[str] = set()
+    for n in names:
+        if n.lower() in seen:
+            problems.append(f"two tabs are named {n!r}")
+        seen.add(n.lower())
+        if not n or len(n) > 31 or _INVALID_SHEET_CHARS & set(n):
+            problems.append(f"tab name {n!r} is not allowed in Excel")
+    for lid in re.findall(r'localSheetId="(\d+)"', wb):
+        if int(lid) >= len(names):
+            problems.append(f"a defined name is scoped to tab #{lid}, but there are {len(names)} tabs")
+    return problems

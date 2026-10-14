@@ -505,7 +505,12 @@ def _drawing_for_sheet(work_dir: str, sheet_num: int) -> str:
 
     with open(sheet_path, encoding="utf-8") as fh:
         sheet = fh.read()
-    existing_rid = _re.search(r'<drawing r:id="([^"]+)"', sheet)
+    # Any attribute order, and with the r: prefix declared ON the element
+    # (<drawing xmlns:r="..." r:id="rId1"/>), as non-Excel writers do. The
+    # first version matched only <drawing r:id=...>, missed that form, and
+    # added a SECOND drawing with an undeclared prefix: malformed XML, and a
+    # workbook Excel will not open.
+    existing_rid = _re.search(r'<drawing\b[^>]*?\br:id="([^"]+)"', sheet)
     if existing_rid and os.path.exists(rels_path):
         with open(rels_path, encoding="utf-8") as fh:
             rels = fh.read()
@@ -545,13 +550,22 @@ def _drawing_for_sheet(work_dir: str, sheet_num: int) -> str:
     )
     open(rels_path, "w", encoding="utf-8").write(rels)
 
-    if "xmlns:r=" not in sheet:
+    # Remove any drawing reference that could not be resolved above -- a
+    # sheet may carry at most one <drawing>.
+    sheet = _re.sub(r"<drawing\b[^>]*/>", "", sheet)
+    root = _re.search(r"<worksheet\b[^>]*>", sheet).group(0)
+    if "xmlns:r=" not in root:
         sheet = sheet.replace(
-            "<worksheet ",
-            '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ',
+            root,
+            root[:-1].rstrip("/") + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
             1,
         )
-    sheet = sheet.replace("</worksheet>", f'<drawing r:id="{rid}"/></worksheet>', 1)
+    # Before the elements that must follow <drawing> in a worksheet, not
+    # blindly at the end.
+    after = _re.search(r"<(?:legacyDrawing|legacyDrawingHF|drawingHF|picture|oleObjects|controls|"
+                       r"webPublishItems|tableParts|extLst)\b", sheet)
+    at = after.start() if after else sheet.rindex("</worksheet>")
+    sheet = sheet[:at] + f'<drawing r:id="{rid}"/>' + sheet[at:]
     open(sheet_path, "w", encoding="utf-8").write(sheet)
 
     ct_path = os.path.join(work_dir, "[Content_Types].xml")
@@ -595,6 +609,25 @@ def _write_drawing_and_media(work_dir: str, sheet_num: int, result: db.DrawingRe
 
     for _rid, fn, im in result.media:
         im.save(os.path.join(media_dir, fn))
+
+    # The images need a content type. A PY with pictures already declares
+    # one for .png; a PY with NONE does not, and Excel refuses the whole
+    # workbook over an image it cannot identify -- "cannot be opened or
+    # repaired", naming nothing.
+    if result.media:
+        import re as _re
+
+        ct_path = os.path.join(work_dir, "[Content_Types].xml")
+        with open(ct_path, encoding="utf-8") as fh:
+            ct = fh.read()
+        if not _re.search(r'<Default\b[^>]*Extension="png"', ct, _re.I):
+            ct = ct.replace(
+                "<Override", '<Default Extension="png" ContentType="image/png"/><Override', 1
+            ) if "<Override" in ct else ct.replace(
+                "</Types>", '<Default Extension="png" ContentType="image/png"/></Types>', 1
+            )
+            with open(ct_path, "w", encoding="utf-8") as fh:
+                fh.write(ct)
 
 
 def build_workpaper(request: WorkpaperRequest,
@@ -772,6 +805,17 @@ def build_workpaper(request: WorkpaperRequest,
     ox.repair_builtin_name_scopes(work_dir)
     ox.remove_orphan_media(work_dir)
     ox.remove_calc_chain(work_dir)
+
+    # Last line of defence. Excel's "cannot be opened or repaired" names
+    # nothing, and a real output reached a user that way. Anything this
+    # can see is refused here instead, so the caller can fall back to a
+    # file that opens.
+    problems = ox.package_problems(work_dir)
+    if problems:
+        raise ox.TemplateMismatch(
+            "the finished file failed its integrity check, so it was not saved: "
+            + "; ".join(problems[:5]) + (f" (+{len(problems) - 5} more)" if len(problems) > 5 else "")
+        )
     ox.repackage(work_dir, request.output_path)
     return request.output_path
 
