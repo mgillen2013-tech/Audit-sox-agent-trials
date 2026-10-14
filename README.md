@@ -14,8 +14,18 @@ tied to a legend.
 
 ```
 pip install -r requirements.txt
-streamlit run cy_testing_app.py --server.address localhost
+python -m streamlit run cy_testing_app.py --server.address localhost
 ```
+
+`python -m streamlit` rather than plain `streamlit`: on Windows, pip
+installs the `streamlit` launcher into a Scripts directory that is often
+not on PATH, so `streamlit run ...` fails with "not recognized as a name
+of a cmdlet" even though it is correctly installed. The `python -m` form
+does not depend on PATH and works everywhere.
+
+`--server.address localhost` keeps it on your machine. Streamlit
+otherwise binds to every network interface, which on corporate wifi means
+others could reach it while it runs.
 
 Needs a Claude deployment on Microsoft Foundry. Set `ANTHROPIC_FOUNDRY_API_KEY`
 and `ANTHROPIC_FOUNDRY_RESOURCE`, or type them into the sidebar.
