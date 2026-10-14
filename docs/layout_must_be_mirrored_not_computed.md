@@ -40,6 +40,13 @@ reviewer circled on a real output and labelled "so much blank space".
 
 ## What this means in code
 
+**Status: built** -- `agent/ooxml/layout.py`. On the real output that
+prompted it, the deepest exhibit moved from ~33in down the sheet to ~11in.
+When there is nothing to mirror (no PY pictures, or the template is a
+previous CY output whose drawing is the old stack) it uses a three-across
+grid of the same shape, with each exhibit tucked under whatever is above
+it in its own column.
+
 1. Parse the template's `drawing<N>.xml` for the Sample sheet on load.
 2. Derive an ordered list of SLOTS: every `<xdr:pic>` anchor becomes an
    image slot (position + extent), the narrative `<xdr:sp>` becomes the

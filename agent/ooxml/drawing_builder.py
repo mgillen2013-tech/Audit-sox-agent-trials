@@ -21,12 +21,16 @@ by hand afterward.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from PIL import Image
 
 from agent.ooxml.models import (
     SampleItem, EvidenceImage, NarrativeParagraph, ParametersTab,
 )
 from agent.ooxml.ooxml_utils import ColumnLayout, cell_box_emu
+
+if TYPE_CHECKING:
+    from agent.ooxml.layout import TemplateLayout
 from agent.ooxml import imaging as ocr_utils
 
 RED = "FF0000"
@@ -262,20 +266,25 @@ def build_sample_drawing(
     sample_items: list[SampleItem],
     raw_data_column_layout: ColumnLayout,
     *,
+    layout: "TemplateLayout | None" = None,
     narrative_x: int = 0,
     narrative_cx: int = 5_545_854,
     narrative_row_height_px: int = 20,
-    gap_emu: int = 300_000,
     image_gap_emu: int = 400_000,
-    start_y_emu: int = 500_000,
 ) -> DrawingResult:
     """Builds the full drawing for the Sample tab: for every SampleItem, its
     raw-data-row callouts, narrative textbox, and evidence images (each with
-    their own callouts), stacked vertically per sample and one sample after
-    another.
+    their own callouts).
+
+    WHERE things go is decided by agent/ooxml/layout.py: the PY tab's own
+    slots when `layout` carries them, a three-across grid otherwise. This
+    function only draws. It used to stack every exhibit at full page size
+    in one column, which put a fourth exhibit 29 inches down the sheet.
 
     Assumes sample N's raw data lives in sheet row (N+1) (row 1 = header).
     """
+    from agent.ooxml.layout import GRID_TOP, TemplateLayout, plan_sample_layout
+
     shapes: list[str] = []
     unplaced: list[tuple[str, str, str, str]] = []
     media: list[tuple[str, str, Image.Image]] = []
@@ -283,7 +292,7 @@ def build_sample_drawing(
     rid_counter = 1
     media_filename_counter = 1
 
-    y_cursor = start_y_emu
+    y_offset = 0
 
     for sample_index, sample in enumerate(sample_items):
         row_num = sample_index + 2  # row 1 is header
@@ -305,24 +314,11 @@ def build_sample_drawing(
             ))
             shape_id += 1
 
-        # --- narrative textbox ---
-        narrative_cy = _estimate_textbox_height(sample.narrative)
-        shapes.append(_narrative_xml(
-            shape_id, f"TextBox narrative_{sample_index}",
-            narrative_x, y_cursor, narrative_cx, narrative_cy, sample.narrative,
-        ))
-        shape_id += 1
-        block_bottom = y_cursor + narrative_cy
-
-        # --- evidence images (placed to the right of the narrative for the
-        # first image, then stacked full-width below) ---
-        first = True
-        image_x = narrative_x + narrative_cx + gap_emu
-        image_y = y_cursor
-
+        # --- load every exhibit first: placement needs all their shapes ---
+        loaded: list[tuple[EvidenceImage, Image.Image]] = []
         for img_spec in sample.evidence_images:
             try:
-                im, dpi = ocr_utils.load_and_prepare(img_spec.source_path, img_spec.pdf_page)
+                im, _dpi = ocr_utils.load_and_prepare(img_spec.source_path, img_spec.pdf_page)
             except Exception as exc:  # noqa: BLE001
                 # A corrupt, encrypted, truncated or simply exotic evidence
                 # file used to take the whole workpaper down with it. Across
@@ -340,13 +336,37 @@ def build_sample_drawing(
                         f"the evidence file could not be read: {exc}",
                     ))
                 continue
-            scale = img_spec.display_width_emu / im.width
-            cx = img_spec.display_width_emu
-            cy = int(im.height * scale)
+            loaded.append((img_spec, im))
 
-            if not first:
-                image_x = narrative_x
-                image_y = block_bottom + image_gap_emu
+        # The PY's slots describe ONE selection's tab, so they apply to the
+        # first sample drawn here; any further sample on the same tab gets
+        # the grid, below everything already drawn.
+        narrative_box, boxes = plan_sample_layout(
+            (layout or TemplateLayout()) if sample_index == 0 else TemplateLayout(),
+            [(im.width, im.height) for _spec, im in loaded],
+            narrative_height_for_width=lambda w, _n=sample.narrative: _estimate_textbox_height(
+                _n, chars_per_line=max(20, int(95 * w / 5_545_854))
+            ),
+            default_narrative_width=narrative_cx,
+        )
+        if y_offset:
+            shift = y_offset - GRID_TOP
+            narrative_box = type(narrative_box)(narrative_box.x, narrative_box.y + shift,
+                                                narrative_box.cx, narrative_box.cy)
+            boxes = [type(b)(b.x, b.y + shift, b.cx, b.cy) for b in boxes]
+
+        # --- narrative textbox ---
+        shapes.append(_narrative_xml(
+            shape_id, f"TextBox narrative_{sample_index}",
+            narrative_box.x, narrative_box.y, narrative_box.cx, narrative_box.cy, sample.narrative,
+        ))
+        shape_id += 1
+        block_bottom = narrative_box.bottom
+
+        # --- evidence images, each in its planned box ---
+        for (img_spec, im), box in zip(loaded, boxes):
+            image_x, image_y, cx, cy = box.x, box.y, box.cx, box.cy
+            scale = cx / im.width
 
             rid = f"rId{rid_counter}"
             fn = f"image{media_filename_counter}.png"
@@ -381,7 +401,6 @@ def build_sample_drawing(
                     if located is not None:
                         px, py, pw, ph = located
                     else:
-                        exc = last_error
                         # Originally this propagated, reasoning that a missing
                         # anchor should fail loudly rather than box the wrong
                         # value. That is right for a human building one file by
@@ -392,9 +411,11 @@ def build_sample_drawing(
                         # box. So drop the callout, keep the image, and record
                         # why -- unplaced, never unreported.
                         unplaced.append(
-                            (img_spec.name, tie_out.letter, tie_out.anchor_text, str(exc))
+                            (img_spec.name, tie_out.letter, tie_out.anchor_text, last_error)
                         )
                         continue
+                    # Boxes scale with the exhibit: a page shrunk into a PY
+                    # slot keeps its red boxes on the same words.
                     bx = image_x + int(px * scale)
                     by = image_y + int(py * scale)
                     bw = int(pw * scale)
@@ -410,9 +431,8 @@ def build_sample_drawing(
                     shape_id += 1
 
             block_bottom = max(block_bottom, image_y + cy)
-            first = False
 
-        y_cursor = block_bottom + image_gap_emu
+        y_offset = block_bottom + image_gap_emu
 
     xml = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
            f'<xdr:wsDr {NS_DECL}>' + "".join(shapes) + "</xdr:wsDr>")

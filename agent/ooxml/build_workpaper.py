@@ -607,6 +607,11 @@ def build_workpaper(request: WorkpaperRequest,
     unplaced: list[tuple[str, str, str, str]] = []
     sheets_for_sample: dict[str, str] = {}
     column_layout = ox.parse_column_widths(sample_sheet_path)
+    # Where the PY put its narrative and exhibits -- read now, before the
+    # tab's drawing is replaced. See agent/ooxml/layout.py.
+    from agent.ooxml.layout import read_template_layout
+
+    template_layout = read_template_layout(work_dir, sample_sheet_path, column_layout)
 
     for i, item in enumerate(request.sample_items):
         label = sample_tab_name(sample_sheet, item.sample_id, i, len(request.sample_items))
@@ -620,7 +625,7 @@ def build_workpaper(request: WorkpaperRequest,
         sheets_for_sample[label] = label
 
         build_sample_sheet_xml(path, [item], sst, styles)
-        drawing = db.build_sample_drawing([item], column_layout)
+        drawing = db.build_sample_drawing([item], column_layout, layout=template_layout)
         _write_drawing_and_media(work_dir, num, drawing)
         unplaced.extend(drawing.unplaced_callouts)
 
