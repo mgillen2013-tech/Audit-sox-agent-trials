@@ -29,8 +29,8 @@ class ApplyReport:
     unplaced: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    # (item id, PY text, CY text) for the verification pass
-    text_changes: list[tuple[str, str, str]] = field(default_factory=list)
+    # (item id, PY text, CY text, PY lead-ins, CY lead-ins) for verification
+    text_changes: list[tuple] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -250,26 +250,34 @@ def remove_embedded_objects(work_dir: str, sheet_num: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _pair_tickmarks(tab: TabInventory) -> dict[str, DrawingItem | None]:
-    """Each label with the value box it annotates: the nearest unclaimed
-    box, within two inches. A label without one keeps None."""
-    boxes = tab.by_kind("box")
-    claimed: set[str] = set()
-    pairs: dict[str, DrawingItem | None] = {}
-    for label in tab.by_kind("label"):
-        lc = (label.box.x + label.box.cx / 2, label.box.y + label.box.cy / 2)
-        best, best_d = None, 2 * 914_400
-        for b in boxes:
-            if b.id in claimed:
-                continue
-            bc = (b.box.x + b.box.cx / 2, b.box.y + b.box.cy / 2)
-            d = ((lc[0] - bc[0]) ** 2 + (lc[1] - bc[1]) ** 2) ** 0.5
-            if d < best_d:
-                best, best_d = b, d
-        if best is not None:
-            claimed.add(best.id)
-        pairs[label.id] = best
-    return pairs
+def _crop(image, crop: dict | None, notes: list[str], label: str):
+    """Cut a CY page down to the part the PY showed, as the model named it
+    (first and last line of that part). Full width, so nothing to either
+    side of a value is lost. Not found: the whole page, and a note."""
+    if not crop or not (crop.get("from") or crop.get("to")):
+        return image
+    try:
+        words = imaging.ocr_words(image)
+    except Exception:  # noqa: BLE001
+        return image
+    tops = []
+    for key in ("from", "to"):
+        text = str(crop.get(key) or "").strip()
+        if not text:
+            continue
+        token = text.split()[0]
+        try:
+            _x, y, _w, h = imaging.find_anchor_box(words, token)
+            tops.append((y, y + h))
+        except ValueError:
+            notes.append(f"{label}: crop line {text!r} not found; the whole page is shown")
+            return image
+    if not tops:
+        return image
+    pad = 20
+    y0 = max(0, min(t for t, _b in tops) - pad)
+    y1 = min(image.height, max(b for _t, b in tops) + pad)
+    return image.crop((0, y0, image.width, y1)) if y1 - y0 > 20 else image
 
 
 @dataclass
@@ -305,6 +313,14 @@ def _locate(placed: PlacedExhibit, anchor: str) -> Slot | None:
     return None
 
 
+def _with_flips(xml: str, flip_h: bool, flip_v: bool) -> str:
+    def fix(m: re.Match) -> str:
+        tag = re.sub(r'\sflip[HV]="[^"]*"', "", m.group(0))
+        attrs = (' flipH="1"' if flip_h else "") + (' flipV="1"' if flip_v else "")
+        return tag[:-1] + attrs + ">" if not tag.endswith("/>") else tag[:-2] + attrs + "/>"
+    return re.sub(r"<a:xfrm\b[^>]*>", fix, xml, count=1)
+
+
 def apply_tab(
     work_dir: str,
     tab: TabInventory,
@@ -314,42 +330,23 @@ def apply_tab(
     *,
     data_row_cell_box,   # (heading) -> Slot | None
 ) -> ApplyReport:
-    """Edit one selection tab's drawing per the plan."""
+    """Carry out the model's decisions for one tab's drawing. Nothing here
+    decides what an element is; an element the plan does not mention is
+    left exactly as the PY had it."""
     report = ApplyReport()
     xml = tab.drawing_xml
-    edits: list[tuple[tuple[int, int], str]] = []  # (span, replacement)
     rels_path = os.path.join(work_dir, "xl", "drawings", "_rels", f"{tab.drawing_part}.rels")
     rels = open(rels_path, encoding="utf-8").read() if os.path.exists(rels_path) else (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
     media_dir = os.path.join(work_dir, "xl", "media")
     os.makedirs(media_dir, exist_ok=True)
+    by_id = {i.id: i for i in tab.items}
+    final: dict[str, str] = {}          # element id -> replacement anchor XML ("" = removed)
+    appended: list[str] = []
 
     def anchor_of(item: DrawingItem) -> str:
         return xml[item.span[0]: item.span[1]]
-
-    # --- text boxes ---
-    for item in tab.by_kind("text"):
-        action = plan.text.get(item.id, {"action": "keep"})
-        if action["action"] == "replace":
-            new = rebuild_text(anchor_of(item), item, tab, action["paragraphs"])
-            edits.append((item.span, new))
-            # Measured exactly as item.text is (joined, then stripped), so a
-            # faithful copy never reads as a structural change.
-            report.text_changes.append((item.id, item.text, "\n".join(
-                re.sub(r"</?s\d+>", "", p).replace("<br/>", "\n") for p in action["paragraphs"]).strip()))
-        elif action["action"] == "remove":
-            edits.append((item.span, ""))
-            report.removed.append(f"text box {item.name!r}")
-            report.text_changes.append((item.id, item.text, ""))
-        else:
-            report.text_changes.append((item.id, item.text, item.text))
-
-    # --- pictures into the PY's slots ---
-    placed: dict[str, PlacedExhibit] = {}
-    frames = tab.by_kind("frame")
-    used_frames: set[str] = set()
-    pictures = tab.by_kind("picture")
 
     def _load(x: Exhibit):
         return imaging.load_and_prepare(os.path.join(support_dir, x.source_file), x.page)[0]
@@ -365,39 +362,49 @@ def apply_tab(
                             f'officeDocument/2006/relationships/image" Target="../media/image{n}.png"/></Relationships>', 1)
         return rid
 
+    # --- pictures: CY exhibits into the PY's slots (frames follow) ---
+    placed: dict[str, PlacedExhibit] = {}
+    new_box: dict[str, Slot] = {}
+    frames = tab.by_kind("frame")
+    pictures = tab.by_kind("picture")
+    used_frames: set[str] = set()
     for pic in pictures:
-        x_id = plan.pictures.get(pic.id)
         frame = next((f for f in frames if f.id not in used_frames and _overlap(f.box, pic.box) > 0.8), None)
         if frame:
             used_frames.add(frame.id)
-        exhibit = exhibits.get(x_id) if x_id else None
+        decision = plan.pictures.get(pic.id)
+        if decision is None:
+            report.unplaced.append(f"PY exhibit {pic.name!r} was not decided on; left in place (it is last year's)")
+            continue
+        exhibit = exhibits.get(decision["exhibit"]) if decision.get("exhibit") else None
         if exhibit is None:
-            edits.append((pic.span, ""))
+            final[pic.id] = ""
             if frame:
-                edits.append((frame.span, ""))
+                final[frame.id] = ""
             report.removed.append(f"PY exhibit {pic.name!r} (no CY counterpart)")
             continue
         try:
-            image = _load(exhibit)
+            image = _crop(_load(exhibit), decision.get("crop"), report.notes, f"{exhibit.source_file} p.{exhibit.page + 1}")
         except Exception as exc:  # noqa: BLE001
-            edits.append((pic.span, ""))
+            final[pic.id] = ""
             if frame:
-                edits.append((frame.span, ""))
+                final[frame.id] = ""
             report.unplaced.append(f"{exhibit.source_file} p.{exhibit.page + 1} could not be read: {exc}")
             continue
         w, h = _fit(image.width, image.height, pic.box.cx, pic.box.cy)
         box = Slot(pic.box.x, pic.box.y, w, h)
         rid = _new_media(image)
-        anchor = re.sub(r'r:embed="[^"]*"', f'r:embed="{rid}"', anchor_of(pic), count=1)
-        edits.append((pic.span, _absolute(anchor, box)))
+        final[pic.id] = _absolute(re.sub(r'r:embed="[^"]*"', f'r:embed="{rid}"', anchor_of(pic), count=1), box)
         if frame:
-            edits.append((frame.span, _absolute(anchor_of(frame), box)))
+            final[frame.id] = _absolute(anchor_of(frame), box)
         placed[exhibit.id] = PlacedExhibit(exhibit, box, image)
+        new_box[pic.id] = box
 
-    # --- CY exhibits with no PY slot: below everything, PY slot size ---
+    # --- CY exhibits with no PY slot: below everything, the PY's slot size ---
     if plan.extra_exhibits:
         cell_w = sorted(p.box.cx for p in pictures)[len(pictures) // 2] if pictures else int(5.5 * 914_400)
         cell_h = sorted(p.box.cy for p in pictures)[len(pictures) // 2] if pictures else int(7 * 914_400)
+        across = max(1, len({p.box.x // 914_400 for p in pictures})) if pictures else 2
         top = max([i.box.bottom for i in tab.items] + [500_000]) + GAP
         frame_xml = anchor_of(frames[0]) if frames else ""
         pic_xml = anchor_of(pictures[0]) if pictures else ""
@@ -408,7 +415,7 @@ def apply_tab(
             except Exception as exc:  # noqa: BLE001
                 report.unplaced.append(f"{exhibit.source_file} p.{exhibit.page + 1} could not be read: {exc}")
                 continue
-            row, col = divmod(n, 2)
+            row, col = divmod(n, across)
             w, h = _fit(image.width, image.height, cell_w, cell_h)
             box = Slot(col * (cell_w + GAP), top + row * (cell_h + GAP), w, h)
             rid = _new_media(image)
@@ -417,61 +424,95 @@ def apply_tab(
                 anchor = re.sub(r'(<(?:\w+:)?cNvPr\b[^>]*\bid=")\d+(")', rf"\g<1>{90000 + n}\2", anchor, count=1)
             else:
                 anchor = _fresh_pic(rid, 90000 + n)
-            edits.append(((len(xml), len(xml)), _absolute(anchor, box)))
+            appended.append(_absolute(anchor, box))
             if frame_xml:
                 fr = re.sub(r'(<(?:\w+:)?cNvPr\b[^>]*\bid=")\d+(")', rf"\g<1>{91000 + n}\2", frame_xml, count=1)
-                edits.append(((len(xml), len(xml)), _absolute(fr, box)))
+                appended.append(_absolute(fr, box))
             placed[exhibit.id] = PlacedExhibit(exhibit, box, image)
 
-    # --- tickmarks: the PY's own label + box, moved onto the CY value ---
-    pairs = _pair_tickmarks(tab)
-    paired_boxes = {b.id for b in pairs.values() if b is not None}
-    for label in tab.by_kind("label"):
-        target = plan.tickmarks.get(label.id, {"remove": True})
-        box_item = pairs.get(label.id)
-        new_box: Slot | None = None
-        if not target.get("remove"):
-            if target.get("data_row_heading"):
-                new_box = data_row_cell_box(target["data_row_heading"])
-            elif target.get("exhibit") in placed:
-                new_box = _locate(placed[target["exhibit"]], target["anchor"])
-            if new_box is None:
-                report.unplaced.append(
-                    f"tickmark {label.text!r}: {target.get('anchor') or target.get('data_row_heading')!r} "
-                    f"was not found on {target.get('exhibit') or 'the data row'}, so it was not placed")
-        if new_box is None:
-            edits.append((label.span, ""))
-            if box_item:
-                edits.append((box_item.span, ""))
+    # --- elements: exactly what the model decided ---
+    body: dict[str, str] = {}
+    for eid, d in plan.elements.items():
+        item = by_id.get(eid)
+        if item is None:
             continue
-        pad = 45_720
-        rect = Slot(new_box.x - pad, new_box.y - pad, new_box.cx + 2 * pad, new_box.cy + 2 * pad)
-        if box_item:
-            edits.append((box_item.span, _absolute(anchor_of(box_item), rect)))
-            spot = _label_spot(label.box, box_item.box, rect)
-        else:
-            spot = Slot(max(0, rect.x - label.box.cx - 45_720), rect.y, label.box.cx, label.box.cy)
-        edits.append((label.span, _absolute(anchor_of(label), spot)))
-    # Value boxes with no label marked PY values; there is nothing to move
-    # them to.
-    for b in tab.by_kind("box"):
-        if b.id not in paired_boxes:
-            edits.append((b.span, ""))
-    # Embedded files are PY evidence.
-    for obj in tab.by_kind("object"):
-        edits.append((obj.span, ""))
-        report.removed.append("an embedded file (PY evidence; attach the CY equivalent if needed)")
+        xml_ = anchor_of(item)
+        if d.get("paragraphs") and item.kind == "text":
+            xml_ = rebuild_text(xml_, item, tab, d["paragraphs"])
+            report.text_changes.append((eid, item.text, "\n".join(
+                re.sub(r"</?s\d+>", "", p).replace("<br/>", "\n") for p in d["paragraphs"]).strip(),
+                _labels(item, tab), _cy_labels(d["paragraphs"], item, tab)))
+        elif item.kind == "text":
+            report.text_changes.append((eid, item.text, "" if d["action"] == "remove" else item.text,
+                                        _labels(item, tab), _labels(item, tab)))
+        body[eid] = xml_
+        if d["action"] == "remove":
+            final[eid] = ""
+            report.removed.append(f"{item.kind} {item.name!r}")
+        elif d["action"] in ("keep", "replace"):
+            if xml_ != anchor_of(item):
+                final[eid] = xml_
+        if d["action"] == "keep" and item.kind == "object":
+            report.notes.append(f"embedded file {item.name!r} kept: it is last year's -- attach the CY equivalent")
 
-    # Apply edits back to front so earlier spans stay valid. Appends (at
-    # len(xml)) go before the closing root tag.
-    close = re.search(r"</(?:\w+:)?wsDr>\s*$", xml)
-    end_at = close.start() if close else len(xml)
-    appended = "".join(new for (s, e), new in edits if s == e == len(xml))
-    for (s, e), new in sorted((x for x in edits if not x[0][0] == x[0][1] == len(xml)), key=lambda x: -x[0][0]):
-        xml = xml[:s] + new + xml[e:]
-        if s < end_at:
-            end_at += len(new) - (e - s)
-    xml = xml[:end_at] + appended + xml[end_at:]
+    # Placements: direct targets first, then "beside" (which needs the
+    # other element's new position), then lines between elements.
+    pending = {eid: d for eid, d in plan.elements.items() if d["action"] == "place" and eid in by_id}
+    for _pass in range(4):
+        for eid, d in list(pending.items()):
+            item, on = by_id[eid], d["on"]
+            target: Slot | None = None
+            if "exhibit" in on:
+                hit = _locate(placed[on["exhibit"]], on["anchor"]) if on["exhibit"] in placed else None
+                if hit is not None:
+                    pad = 45_720
+                    rect = Slot(hit.x - pad, hit.y - pad, hit.cx + 2 * pad, hit.cy + 2 * pad)
+                    target = rect if item.kind != "text" else Slot(rect.right + 45_720, rect.y, item.box.cx, item.box.cy)
+            elif "heading" in on:
+                cell = data_row_cell_box(on["heading"])
+                if cell is not None:
+                    target = cell if item.kind != "text" else Slot(cell.right + 45_720, cell.y, item.box.cx, item.box.cy)
+            elif "beside" in on:
+                other = on["beside"]
+                if other in pending:
+                    continue  # wait for it
+                ref_new = new_box.get(other, by_id[other].box if other in by_id else None)
+                if ref_new is not None:
+                    target = _label_spot(item.box, by_id[other].box, ref_new)
+            pending.pop(eid)
+            if target is None:
+                final[eid] = ""
+                report.unplaced.append(
+                    f"{item.kind} {item.text[:20] or item.name!r}: target {on} not found on the CY evidence, so it was removed")
+                continue
+            new_box[eid] = target
+            final[eid] = _absolute(body.get(eid, anchor_of(item)), target)
+    for eid in pending:  # circular "beside" references
+        report.unplaced.append(f"element {eid}: placed beside an element that was never placed; left where it was")
+
+    for eid, d in plan.elements.items():
+        if d["action"] != "connect" or eid not in by_id:
+            continue
+        a = new_box.get(d["from"], by_id[d["from"]].box)
+        b = new_box.get(d["to"], by_id[d["to"]].box)
+        x1, y1 = a.x + a.cx // 2, a.y + a.cy // 2
+        # To the nearest edge of the target, so the arrowhead touches it.
+        x2 = b.x if x1 < b.x else (b.right if x1 > b.right else b.x + b.cx // 2)
+        y2 = b.y if y1 < b.y else (b.bottom if y1 > b.bottom else b.y + b.cy // 2)
+        box = Slot(min(x1, x2), min(y1, y2), max(1, abs(x2 - x1)), max(1, abs(y2 - y1)))
+        final[eid] = _with_flips(_absolute(anchor_of(by_id[eid]), box), x2 < x1, y2 < y1)
+
+    if any(by_id[e].kind == "object" for e, d in plan.elements.items() if d["action"] == "remove" and e in by_id):
+        remove_embedded_objects(work_dir, tab.sheet_num)
+
+    # Write back, last span first so earlier spans stay valid.
+    for eid in sorted(final, key=lambda e: -by_id[e].span[0]):
+        s0, e0 = by_id[eid].span
+        xml = xml[:s0] + final[eid] + xml[e0:]
+    if appended:
+        close = re.search(r"</(?:\w+:)?wsDr>\s*$", xml)
+        at = close.start() if close else len(xml)
+        xml = xml[:at] + "".join(appended) + xml[at:]
     # Shapes written here use the xdr:, a: and r: prefixes. A drawing from a
     # non-Excel writer may declare none of them (a default namespace
     # instead); undeclared, they make the part malformed.
@@ -491,6 +532,35 @@ def apply_tab(
     with open(rels_path, "w", encoding="utf-8") as fh:
         fh.write(rels)
     return report
+
+
+def _labels(item: DrawingItem, tab: TabInventory) -> list[str]:
+    """Each paragraph's lead-in, where the PY set it apart by FORMAT (a bold
+    or coloured first run followed by a differently formatted one) -- e.g.
+    "Test Step 1: ". Derived from the PY's formatting, not from a list of
+    words, so it works whatever a PY calls its sections."""
+    out = []
+    for p in item.paragraphs:
+        runs = [(k, t) for k, t in p.runs if k != "br"]
+        if len(runs) >= 2 and runs[0][0] != runs[1][0]:
+            st = tab.styles.get(runs[0][0])
+            if st and (st.bold or (st.color and st.color.upper() != "000000")):
+                out.append(runs[0][1].strip())
+    return out
+
+
+def _cy_labels(paragraphs: list[str], item: DrawingItem, tab: TabInventory) -> list[str]:
+    from agent.mirror.rewrite import parse_tagged
+
+    valid = set(tab.styles)
+    out = []
+    for p in paragraphs:
+        runs = parse_tagged(p, valid, "")
+        if len(runs) >= 2 and runs[0][0] != runs[1][0]:
+            st = tab.styles.get(runs[0][0])
+            if st and (st.bold or (st.color and st.color.upper() != "000000")):
+                out.append(runs[0][1].strip())
+    return out
 
 
 def _label_spot(py_label: Slot, py_box: Slot, new_box: Slot) -> Slot:

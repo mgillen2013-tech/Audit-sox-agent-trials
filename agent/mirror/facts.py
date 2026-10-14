@@ -103,7 +103,39 @@ def selection_facts(
                 "testing_agent_summary": c.narrative,
             })
         out.append(SelectionFacts(sid, rows.get(sid, {}), steps, list(exhibits.values())))
+
+    # Every uploaded support page, not only the ones the testing agent cited:
+    # "does the CY support mirror the PY support" cannot be answered from a
+    # subset. Uncited pages are offered to every selection, marked as such;
+    # the editor decides where (if anywhere) they belong.
+    for f in out:
+        have = {(x.source_file, x.page) for x in f.exhibits}
+        for name in spec.get("cy_support_files", []) or []:
+            path = support_dir / name
+            if not name.lower().endswith(_IMAGE_EXT) or not path.exists():
+                continue
+            for page in range(_page_count(path))[:10]:
+                if (name, page) in have or len(f.exhibits) >= 30:
+                    continue
+                f.exhibits.append(Exhibit(
+                    id=f"X{len(f.exhibits) + 1}", source_file=name, page=page,
+                    description="(not cited by the testing agent" + (")" if len(out) == 1 else
+                                                                     "; may belong to another selection)"),
+                    text=_page_text(path, page)[:1500]))
+                have.add((name, page))
     return out
+
+
+def _page_count(path: Path) -> int:
+    if path.suffix.lower() != ".pdf":
+        return 1
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(str(path)) as pdf:
+            return len(pdf.pages)
+    except Exception:  # noqa: BLE001
+        return 1
 
 
 def exhibit_path(support_dir: Path, exhibit: Exhibit) -> str:

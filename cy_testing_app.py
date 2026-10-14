@@ -551,7 +551,7 @@ def _build_workpaper(spec, results, py_name, run_dir, manifests, pop_name, pop_t
     out = {
         "results": results, "wp_bytes": None, "wp_name": None, "ledger": ledger,
         "wp_mirrored": False, "wp_fallback_reason": "", "wp_nothing_concluded": False,
-        "wp_warnings": [], "mirror_flags": [],
+        "wp_warnings": [], "mirror_flags": [], "support_check": [],
     }
     try:
         outcome = build_cy_workpaper(
@@ -571,6 +571,7 @@ def _build_workpaper(spec, results, py_name, run_dir, manifests, pop_name, pop_t
         )
         out.update(
             mirror_flags=[f.__dict__ for f in outcome.mirror_flags],
+            support_check=list(outcome.support_check),
             wp_bytes=outcome.path.read_bytes(),
             wp_name=outcome.path.name,
             wp_mirrored=outcome.mirrored_py,
@@ -808,6 +809,19 @@ if _out:
                       "Issue": f["issue"], "Found by": f["found_by"]} for f in _flags],
                     hide_index=True, use_container_width=True,
                 )
+        # Does the CY support mirror the PY support? Each PY document against
+        # its CY counterpart. Also on the workbook's Support Check tab.
+        _support = _out.get("support_check") or []
+        if _support:
+            _missing = [s for s in _support if s.get("match") == "missing"]
+            (st.error if _missing else st.success)(
+                f"Support check: {len(_support) - len(_missing)} of {len(_support)} PY document(s) have a CY "
+                f"counterpart" + (f"; {len(_missing)} missing" if _missing else "") + ".")
+            st.dataframe(
+                [{"Match": s.get("match", "").upper(), "Tab": s.get("tab", ""), "PY document": s.get("py_document", ""),
+                  "CY counterpart": s.get("cy", "") or "-", "Comment": s.get("comment", "")} for s in _support],
+                hide_index=True, use_container_width=True,
+            )
         if _out.get("wp_mirrored"):
             st.caption(
                 "Built on the prior-year workpaper: same tabs and layout, with this "

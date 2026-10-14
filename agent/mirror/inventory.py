@@ -4,21 +4,21 @@ Pure reading; nothing is changed here. The result is what the rewrite call
 is shown and what the apply step edits, so every item carries the exact
 span of XML it came from.
 
-TAB ROLES (inferred, never configured):
-  lead             a text box describing the control and its test steps,
-                   and no exhibits ("IA Lead", "IA Leadsheet")
-  selection        one tab per sampled item: "1", "2"..., "Sample", "Sample 2"
-  selection_table  one row per selection on a single tab (no per-item tabs)
-  population / parameters / divider / other
+NOTHING HERE DECIDES WHAT AN ELEMENT MEANS. Kinds are physical facts --
+what the shape is, not what it is for:
+  text       a shape with text in it (a conclusion, a note, a "TM 2" label)
+  outline    a shape with an outline and no text (a box around a value)
+  frame      an outline coinciding with a picture (it moves with the picture)
+  connector  a line or arrow
+  group      grouped shapes (their text is read for the model)
+  picture    an exhibit
+  object     an embedded file (an email, typically)
+  other      charts and anything else
+What each one MEANS -- a tickmark, a conclusion, last year's evidence -- is
+read by the model from the PY (agent/mirror/structure.py, rewrite.py).
 
-DRAWING ITEM KINDS:
-  text     a text box with prose (a test-step conclusion, a Note)
-  label    a tickmark label: "TM 2", "TM1", "A"
-  box      an empty outline over a value (paired with a label)
-  frame    an outline the size of a picture, drawn around it
-  picture  an exhibit slot
-  object   an embedded file (an email, typically) -- PY evidence
-  other    groups, charts, anything else: left exactly as it is
+TabInventory.role is only a HINT from tab names, used when the model's
+structure read is unavailable; it never overrides it.
 """
 
 from __future__ import annotations
@@ -186,19 +186,20 @@ def _parse_text(sp_xml: str, styles: dict[str, StyleClass]) -> list[Paragraph]:
 
 
 def _classify(sp: ET.Element, text: str, box: Slot, pictures: list[Slot]) -> str:
+    """What the shape physically is. Never what it is for."""
     nv = sp.find(".//xdr:cNvPr", _NS)
     name = nv.get("name", "") if nv is not None else ""
     if (nv is not None and nv.get("hidden") == "1") or name.lower().startswith("object"):
         return "object"
     if text.strip():
-        return "label" if _LABEL_RE.fullmatch(text.strip()) else "text"
+        return "text"
     outline = sp.find(".//xdr:spPr/a:ln", _NS)
-    if outline is None:
+    if outline is None or outline.find("a:noFill", _NS) is not None:
         return "other"
     for pic in pictures:
         if _overlap_ratio(box, pic) > 0.8:
             return "frame"
-    return "box"
+    return "outline"
 
 
 def _overlap_ratio(a: Slot, b: Slot) -> float:
@@ -267,6 +268,16 @@ def read_drawing(work_dir: str, sheet_num: int, drawing_part: str) -> tuple[str,
             text = "\n".join(p.text for p in paragraphs)
             kind = _classify(shape, text, box, pictures)
             items.append(DrawingItem(sid, name, kind, box, m.span(), paragraphs=paragraphs))
+        elif tag == "cxnSp":
+            items.append(DrawingItem(sid, name, "connector", box, m.span()))
+        elif tag == "grpSp":
+            # Read for the model (a grouped screenshot-with-callouts is PY
+            # evidence like any other), never edited inside.
+            group_text = " ".join(t.text or "" for t in shape.iter(f"{{{NS_A}}}t")).strip()
+            n_pics = len(shape.findall(".//xdr:pic", _NS))
+            item = DrawingItem(sid, name, "group", box, m.span())
+            item.paragraphs = [Paragraph("", [("g", f"[group of shapes: {n_pics} picture(s)] {group_text}".strip())])]
+            items.append(item)
         else:
             items.append(DrawingItem(sid, name, "other", box, m.span()))
     return xml, items, {v.key: v for v in styles.values()}

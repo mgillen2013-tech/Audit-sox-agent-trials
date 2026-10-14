@@ -163,44 +163,28 @@ def _conclusion(step: str, sample_ids: list[str], result="satisfied") -> Conclus
 
 
 class Stub:
-    """Stands in for the model with a fixed, sensible edit: CY facts in, PY
-    labels and structure kept, exhibits by role, TM1 on the CY total."""
+    """Stands in for the model with fixed, sensible answers: it reads the
+    structure from the tab names it is shown, puts CY facts into the PY's
+    wording, exhibits by role, TM1 (and its box) onto the CY total, and
+    compares support."""
 
-    def __init__(self, reply=None):
+    def __init__(self, reply=None, structure=None):
         self.prompts: list[str] = []
         self.reply = reply
+        self.structure = structure
         self.messages = self
 
     def create(self, **kw):
-        user = kw["messages"][0]["content"]
+        user, system = kw["messages"][0]["content"], kw["system"]
         self.prompts.append(user)
-        if "reviewing a CY SOX workpaper" in kw["system"]:
+        if "reviewing a CY SOX workpaper" in system:
             text = '{"flags": []}'
+        elif "work out how" in system:
+            text = json.dumps(self.structure or self._structure(user))
         elif self.reply is not None:
             text = self.reply
         else:
-            items = {}
-            for m in re.finditer(r"- id (\S+) \(.*?\):\n((?:    \| .*\n?)+)", user):
-                items[m.group(1)] = [line[6:] for line in m.group(2).splitlines()]
-            text_plan = []
-            for iid, paras in items.items():
-                new = [p.replace("9578365", "9850995").replace("Ryan Capito", "Jane Doe")
-                       .replace("11/04/2025", "06/20/2026").replace("$17,025.40", "$14,945.60") for p in paras]
-                if any("credit memo" in p for p in paras):
-                    text_plan.append({"id": iid, "action": "remove"})
-                else:
-                    text_plan.append({"id": iid, "action": "replace", "paragraphs": new})
-            pics = re.findall(r"^- id (\S+): (.*)$", user.split("PY PICTURE SLOTS")[1].split("\n\n")[0], re.M) \
-                if "PY PICTURE SLOTS" in user else []
-            assign = []
-            for pid, note in pics:
-                assign.append({"id": pid, "exhibit": "X1" if "INVOICE" in note.upper() else "X2"})
-            labels = re.findall(r"^- id (\S+): 'TM1'", user, re.M)
-            text = json.dumps({
-                "text": text_plan, "pictures": assign, "extra_exhibits": [],
-                "tickmarks": [{"id": l, "action": "place", "exhibit": "X1", "anchor": "14,945.60"} for l in labels],
-                "cells": [], "notes": [],
-            })
+            text = json.dumps(self._edit(user))
 
         class _B:
             type = "text"
@@ -213,6 +197,42 @@ class Stub:
             usage = None
 
         return _R()
+
+    @staticmethod
+    def _structure(user: str) -> dict:
+        tabs = re.findall(r"^TAB '(.+?)':", user, re.M)
+        n = int(re.search(r"CY: (\d+) selection", user).group(1))
+        kinds = [{"name": t, "kind": "selection" if t.isdigit() else "edit"} for t in tabs]
+        groups = [{"py_id": t, "tabs": [t]} for t in tabs if t.isdigit()]
+        return {"tabs": kinds, "py_selections": groups,
+                "selection_rows": [{"tab": g["tabs"][0], "header_row": 1, "data_rows": [2]} for g in groups],
+                "selection_table": None, "population": None,
+                "cy_tab_names": [[str(i + 1)] for i in range(n)], "notes": []}
+
+    @staticmethod
+    def _edit(user: str) -> dict:
+        elements, pictures, support = [], [], []
+        for m in re.finditer(r"^- (\S+) \[(\w+)\] '([^']*)'(.*)$", user, re.M):
+            eid, kind, rest = m.group(1), m.group(2), m.group(4)
+            block = user[m.end():].split("\n- ")[0]
+            paras = [line[6:] for line in block.splitlines() if line.startswith("    | ")]
+            if kind == "picture":
+                x = "X1" if "INVOICE" in rest.upper() else "X2"
+                pictures.append({"id": eid, "exhibit": x})
+                support.append({"py_ref": eid, "py_document": "invoice" if x == "X1" else "approval",
+                                "cy_exhibit": x, "match": "same"})
+            elif kind == "text" and "".join(paras) == "<s0>TM1</s0>":
+                elements.append({"id": eid, "action": "place", "on": {"beside": "105"}})
+            elif kind == "outline":
+                elements.append({"id": eid, "action": "place", "on": {"exhibit": "X1", "anchor": "14,945.60"}})
+            elif kind == "text" and any("credit memo" in p for p in paras):
+                elements.append({"id": eid, "action": "remove"})
+            elif kind == "text" and paras:
+                new = [p.replace("9578365", "9850995").replace("Ryan Capito", "Jane Doe")
+                       .replace("11/04/2025", "06/20/2026").replace("$17,025.40", "$14,945.60") for p in paras]
+                elements.append({"id": eid, "action": "replace", "paragraphs": new})
+        return {"elements": elements, "pictures": pictures, "extra_exhibits": [], "cells": [],
+                "support": support, "notes": []}
 
 
 def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listing=None):
@@ -244,7 +264,8 @@ def test_the_inventory_reads_the_py_grammar(tmp_path: Path):
     tab = next(t for t in inv.tabs if t.name == "1")
     kinds = sorted(i.kind for i in tab.items)
     assert kinds.count("picture") == 2 and kinds.count("frame") == 2
-    assert kinds.count("text") == 3 and kinds.count("label") == 1 and kinds.count("box") == 1
+    # Physical kinds only: the "TM1" label is just a text shape, the box an outline.
+    assert kinds.count("text") == 4 and kinds.count("outline") == 1
     conclusion = next(i for i in tab.items if i.name == "TextBox 1")
     # Formatting kept as style classes: the bold red label is one class, the prose another.
     first = conclusion.paragraphs[0].runs
@@ -255,7 +276,7 @@ def test_the_inventory_reads_the_py_grammar(tmp_path: Path):
 def test_the_cy_file_is_the_py_with_only_the_facts_changed(tmp_path: Path):
     py, out, stub = _run(tmp_path)
     wb = openpyxl.load_workbook(out.path)
-    assert wb.sheetnames == ["Mirror Check", "IA Lead", "1"]
+    assert wb.sheetnames == ["Mirror Check", "Support Check", "IA Lead", "1"]
     sel = wb["1"]
     # Data row: each CY value under its heading; nothing of last year's left.
     assert [c.value for c in sel[1]][:5] == ["Doc Type", "Doc#", "Invoice Date", "Amount", "Customer Name"]
@@ -296,8 +317,8 @@ def test_the_cy_file_is_the_py_with_only_the_facts_changed(tmp_path: Path):
     assert len(cy.by_kind("frame")) == 2
 
     # TM1: the PY's own label and box, moved onto the CY total; label beside it.
-    label = cy.by_kind("label")[0]
-    box = cy.by_kind("box")[0]
+    label = next(i for i in cy.by_kind("text") if i.text == "TM1")
+    box = cy.by_kind("outline")[0]
     invoice = next(p for p in pics if p.box.x < 2_000_000)
     assert invoice.box.x <= box.box.x and box.box.right <= invoice.box.right + 100_000
     assert not label.box.overlaps(box.box)
@@ -306,23 +327,26 @@ def test_the_cy_file_is_the_py_with_only_the_facts_changed(tmp_path: Path):
 def test_one_tab_per_selection_never_per_test_step(tmp_path: Path):
     # Three test steps, one selection: ONE tab. A real output made three.
     _py, out, _s = _run(tmp_path, steps=("TS-1", "TS-2", "TS-3"))
-    assert openpyxl.load_workbook(out.path).sheetnames == ["Mirror Check", "IA Lead", "1"]
+    assert openpyxl.load_workbook(out.path).sheetnames == ["Mirror Check", "Support Check", "IA Lead", "1"]
 
 
 def test_more_selections_than_py_tabs_copy_the_whole_py_tab(tmp_path: Path):
     _py, out, _s = _run(tmp_path, samples=("1", "2"))
-    assert openpyxl.load_workbook(out.path).sheetnames == ["Mirror Check", "IA Lead", "1", "2"]
+    assert openpyxl.load_workbook(out.path).sheetnames == ["Mirror Check", "Support Check", "IA Lead", "1", "2"]
     work = tmp_path / "w2"
     ox.extract_template(str(out.path), str(work))
     tabs = {t.name: t for t in build_inventory(str(work)).tabs}
     # Tab 2 is a full copy of the PY tab -- conclusion boxes and all -- edited.
-    assert {i.name for i in tabs["2"].by_kind("text")} == {"TextBox 1", "TextBox 2"}
+    assert {"TextBox 1", "TextBox 2"} <= {i.name for i in tabs["2"].by_kind("text")}
     assert ox.package_problems(str(work)) == []
 
 
 def test_a_failed_model_call_keeps_the_py_text_and_says_so(tmp_path: Path):
     _py, out, _s = _run(tmp_path, stub=Stub(reply="not json at all"))
     assert any("did not return JSON" in n for n in out.notes)
+    # The PY text is still there, unchanged -- nothing deleted on failure.
+    wb = openpyxl.load_workbook(out.path)
+    assert "1" in wb.sheetnames
     work = tmp_path / "w3"
     ox.extract_template(str(out.path), str(work))
     assert ox.package_problems(str(work)) == []
@@ -340,9 +364,12 @@ def test_py_facts_left_in_cy_text_are_flagged(tmp_path: Path):
     lazy.create = keep_py_name
     _py, out, _s = _run(tmp_path, stub=lazy)
     issues = " ".join(f.issue for f in out.flags)
-    assert "Ryan Capito" in issues and "17,025.40" in issues
+    # The PY amount is certain (a number); the PY person is a candidate the
+    # final model pass judges -- the stand-in passes everything, so it shows
+    # here only as the amount.
+    assert "17025.4" in issues
     sheet = openpyxl.load_workbook(out.path)["Mirror Check"]
-    assert any("Ryan Capito" in str(c.value) for row in sheet.iter_rows() for c in row)
+    assert any("17025.4" in str(c.value) for row in sheet.iter_rows() for c in row)
 
 
 def test_a_listing_matching_no_py_heading_leaves_the_py_headings_alone(tmp_path: Path):
@@ -372,4 +399,82 @@ def test_the_joint_falls_back_when_the_mirror_engine_fails(tmp_path: Path):
     # A failed call is not a failed build: the PY copy is still made, PY
     # text kept, and the failure reported.
     assert outcome.path.exists()
-    assert any("rewrite call failed" in w for w in outcome.warnings) or not outcome.mirrored_py
+    assert any("call failed" in w or "structure read failed" in w for w in outcome.warnings) or not outcome.mirrored_py
+
+
+
+def test_a_py_with_two_tabs_per_selection_keeps_that_shape(tmp_path: Path):
+    # The PY documents selection 1 on two tabs ("1a" invoice, "1b" approval).
+    # The model reads that; each CY selection gets the same pair.
+    py = make_py(tmp_path)
+    wb = openpyxl.load_workbook(py)  # openpyxl drops shapes; fine for a structure test
+    wb["1"].title = "1a"
+    wb.copy_worksheet(wb["1a"]).title = "1b"
+    wb.save(py)
+    structure = {
+        "tabs": [{"name": "IA Lead", "kind": "edit"}, {"name": "1a", "kind": "selection"},
+                 {"name": "1b", "kind": "selection"}],
+        "py_selections": [{"py_id": "1", "tabs": ["1a", "1b"]}],
+        "selection_rows": [{"tab": "1a", "header_row": 1, "data_rows": [2]},
+                           {"tab": "1b", "header_row": 1, "data_rows": [2]}],
+        "selection_table": None, "population": None,
+        "cy_tab_names": [["1a", "1b"], ["2a", "2b"]], "notes": [],
+    }
+    _page(tmp_path / "cy_invoice.png", ["INVOICE", "Invoice 9850995", "Total 14,945.60"])
+    _page(tmp_path / "cy_approval.png", ["APPROVAL", "Approved by Jane Doe"])
+    results = {"TS-1": {"conclusion": _conclusion("TS-1", ["1", "2"]), "audit_log": []}}
+    manifests = {"TS-1": SamplePopulationManifest(test_step_id="TS-1", sample_size=2, samples=[
+        SampleItem(sample_id=s, test_step_id="TS-1", identifying_details="x",
+                   key_fields={"Doc Type": "RX", "Doc#": f"98509{s}"}) for s in ("1", "2")])}
+    out = mirror_workpaper({"control_id": "X", "test_steps": [{"test_step_id": "TS-1", "test_step_text": "x"}]},
+                           results, py, tmp_path / "CY.xlsx", tmp_path, manifests, Stub(structure=structure), "m")
+    names = openpyxl.load_workbook(out.path).sheetnames
+    assert names[-4:] == ["1a", "1b", "2a", "2b"]
+    assert out.tab_names == {"1": "1a", "2": "2a"}
+
+
+def test_an_unusable_structure_reading_falls_back_and_says_so(tmp_path: Path):
+    _py, out, _s = _run(tmp_path, stub=Stub(structure={"tabs": [], "py_selections": []}))
+    assert any(f.item == "structure" and "inferred from tab names" in f.issue for f in out.flags)
+    assert "1" in openpyxl.load_workbook(out.path).sheetnames
+
+
+def test_the_support_check_lists_each_py_document_against_cy(tmp_path: Path):
+    _py, out, _s = _run(tmp_path)
+    assert {s["py_document"] for s in out.support} == {"invoice", "approval"}
+    sheet = openpyxl.load_workbook(out.path)["Support Check"]
+    assert [c.value for c in sheet[1]][:4] == ["Match", "Tab", "PY document", "CY counterpart"]
+
+
+def test_dates_are_found_in_any_format():
+    from agent.mirror.verify import _dates
+
+    assert _dates("approved December 2, 2025") == {"2025-12-02"}
+    assert _dates("on 12/02/2025 and 2-Dec-25") == {"2025-12-02"}
+
+
+def test_an_uploaded_cy_population_replaces_the_py_population(tmp_path: Path):
+    py = make_py(tmp_path)
+    wb = openpyxl.load_workbook(py)
+    pop = wb.create_sheet("Population")
+    pop.append(["Doc#", "Amount"])
+    for i in range(5):
+        pop.append([f"PY-{i}", 100 + i])
+    wb.save(py)
+    structure = {
+        "tabs": [{"name": "IA Lead", "kind": "edit"}, {"name": "1", "kind": "selection"},
+                 {"name": "Population", "kind": "population"}],
+        "py_selections": [{"py_id": "1", "tabs": ["1"]}],
+        "selection_rows": [{"tab": "1", "header_row": 1, "data_rows": [2]}],
+        "selection_table": None, "population": {"tab": "Population", "header_row": 1},
+        "cy_tab_names": [["1"]], "notes": [],
+    }
+    _page(tmp_path / "cy_invoice.png", ["Invoice 9850995"])
+    _page(tmp_path / "cy_approval.png", ["Approved"])
+    results = {"TS-1": {"conclusion": _conclusion("TS-1", ["1"]), "audit_log": []}}
+    out = mirror_workpaper({"control_id": "X", "test_steps": [{"test_step_id": "TS-1", "test_step_text": "x"}]},
+                           results, py, tmp_path / "CY.xlsx", tmp_path, None, Stub(structure=structure), "m",
+                           population_records=[{"Doc#": "CY-1", "Amount": 7}, {"Doc#": "CY-2", "Amount": 8}])
+    rows = [r for r in openpyxl.load_workbook(out.path)["Population"].iter_rows(values_only=True) if any(r)]
+    assert rows == [("Doc#", "Amount"), ("CY-1", 7), ("CY-2", 8)]
+    assert not any(f.found_by == "PY data" and f.tab == "Population" for f in out.flags)

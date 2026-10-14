@@ -73,6 +73,8 @@ class WorkpaperOutcome:
     # The mirror check (agent/mirror/verify.py): what differs from the PY
     # beyond the facts. Empty for the fallback builders, which do not run it.
     mirror_flags: list = field(default_factory=list)
+    # Each PY document against its CY counterpart (agent/mirror/rewrite.py).
+    support_check: list = field(default_factory=list)
 
     @property
     def summary_line(self) -> str:
@@ -242,17 +244,27 @@ def build_cy_workpaper(
                 text = next((s.get("test_step_text", "") for s in spec.get("test_steps", [])
                              if s.get("test_step_id") == step_id), "")
                 step_labels_.append(f"{step_id}: {text}" if text else step_id)
+            population_records = None
+            if population_workbook and population_sheet and (support / population_workbook).exists():
+                from agent.intake import read_excel_rows
+
+                try:
+                    population_records = read_excel_rows(support / population_workbook, sheet_name=population_sheet)
+                except Exception:  # noqa: BLE001 -- the population tab is then flagged instead
+                    population_records = None
             mirrored = mirror_workpaper(
                 spec, results, py_path, out_dir / _mirrored_filename(spec["control_id"]), support,
                 sample_manifests, mirror_client, mirror_model or "claude-opus-5",
                 summary_rows_fn=lambda names: summary_rows(
                     list(zip(step_labels_, [c for _s, c in conclusions])), tab_names=names),
                 ledger=ledger,
+                population_records=population_records,
             )
             return WorkpaperOutcome(
                 mirrored.path, mirrored_py=True,
                 warnings=list(mirrored.notes),
                 mirror_flags=mirrored.flags,
+                support_check=mirrored.support,
             )
         except Exception as exc:  # noqa: BLE001 -- fall back, and say so
             mirror_failure = f"editing the prior-year file directly failed ({exc}); used the layout builder instead"

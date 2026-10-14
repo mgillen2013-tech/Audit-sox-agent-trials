@@ -1,23 +1,27 @@
-"""Does the CY workpaper mirror the PY? Checked two ways, both reported.
+"""Two questions, answered on the Mirror Check tab:
 
-PLAIN-CODE CHECKS (free, certain):
-  structure   every PY text box is accounted for; a replaced box kept the
-              PY's paragraph count and its labels ("Test Step 1:", "Note:")
-  leftovers   a PY fact -- a document number, date, amount or name from the
-              PY's own row or text -- appearing in CY text when the CY facts
-              do not contain it. The most damaging failure a mirrored
-              workpaper can have, and one a reader cannot spot.
-  placement   exhibits and tickmarks that could not be placed
-  PY data     tabs still holding last year's data (population, parameters,
-              report extracts) that this run had nothing to replace with
+  1. Does the CY workpaper mirror the PY?
+  2. Does the CY support mirror the PY support?
 
-MODEL CHECK (the final call): the PY and CY version of every item side by
-side, with the CY facts, asking one question per item -- same wording and
-structure with only the facts changed, and are those facts supported?
+Plain-code checks, no rules about what a workpaper contains:
+  structure   every PY text element accounted for; where the PY set a
+              paragraph's lead-in apart by FORMAT (a bold "Test Step 1: "
+              before regular text), CY keeps the same lead-in
+  leftovers   the safety net for everything else: every specific fact in
+              the PY's working tabs -- numbers, dates in any format, names --
+              is looked for in EVERY cell and shape of the CY workbook. Found
+              there and not a CY fact = last year's detail left behind,
+              wherever it is and however it got there.
+  placement   anything that could not be placed, or was not decided on
+  support     each PY document matched to a CY one, or missing (from the
+              model's comparison, reported as it said)
+
+And a final model pass comparing PY and CY text item by item.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 from dataclasses import dataclass
@@ -32,90 +36,198 @@ class CheckFlag:
     tab: str
     item: str
     issue: str
-    found_by: str  # "structure" | "leftovers" | "placement" | "PY data" | "model"
-
-
-# Things that identify a specific transaction: long numbers, dates, money.
-_FACT_RE = re.compile(
-    r"\$?\d{1,3}(?:,\d{3})+(?:\.\d+)?|\$\d+(?:\.\d+)?|\b\d{5,}\b|"
-    r"\b\d{1,2}/\d{1,2}/\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b"
-)
-_LABEL_RE = re.compile(r"^\s*((?:Test(?: Step)?\s*\d+|Note|TM\s*\d+|Procedures?|Control Description)\s*:?)", re.I)
+    found_by: str  # structure | leftovers | placement | support | PY data | model
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"[\s,$]", "", s)
+    return re.sub(r"[\s,$]", "", str(s)).lower()
 
 
-def structural_checks(tab: str, changes: list[tuple[str, str, str]]) -> list[CheckFlag]:
+def structural_checks(tab: str, changes: list[tuple]) -> list[CheckFlag]:
     flags = []
-    for item, py, cy in changes:
-        if cy == "":
-            flags.append(CheckFlag("medium", tab, item, "PY text box removed (no CY counterpart)", "structure"))
+    for change in changes:
+        item, py, cy = change[0], change[1], change[2]
+        py_labels = change[3] if len(change) > 3 else []
+        cy_labels = change[4] if len(change) > 4 else []
+        if cy == "" and py:
+            flags.append(CheckFlag("medium", tab, item, "PY text element removed (no CY counterpart)", "structure"))
             continue
         if py == cy:
             continue
-        py_paras = [p for p in py.split("\n")]
-        cy_paras = [p for p in cy.split("\n")]
-        if len(py_paras) != len(cy_paras):
-            flags.append(CheckFlag("medium", tab, item,
-                                   f"paragraph count changed ({len(py_paras)} in PY, {len(cy_paras)} in CY)", "structure"))
-        py_labels = [m.group(1).lower() for p in py_paras if (m := _LABEL_RE.match(p))]
-        cy_labels = [m.group(1).lower() for p in cy_paras if (m := _LABEL_RE.match(p))]
-        if py_labels and [re.sub(r"\d+", "#", x) for x in py_labels] != [re.sub(r"\d+", "#", x) for x in cy_labels]:
-            flags.append(CheckFlag("medium", tab, item,
-                                   f"PY labels {py_labels} not kept (CY has {cy_labels})", "structure"))
+        n_py, n_cy = len(py.split("\n")), len(cy.split("\n"))
+        if n_py != n_cy:
+            flags.append(CheckFlag("medium", tab, item, f"paragraph count changed ({n_py} in PY, {n_cy} in CY)", "structure"))
+        shape = lambda xs: [re.sub(r"\d+", "#", x.lower()) for x in xs]  # noqa: E731
+        if py_labels and shape(py_labels) != shape(cy_labels):
+            flags.append(CheckFlag("medium", tab, item, f"PY lead-ins {py_labels} not kept (CY has {cy_labels})", "structure"))
         ratio = len(cy) / max(1, len(py))
         if ratio > 1.6 or ratio < 0.5:
             flags.append(CheckFlag("low", tab, item, f"length changed a lot ({len(py)} -> {len(cy)} characters)", "structure"))
     return flags
 
 
-def leftover_checks(tab: str, changes: list[tuple[str, str, str]], py_values: list[str],
-                    cy_facts_text: str) -> list[CheckFlag]:
-    """PY facts that survived into CY text without being CY facts too."""
-    cy_facts = _norm(cy_facts_text)
-    py_facts = {m.group(0) for _i, py, _c in changes for m in _FACT_RE.finditer(py)}
-    py_facts |= {v for v in py_values if len(_norm(v)) >= 5 and re.search(r"\d", v)}
-    names = {v for v in py_values if re.fullmatch(r"[A-Z][A-Za-z&.,' -]{5,}", v or "")}
-    flags = []
-    for item, _py, cy in changes:
-        if not cy:
+# ---------------------------------------------------------------------------
+# Leftovers: the safety net
+# ---------------------------------------------------------------------------
+
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+_DATE_RES = [
+    (re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b"), "mdy"),
+    (re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"), "ymd"),
+    (re.compile(r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b"), "Mdy"),
+    (re.compile(r"\b(\d{1,2})[- ]([A-Za-z]{3,9})[- ](\d{2,4})\b"), "dMy"),
+]
+_NUM_RE = re.compile(r"(?<![\w.])\$?\d[\d,]*(?:\.\d+)?(?![\w])")
+
+
+def _dates(text: str) -> set[str]:
+    """Every date in the text, normalised to YYYY-MM-DD, whatever its format."""
+    out = set()
+    for rx, kind in _DATE_RES:
+        for m in rx.finditer(text):
+            try:
+                if kind == "mdy":
+                    mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                elif kind == "ymd":
+                    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                elif kind == "Mdy":
+                    mo, d, y = _MONTHS[m.group(1)[:3].lower()], int(m.group(2)), int(m.group(3))
+                else:
+                    d, mo, y = int(m.group(1)), _MONTHS[m.group(2)[:3].lower()], int(m.group(3))
+                y = y + 2000 if y < 100 else y
+                out.add(dt.date(y, mo, d).isoformat())
+            except (KeyError, ValueError):
+                continue
+    return out
+
+
+def _numbers(text: str) -> set[str]:
+    """Specific numbers: four or more digits, or with decimals. Dates are
+    handled separately; these are document numbers and amounts."""
+    out = set()
+    for m in _NUM_RE.finditer(text):
+        n = m.group(0).replace("$", "").replace(",", "")
+        digits = re.sub(r"\D", "", n)
+        if len(digits) >= 4 or ("." in n and len(digits) >= 3):
+            out.add(n.rstrip("0").rstrip(".") if "." in n else n.lstrip("0") or "0")
+    return out
+
+
+def _names(text: str) -> set[str]:
+    """Capitalised words and phrases -- candidates only; py_facts keeps the
+    ones that appear in the PY's evidence."""
+    out = set()
+    for m in re.finditer(r"\b([A-Z][a-zA-Z&'.-]{2,}(?:\s+[A-Z][a-zA-Z&'.-]{1,}){0,3})\b", text):
+        out.add(m.group(1).strip())
+    return out
+
+
+@dataclass
+class PyFact:
+    kind: str     # date | number | name
+    value: str    # as written in the PY
+    key: str      # normalised for matching
+
+
+def py_facts(texts: list[str], data_values: list[str], evidence_text: str = "") -> tuple[list[PyFact], list[PyFact]]:
+    """The PY's specific facts, from its working tabs' text and data rows.
+
+    A capitalised phrase in PY text counts as a fact only if it also appears
+    in the PY's own EVIDENCE (its data rows, the text of its screenshots):
+    "Ryan Clark" is on last year's approval email, so it is a fact; "Test
+    Step" and "Account Manager" are on no document, so they are wording.
+    No list of words decides it.
+
+    Returns (certain facts, name candidates). Numbers, dates and the values
+    of the PY's own record rows are certain. Other names are only
+    CANDIDATES: whether "Project Manager" is a person or a job title is a
+    judgment, so the model check decides, not code."""
+    evidence = _norm(evidence_text + " " + " ".join(map(str, data_values)))
+    facts: dict[str, PyFact] = {}
+    for t in texts + data_values:
+        for d in _dates(t):
+            facts.setdefault("d" + d, PyFact("date", d, d))
+        for n in _numbers(t):
+            facts.setdefault("n" + n, PyFact("number", n, n))
+    for v in data_values:
+        v = str(v).strip()
+        if re.search(r"[A-Za-z]{3}", v) and len(v) >= 4 and not _dates(v):
+            facts.setdefault("t" + _norm(v), PyFact("name", v, _norm(v)))
+    candidates: dict[str, PyFact] = {}
+    for t in texts:
+        for name in _names(t):
+            key = _norm(name)
+            if len(key) >= 4 and key in evidence and "t" + key not in facts:
+                candidates.setdefault(key, PyFact("name", name, key))
+    return list(facts.values()), list(candidates.values())
+
+
+def name_hits(candidates: list[PyFact], cy_locations: list[tuple[str, str, str, bool]],
+              cy_fact_text: str) -> dict[str, list[str]]:
+    """Per tab, the PY name candidates that appear in CY text and not in the
+    CY facts -- for the model check to judge."""
+    cy_norm = _norm(cy_fact_text)
+    out: dict[str, list[str]] = {}
+    for tab, _where, text, _kept in cy_locations:
+        norm = _norm(text)
+        for c in candidates:
+            if c.key in norm and c.key not in cy_norm and c.value not in out.get(tab, []):
+                out.setdefault(tab, []).append(c.value)
+    return out
+
+
+def leftover_scan(
+    facts: list[PyFact],
+    cy_locations: list[tuple[str, str, str, bool]],   # (tab, where, text, kept-as-is)
+    cy_fact_text: str,
+    common_text: str,
+) -> list[CheckFlag]:
+    """Every PY fact found in the CY workbook that is not a CY fact.
+
+    common_text: text the PY and CY share by design (headings, the control
+    description, test step wording) -- a 'name' found there is wording, not
+    a leftover. Numbers and dates are never excused this way.
+    """
+    cy_dates = _dates(cy_fact_text)
+    cy_nums = _numbers(cy_fact_text)
+    cy_norm = _norm(cy_fact_text)
+    common = _norm(common_text)
+    flags: list[CheckFlag] = []
+    seen: set[tuple[str, str]] = set()
+    for tab, where, text, kept in cy_locations:
+        if not text:
             continue
-        cy_n = _norm(cy)
-        for fact in sorted(py_facts | names):
-            f = _norm(fact)
-            if len(f) >= 4 and f in cy_n and f not in cy_facts:
-                flags.append(CheckFlag("high", tab, item, f"PY fact {fact!r} appears in CY text but not in the CY facts", "leftovers"))
-        # People and companies named in PY prose ("approval from Ryan Clark").
-        # Less certain than a number -- role phrases are capitalised too --
-        # so common workpaper words are excluded and the flag is medium.
-        for name in _py_names(changes):
-            n = _norm(name).lower()
-            if n in cy_n.lower() and n not in cy_facts.lower():
-                flags.append(CheckFlag("medium", tab, item, f"PY name {name!r} appears in CY text but not in the CY facts", "leftovers"))
+        dates, nums, norm = _dates(text), _numbers(text), _norm(text)
+        for f in facts:
+            if f.kind == "date":
+                hit = f.key in dates and f.key not in cy_dates
+            elif f.kind == "number":
+                hit = f.key in nums and f.key not in cy_nums
+            else:
+                hit = len(f.key) >= 4 and f.key in norm and f.key not in cy_norm and f.key not in common
+            if hit and (tab, f.key) not in seen:
+                seen.add((tab, f.key))
+                flags.append(CheckFlag(
+                    "medium" if kept else "high", tab, where,
+                    f"PY {f.kind} {f.value!r} is in the CY workpaper but not in the CY facts"
+                    + (" (in text the editor kept as still true -- confirm)" if kept else ""),
+                    "leftovers"))
     return flags
 
 
-_COMMON = {
-    "test", "step", "steps", "project", "manager", "branch", "administrator", "account", "customer",
-    "invoice", "note", "total", "amount", "satisfied", "exception", "noted", "control", "description",
-    "procedures", "procedure", "refer", "tab", "schedule", "value", "values", "approval", "approved",
-    "the", "ia", "e1", "brightview", "purchase", "order", "proposal", "extra", "work", "designee",
-    "payment", "date", "credit", "memo", "retainage", "sample", "selection", "reference", "references",
-    "director", "vice", "president", "senior", "regional", "general", "finance", "accounts", "payable",
-    "receivable", "contract", "billing", "sales", "service", "services", "landscape", "llc", "inc",
-}
-
-
-def _py_names(changes: list[tuple[str, str, str]]) -> set[str]:
-    names = set()
-    for _i, py, _c in changes:
-        for m in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b", py):
-            words = m.group(1).split()
-            if not all(w.lower() in _COMMON for w in words) and not any(w.lower() in _COMMON for w in words[:1]):
-                names.add(m.group(1))
-    return names
+def support_flags(tab: str, support: list[dict]) -> list[CheckFlag]:
+    out = []
+    for s in support:
+        if s["match"] == "missing":
+            out.append(CheckFlag("high", tab, s.get("py_ref") or "-",
+                                 f"PY had {s['py_document']!r}; no CY counterpart in the support"
+                                 + (f" -- {s['comment']}" if s.get("comment") else ""), "support"))
+        elif s["match"] == "partial":
+            out.append(CheckFlag("medium", tab, s.get("py_ref") or "-",
+                                 f"PY {s['py_document']!r} only partly matched by CY {s.get('cy_exhibit')}"
+                                 + (f" -- {s['comment']}" if s.get("comment") else ""), "support"))
+    return out
 
 
 VERIFY_SYSTEM = """\
@@ -132,28 +244,25 @@ An empty list means every item passes.
 """
 
 
-def model_check(client: Any, model: str, tab: str, changes: list[tuple[str, str, str]],
-                cy_facts_text: str, *, ledger: Any = None) -> list[CheckFlag]:
-    pairs = [{"item": i, "py": py, "cy": cy} for i, py, cy in changes if py != cy and cy]
-    if not pairs or client is None:
-        return []
+def model_check(client: Any, model: str, tab: str, changes: list[tuple],
+                cy_facts_text: str, *, ledger: Any = None, name_candidates: list[str] | None = None) -> list[CheckFlag]:
+    pairs = [{"item": c[0], "py": c[1], "cy": c[2]} for c in changes if c[1] != c[2] and c[2]]
+    names = name_candidates or []
+    if (not pairs and not names) or client is None:
+        return [CheckFlag("low", tab, "-", f"possible PY name {n!r} in CY text -- check", "leftovers")
+                for n in names]
+    from agent.mirror.rewrite import call_model
+
     user = (f"TAB {tab}\n\nCY FACTS:\n{cy_facts_text[:12000]}\n\nITEMS:\n"
             + json.dumps(pairs, ensure_ascii=False, indent=1)[:30000])
-    try:
-        response = client.messages.create(
-            model=model, max_tokens=4000, system=VERIFY_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-        )
-        if ledger is not None:
-            try:
-                ledger.record(response.usage, group="Mirror check", label=tab)
-            except Exception:  # noqa: BLE001
-                pass
-        raw = "".join(b.text for b in response.content if getattr(b, "type", "") == "text")
-        start, end = raw.find("{"), raw.rfind("}")
-        data = json.loads(raw[start:end + 1]) if start != -1 else {}
-    except Exception as exc:  # noqa: BLE001
-        return [CheckFlag("medium", tab, "-", f"the model check could not run ({str(exc)[:80]})", "model")]
+    if names:
+        user += ("\n\nPY NAMES FOUND IN THIS TAB'S CY TEXT (and not in the CY facts): "
+                 + json.dumps(names) + "\nFlag (high) any that is a PY-specific person, company or place "
+                 "left over from last year; ignore ordinary words and job titles.")
+    data, err = call_model(client, model, user, ledger=ledger, label=f"check {tab}",
+                           system=VERIFY_SYSTEM, max_tokens=4000)
+    if err:
+        return [CheckFlag("medium", tab, "-", f"the model check could not run ({err[:80]})", "model")]
     out = []
     for f in data.get("flags", []) or []:
         sev = str(f.get("severity", "medium")).lower()
@@ -163,4 +272,4 @@ def model_check(client: Any, model: str, tab: str, changes: list[tuple[str, str,
 
 
 def sort_flags(flags: list[CheckFlag]) -> list[CheckFlag]:
-    return sorted(flags, key=lambda f: (SEVERITIES.index(f.severity), f.tab, f.item))
+    return sorted(flags, key=lambda f: (SEVERITIES.index(f.severity), f.found_by, f.tab, f.item))

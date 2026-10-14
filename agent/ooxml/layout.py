@@ -118,6 +118,25 @@ class _Grid:
     def y(self, row: int, off: int) -> int:
         return sum(self.row_emu.get(r, self.default_row_emu) for r in range(row)) + off
 
+    def cell_at(self, x: int, y: int) -> str:
+        """The cell containing a sheet position, e.g. 'C12' -- how a position
+        is described to a reader (or a model) in spreadsheet terms."""
+        col, acc = 0, 0
+        while col < 16_384:
+            w = self.columns.widths_px.get(col_index_to_letter(col + 1), self.columns.default_px) * CELL_GRID_EMU_PER_PX
+            if acc + w > x:
+                break
+            acc += w
+            col += 1
+        row, acc = 0, 0
+        while row < 1_048_576:
+            h = self.row_emu.get(row, self.default_row_emu)
+            if acc + h > y:
+                break
+            acc += h
+            row += 1
+        return f"{col_index_to_letter(col + 1)}{row + 1}"
+
 
 def _row_heights(sheet_xml: str) -> tuple[int, dict[int, int]]:
     default = re.search(r'<sheetFormatPr\b[^>]*\bdefaultRowHeight="([\d.]+)"', sheet_xml)
