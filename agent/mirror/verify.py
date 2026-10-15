@@ -245,16 +245,21 @@ An empty list means every item passes.
 
 
 def model_check(client: Any, model: str, tab: str, changes: list[tuple],
-                cy_facts_text: str, *, ledger: Any = None, name_candidates: list[str] | None = None) -> list[CheckFlag]:
+                cy_facts_text: str, *, ledger: Any = None, name_candidates: list[str] | None = None,
+                tickmarks: list[str] | None = None) -> list[CheckFlag]:
     pairs = [{"item": c[0], "py": c[1], "cy": c[2]} for c in changes if c[1] != c[2] and c[2]]
     names = name_candidates or []
-    if (not pairs and not names) or client is None:
+    if (not pairs and not names and not tickmarks) or client is None:
         return [CheckFlag("low", tab, "-", f"possible PY name {n!r} in CY text -- check", "leftovers")
                 for n in names]
     from agent.mirror.rewrite import call_model
 
     user = (f"TAB {tab}\n\nCY FACTS:\n{cy_facts_text[:12000]}\n\nITEMS:\n"
             + json.dumps(pairs, ensure_ascii=False, indent=1)[:30000])
+    if tickmarks:
+        user += ("\n\nTICKMARKS (label -> the CY value it was placed on -> the text citing it):\n"
+                 + "\n".join(tickmarks)
+                 + "\nFlag (high) any tickmark whose placed value is not what the citing text says it marks.")
     if names:
         user += ("\n\nPY NAMES FOUND IN THIS TAB'S CY TEXT (and not in the CY facts): "
                  + json.dumps(names) + "\nFlag (high) any that is a PY-specific person, company or place "
@@ -273,3 +278,84 @@ def model_check(client: Any, model: str, tab: str, changes: list[tuple],
 
 def sort_flags(flags: list[CheckFlag]) -> list[CheckFlag]:
     return sorted(flags, key=lambda f: (SEVERITIES.index(f.severity), f.found_by, f.tab, f.item))
+
+
+# ---------------------------------------------------------------------------
+# Tickmarks: every one cited in text must be on the evidence, and vice versa
+# ---------------------------------------------------------------------------
+
+
+def _cites(text: str, label: str) -> bool:
+    """`label` appears in `text` as its own token (not inside a longer
+    word or number): "TM 2" is cited by "See TM 2.", not by "TM 22"."""
+    if not text or not label:
+        return False
+    # Case-sensitive: marks are written with fixed capitals ("TM2", "A"), and
+    # ignoring case made ordinary words cite them ("a credit memo", "total
+    # amount" for a "Total Amount" annotation).
+    pattern = r"(?<![\w])" + r"\s*".join(re.escape(p) for p in label.split()) + r"(?![\w])"
+    return re.search(pattern, text) is not None
+
+
+def py_cited_labels(py_tabs: list) -> set[str]:
+    """The PY's referenced marks, read from the PY itself: a short text
+    shape whose exact text is cited in some OTHER text on the PY's tabs
+    (a conclusion saying "See TM2", a note saying "per A"). Whatever the
+    PY's convention -- "TM 2", "A", "^" -- this finds it; no list of styles."""
+    texts = []
+    shapes = []
+    for t in py_tabs:
+        texts += [(t.name, i.id, i.text) for i in t.items if i.kind == "text" and i.text]
+        texts += [(t.name, ref, c.text) for ref, c in t.cells.items() if c.text]
+        shapes += [(t.name, i.id, i.text.strip()) for i in t.items if i.kind == "text" and 0 < len(i.text.strip()) <= 12]
+    out = set()
+    for tab, sid, label in shapes:
+        # A citation is a mention INSIDE other text ("See TM2 and Note"), not
+        # another place that just says the same words (a cell "Total Amount").
+        if any(_cites(text, label) and len(text.strip()) > len(label) + 3
+               for tab2, oid, text in texts if not (tab2 == tab and oid == sid)):
+            out.add(label)
+    return out
+
+
+def tickmark_checks(
+    selection: str,
+    py_labels: set[str],
+    declared: list[tuple[str, dict]],                 # (tab, plan tickmark entry)
+    placed_labels: dict[str, list[tuple[str, str]]],  # label (normalised) -> [(tab, where it was placed)]
+    cy_texts: list[tuple[str, str, str, bool]],       # (tab, where, text, is a label element)
+) -> list[CheckFlag]:
+    """Across all the tabs of one selection:
+      - every tickmark CITED in CY text is PLACED on the CY evidence
+      - every tickmark the model declared and that text cites is placed
+      - a tickmark placed on the evidence that the PY cited is still cited
+    """
+    norm = lambda s: re.sub(r"\s+", " ", s.strip())  # noqa: E731
+    labels = {norm(x) for x in py_labels} | {norm(t["label"]) for _tab, t in declared}
+    flags: list[CheckFlag] = []
+    cited_in_cy: dict[str, list[tuple[str, str]]] = {}
+    for tab, where, text, is_label in cy_texts:
+        if is_label:
+            continue
+        for lab in labels:
+            if _cites(text, lab):
+                cited_in_cy.setdefault(lab, []).append((tab, where))
+    for lab, places in sorted(cited_in_cy.items()):
+        if lab not in placed_labels:
+            tabs = sorted({t for t, _w in places})
+            flags.append(CheckFlag("high", ",".join(tabs), places[0][1],
+                                   f"selection {selection}: text cites {lab!r} but no {lab!r} tickmark is placed on "
+                                   "the CY evidence", "tickmarks"))
+    for tab, t in declared:
+        lab = norm(t["label"])
+        if t.get("referenced_by") and lab not in placed_labels and lab not in cited_in_cy:
+            flags.append(CheckFlag("high", tab, t.get("element") or "-",
+                                   f"selection {selection}: tickmark {t['label']!r} ({t.get('marks', '')}) was "
+                                   "declared and cited but is not on the CY evidence", "tickmarks"))
+    for lab in sorted(placed_labels):
+        if lab in {norm(x) for x in py_labels} and lab not in cited_in_cy:
+            tab = placed_labels[lab][0][0]
+            flags.append(CheckFlag("medium", tab, "-",
+                                   f"selection {selection}: tickmark {lab!r} is on the evidence but no text cites it "
+                                   "(the PY cited it)", "tickmarks"))
+    return flags

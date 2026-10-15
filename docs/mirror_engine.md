@@ -76,6 +76,15 @@ boxes without labels, a lead sheet in cells).
      the PY's own documents are candidates the final model pass judges
      (person vs job title is a judgment)
    - placement: anything that could not be placed or was not decided on
+   - tickmarks: across all of a selection's tabs, every mark CITED in CY
+     text ("See TM2", "per A") must be PLACED on the CY evidence, and a mark
+     the PY cited must still be cited. The PY's marks are read from the PY
+     itself -- a short shape whose exact text is cited inside other PY text
+     -- so any convention works ("TM 2", "A", "^"). The edit call declares
+     each tickmark, the value it marks and what cites it; when a value is
+     not found on the page, a short second-look call reads the page lines
+     and picks the exact text; the final model pass checks each placed
+     value is what the citing sentence says it marks
    - support: the model's PY-vs-CY document comparison
    - PY data: tabs still holding last year's population/parameters/reports
    - a final model pass comparing PY and CY text item by item

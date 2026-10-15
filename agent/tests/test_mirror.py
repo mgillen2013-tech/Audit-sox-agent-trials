@@ -168,10 +168,12 @@ class Stub:
     wording, exhibits by role, TM1 (and its box) onto the CY total, and
     compares support."""
 
-    def __init__(self, reply=None, structure=None):
+    def __init__(self, reply=None, structure=None, anchor="14,945.60", relocate_answer=""):
         self.prompts: list[str] = []
         self.reply = reply
         self.structure = structure
+        self.anchor = anchor
+        self.relocate_answer = relocate_answer
         self.messages = self
 
     def create(self, **kw):
@@ -179,12 +181,14 @@ class Stub:
         self.prompts.append(user)
         if "reviewing a CY SOX workpaper" in system:
             text = '{"flags": []}'
+        elif "A tickmark has to be drawn" in system:
+            text = json.dumps({"text": self.relocate_answer})
         elif "work out how" in system:
             text = json.dumps(self.structure or self._structure(user))
         elif self.reply is not None:
             text = self.reply
         else:
-            text = json.dumps(self._edit(user))
+            text = json.dumps(self._edit(user, self.anchor))
 
         class _B:
             type = "text"
@@ -210,7 +214,7 @@ class Stub:
                 "cy_tab_names": [[str(i + 1)] for i in range(n)], "notes": []}
 
     @staticmethod
-    def _edit(user: str) -> dict:
+    def _edit(user: str, anchor: str = "14,945.60") -> dict:
         elements, pictures, support = [], [], []
         for m in re.finditer(r"^- (\S+) \[(\w+)\] '([^']*)'(.*)$", user, re.M):
             eid, kind, rest = m.group(1), m.group(2), m.group(4)
@@ -224,15 +228,17 @@ class Stub:
             elif kind == "text" and "".join(paras) == "<s0>TM1</s0>":
                 elements.append({"id": eid, "action": "place", "on": {"beside": "105"}})
             elif kind == "outline":
-                elements.append({"id": eid, "action": "place", "on": {"exhibit": "X1", "anchor": "14,945.60"}})
+                elements.append({"id": eid, "action": "place", "on": {"exhibit": "X1", "anchor": anchor}})
             elif kind == "text" and any("credit memo" in p for p in paras):
                 elements.append({"id": eid, "action": "remove"})
             elif kind == "text" and paras:
                 new = [p.replace("9578365", "9850995").replace("Ryan Capito", "Jane Doe")
                        .replace("11/04/2025", "06/20/2026").replace("$17,025.40", "$14,945.60") for p in paras]
                 elements.append({"id": eid, "action": "replace", "paragraphs": new})
+        tickmarks = [{"label": "TM1", "element": "104", "box": "105", "marks": "invoice total on X1",
+                      "referenced_by": ["102"]}] if "'TextBox 4'" in user else []
         return {"elements": elements, "pictures": pictures, "extra_exhibits": [], "cells": [],
-                "support": support, "notes": []}
+                "support": support, "tickmarks": tickmarks, "notes": []}
 
 
 def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listing=None):
@@ -478,3 +484,51 @@ def test_an_uploaded_cy_population_replaces_the_py_population(tmp_path: Path):
     rows = [r for r in openpyxl.load_workbook(out.path)["Population"].iter_rows(values_only=True) if any(r)]
     assert rows == [("Doc#", "Amount"), ("CY-1", 7), ("CY-2", 8)]
     assert not any(f.found_by == "PY data" and f.tab == "Population" for f in out.flags)
+
+
+
+# --------------------------------------------------------------------------
+# Tickmarks cited in text must be on the evidence
+# --------------------------------------------------------------------------
+
+
+def test_a_cited_tickmark_on_the_evidence_raises_nothing(tmp_path: Path):
+    _py, out, _s = _run(tmp_path)
+    assert not [f for f in out.flags if f.found_by == "tickmarks"], [f.issue for f in out.flags]
+
+
+def test_a_cited_tickmark_that_could_not_be_placed_is_flagged_high(tmp_path: Path):
+    # "See TM1." stays in the text, but the value is not on the page and the
+    # second look finds nothing either.
+    _py, out, _s = _run(tmp_path, stub=Stub(anchor="99,999.99", relocate_answer=""))
+    hits = [f for f in out.flags if f.found_by == "tickmarks"]
+    assert hits and hits[0].severity == "high" and "TM1" in hits[0].issue
+
+
+def test_a_second_look_recovers_a_value_written_differently(tmp_path: Path):
+    # Asked for "14945.60"; the page says "14,945.60". The second look reads
+    # the page lines and returns the exact text, and the tickmark is placed.
+    _py, out, stub = _run(tmp_path, stub=Stub(anchor="14945.6O", relocate_answer="14,945.60"))
+    assert any("second look" in n for n in out.notes)
+    assert not [f for f in out.flags if f.found_by == "tickmarks"]
+    assert any("VALUE WANTED: 14945.6O" in p for p in stub.prompts)
+
+
+def test_the_pys_cited_marks_are_read_from_the_py_whatever_their_style(tmp_path: Path):
+    from agent.mirror.verify import py_cited_labels
+
+    py = make_py(tmp_path)
+    work = tmp_path / "w"
+    ox.extract_template(str(py), str(work))
+    # TextBox 4 says "TM1" and TextBox 2 cites it ("See TM1.") -- found from
+    # the PY's own text, with no list of tickmark styles.
+    assert py_cited_labels(build_inventory(str(work)).tabs) == {"TM1"}
+
+
+def test_citations_are_matched_as_whole_tokens():
+    from agent.mirror.verify import _cites
+
+    assert _cites("See TM 2 and Note.", "TM 2") and _cites("Refer to TM2.", "TM2")
+    assert not _cites("See TM 22.", "TM 2") and not _cites("ATM2X", "TM2")
+    # Marks keep their capitals; ordinary words do not cite them.
+    assert not _cites("a credit memo was issued", "A") and _cites("A - invoice agrees", "A")

@@ -64,6 +64,18 @@ CY exhibits with no PY picture go in extra_exhibits.
 CELLS: update cells that state PY facts (sign-offs, dates, amounts, results).
 Formula cells are read-only.
 
+TICKMARKS: a tickmark is a mark on the evidence (in whatever style the PY uses
+-- "TM 2", "A", "^", a tick) that text refers to. List every tickmark you use:
+{"label": "<as written on the mark>", "element": "<id of the label element>",
+ "box": "<id of the outline around the value, or null>", "marks": "<what value
+ it marks, e.g. approval date 06/20/2026 on X2>", "referenced_by": ["<ids of text
+ elements and/or cell refs whose text cites it>"]}.
+Every tickmark cited in any text MUST be placed on the CY evidence (place its
+label and its box), on the value the citing sentence is about. Never cite a
+tickmark you did not place. If the CY evidence does not show the value, remove
+the tickmark AND rewrite the citing sentence the way the PY words a missing or
+differing item.
+
 SUPPORT: for every PY document on this tab (each picture, embedded file, group
 of screenshots, pasted evidence table), say whether CY has the same kind of
 document: {"py_ref": "<id or 'cells'>", "py_document": "<what it is>",
@@ -75,8 +87,19 @@ Reply with JSON only:
  "pictures": [{"id": "...", "exhibit": "X1" or null, "crop": {"from": "...", "to": "..."} or null}],
  "extra_exhibits": ["X4"],
  "cells": [{"ref": "B5", "action": "keep|replace|clear", "value": "..."}],
+ "tickmarks": [...],
  "support": [...],
  "notes": ["anything a reviewer must know"]}
+"""
+
+
+RELOCATE_SYSTEM = """\
+A tickmark has to be drawn around a value on a scanned document page. The
+exact text asked for was not found by text recognition. You get the value
+wanted and the page's recognised text lines (which may contain OCR errors).
+Reply with JSON only: {"text": "<the value exactly as it appears in the
+lines>"} -- copied character for character from one line, one value only --
+or {"text": ""} if the value is not on this page.
 """
 
 
@@ -106,6 +129,7 @@ class TabPlan:
     extra_exhibits: list[str] = field(default_factory=list)
     cells: dict[str, dict] = field(default_factory=dict)
     support: list[dict] = field(default_factory=list)
+    tickmarks: list[dict] = field(default_factory=list)       # {label, element, box, marks, referenced_by}
     notes: list[str] = field(default_factory=list)
     unaddressed: list[str] = field(default_factory=list)      # element ids the model skipped
 
@@ -311,6 +335,20 @@ def validate(raw: dict, tab: TabInventory, exhibit_ids: set[str], *, error: str 
             action = str(entry.get("action", "keep")).lower()
             if action in ("replace", "clear"):
                 plan.cells[ref] = {"action": action, "value": entry.get("value")}
+
+    all_ids = {i.id for i in tab.items}
+    for entry in raw.get("tickmarks", []) or []:
+        if not isinstance(entry, dict) or not str(entry.get("label", "")).strip():
+            continue
+        element = str(entry.get("element", ""))
+        plan.tickmarks.append({
+            "label": str(entry["label"]).strip(),
+            "element": element if element in all_ids else "",
+            "box": str(entry.get("box") or "") if str(entry.get("box") or "") in all_ids else "",
+            "marks": str(entry.get("marks", ""))[:160],
+            "referenced_by": [str(r) for r in entry.get("referenced_by", []) or []
+                              if str(r) in all_ids or re.fullmatch(r"[A-Z]+\d+", str(r))],
+        })
 
     for entry in raw.get("support", []) or []:
         if isinstance(entry, dict) and entry.get("py_document"):

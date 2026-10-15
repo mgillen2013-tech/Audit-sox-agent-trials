@@ -31,6 +31,10 @@ class ApplyReport:
     notes: list[str] = field(default_factory=list)
     # (item id, PY text, CY text, PY lead-ins, CY lead-ins) for verification
     text_changes: list[tuple] = field(default_factory=list)
+    # Where each element ended up: placed | kept | removed | unplaced
+    status: dict[str, str] = field(default_factory=dict)
+    # For placed elements: what they were placed on ({"exhibit", "anchor"} / {"heading"} / {"beside"})
+    placed_on: dict[str, dict] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +317,17 @@ def _locate(placed: PlacedExhibit, anchor: str) -> Slot | None:
     return None
 
 
+def _ocr_lines(words: list) -> list[str]:
+    """OCR words regrouped into reading-order lines, for a second look."""
+    rows: list[list] = []
+    for w in sorted(words, key=lambda w: (w.top, w.left)):
+        if rows and abs(rows[-1][0].top - w.top) <= max(4, w.height // 2):
+            rows[-1].append(w)
+        else:
+            rows.append([w])
+    return [" ".join(x.text for x in sorted(r, key=lambda w: w.left)) for r in rows]
+
+
 def _with_flips(xml: str, flip_h: bool, flip_v: bool) -> str:
     def fix(m: re.Match) -> str:
         tag = re.sub(r'\sflip[HV]="[^"]*"', "", m.group(0))
@@ -329,6 +344,7 @@ def apply_tab(
     support_dir: str,
     *,
     data_row_cell_box,   # (heading) -> Slot | None
+    relocate=None,       # (exhibit, anchor, page lines) -> better anchor | None
 ) -> ApplyReport:
     """Carry out the model's decisions for one tab's drawing. Nothing here
     decides what an element is; an element the plan does not mention is
@@ -446,6 +462,7 @@ def apply_tab(
             report.text_changes.append((eid, item.text, "" if d["action"] == "remove" else item.text,
                                         _labels(item, tab), _labels(item, tab)))
         body[eid] = xml_
+        report.status.setdefault(eid, {"remove": "removed", "place": "pending"}.get(d["action"], "kept"))
         if d["action"] == "remove":
             final[eid] = ""
             report.removed.append(f"{item.kind} {item.name!r}")
@@ -464,6 +481,18 @@ def apply_tab(
             target: Slot | None = None
             if "exhibit" in on:
                 hit = _locate(placed[on["exhibit"]], on["anchor"]) if on["exhibit"] in placed else None
+                if hit is None and relocate is not None and on["exhibit"] in placed:
+                    # A second look: the page's own words, and the value
+                    # wanted -- which exact text on this page is it?
+                    px = placed[on["exhibit"]]
+                    lines = _ocr_lines(px.words or [])
+                    better = relocate(px.exhibit, on["anchor"], lines)
+                    if better and better != on["anchor"]:
+                        hit = _locate(px, better)
+                        if hit is not None:
+                            report.notes.append(f"{item.kind} {item.text[:12] or item.name!r}: placed on {better!r} "
+                                                f"(a second look; first asked for {on['anchor']!r})")
+                            on = {**on, "anchor": better}
                 if hit is not None:
                     pad = 45_720
                     rect = Slot(hit.x - pad, hit.y - pad, hit.cx + 2 * pad, hit.cy + 2 * pad)
@@ -476,16 +505,25 @@ def apply_tab(
                 other = on["beside"]
                 if other in pending:
                     continue  # wait for it
-                ref_new = new_box.get(other, by_id[other].box if other in by_id else None)
+                # Beside something that was removed or could not be placed is
+                # nowhere: drawing it at the other element's OLD position put a
+                # label on last year's spot and counted it as placed.
+                if report.status.get(other) in ("removed", "unplaced"):
+                    ref_new = None
+                else:
+                    ref_new = new_box.get(other, by_id[other].box if other in by_id else None)
                 if ref_new is not None:
                     target = _label_spot(item.box, by_id[other].box, ref_new)
             pending.pop(eid)
             if target is None:
                 final[eid] = ""
+                report.status[eid] = "unplaced"
                 report.unplaced.append(
                     f"{item.kind} {item.text[:20] or item.name!r}: target {on} not found on the CY evidence, so it was removed")
                 continue
             new_box[eid] = target
+            report.status[eid] = "placed"
+            report.placed_on[eid] = on
             final[eid] = _absolute(body.get(eid, anchor_of(item)), target)
     for eid in pending:  # circular "beside" references
         report.unplaced.append(f"element {eid}: placed beside an element that was never placed; left where it was")

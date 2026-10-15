@@ -26,7 +26,7 @@ from agent.mirror.apply import (
 )
 from agent.mirror.facts import selection_facts
 from agent.mirror.inventory import Inventory, TabInventory, build_inventory
-from agent.mirror.rewrite import Exhibit, SelectionFacts, call_model, tab_prompt, validate
+from agent.mirror.rewrite import RELOCATE_SYSTEM, Exhibit, SelectionFacts, call_model, tab_prompt, validate
 from agent.mirror.structure import Structure, read_structure
 from agent.ooxml import imaging
 from agent.ooxml import ooxml_utils as ox
@@ -341,6 +341,51 @@ def _cy_text_locations(work: str, tabs: set[str]) -> list[tuple[str, str, str, b
     return out
 
 
+def kind_is_label(text: str, labels: set[str]) -> bool:
+    """A text that IS a tickmark label (the mark itself), not text citing one."""
+    return re.sub(r"\s+", " ", (text or "").strip()) in labels
+
+
+def _collect_tickmarks(tab: TabInventory, plan, report: ApplyReport, exhibits: list[Exhibit],
+                       declared: list, placed_labels: dict, tick_lines: dict) -> None:
+    """Where this tab's tickmark labels ended up, and a line per declared
+    tickmark for the final review (label -> value placed on -> citing text)."""
+    pictures = tab.by_kind("picture")
+    files = {x.id: f"{x.source_file} p.{x.page + 1}" for x in exhibits}
+    for item in tab.items:
+        if item.kind != "text":
+            continue
+        d = plan.elements.get(item.id, {})
+        text = (re.sub(r"</?s\d+>", "", " ".join(d["paragraphs"])) if d.get("paragraphs") else item.text).strip()
+        if not text or len(text) > 12:
+            continue
+        status = report.status.get(item.id, "kept")
+        on_picture = any(p.box.x <= item.box.x + item.box.cx / 2 <= p.box.right
+                         and p.box.y <= item.box.y + item.box.cy / 2 <= p.box.bottom for p in pictures)
+        if status == "placed":
+            on = report.placed_on.get(item.id, {})
+            where = (f"{on.get('anchor')!r} on {files.get(on.get('exhibit'), on.get('exhibit'))}" if "exhibit" in on
+                     else f"data row '{on.get('heading')}'" if "heading" in on else "beside another mark")
+        elif status == "kept" and not on_picture:
+            where = "kept at its PY position on the cell grid"
+        else:
+            continue
+        placed_labels.setdefault(re.sub(r"\s+", " ", text), []).append((tab.name, where))
+    texts = {i.id: i.text for i in tab.items}
+    for t in plan.tickmarks:
+        declared.append((tab.name, t))
+        on = report.placed_on.get(t["element"], {})
+        where = (f"{on.get('anchor')!r} on {files.get(on.get('exhibit'), on.get('exhibit'))}" if "exhibit" in on
+                 else report.status.get(t["element"], "not placed"))
+        citing = []
+        for r in t.get("referenced_by", []):
+            d = plan.elements.get(r, {})
+            citing.append(re.sub(r"</?s\d+>", "", " ".join(d["paragraphs"]))[:200] if d.get("paragraphs")
+                          else (texts.get(r) or (plan.cells.get(r, {}).get("value") or r))[:200])
+        tick_lines.setdefault(tab.name, []).append(
+            f"{t['label']}: placed on {where}; said to mark {t.get('marks', '')!r}; cited by {citing}")
+
+
 def mirror_workpaper(
     spec: dict[str, Any],
     results: dict[str, dict],
@@ -358,6 +403,9 @@ def mirror_workpaper(
 ) -> MirrorOutcome:
     work = str(output_path) + ".mirror"
     ox.extract_template(str(py_path), work)
+    # A pristine read of the PY, for what it cited (tickmark labels) --
+    # the working copy is edited in place.
+    ox.extract_template(str(py_path), str(output_path) + ".pyread")
     _remove_generated_tabs(work)
     inv = build_inventory(work)
     facts = selection_facts(results, spec, manifests, support_dir)
@@ -408,8 +456,20 @@ def mirror_workpaper(
     edited_tabs: set[str] = set()
     checks: list[tuple[str, list, str]] = []   # (tab, text changes, facts) for the final model pass
 
+    def relocate(exhibit: Exhibit, wanted: str, lines: list[str]) -> str | None:
+        """A second look (short answer, cheap): which exact text on this
+        page is the value the tickmark was meant for?"""
+        if not lines:
+            return None
+        raw, err = call_model(client, model,
+                              f"VALUE WANTED: {wanted}\nDOCUMENT: {exhibit.source_file} p.{exhibit.page + 1}\n"
+                              "PAGE TEXT LINES:\n" + "\n".join(lines[:120]),
+                              ledger=ledger, label="tickmark second look", system=RELOCATE_SYSTEM, max_tokens=200)
+        text = str(raw.get("text", "")).strip() if not err else ""
+        return text or None
+
     def edit(tab: TabInventory, purpose: str, f: SelectionFacts | None, exhibits: list[Exhibit],
-             data_row: int | None, header_row: int | None, header: dict[str, str]) -> None:
+             data_row: int | None, header_row: int | None, header: dict[str, str]):
         g = _grid(work, tab)
         pic_notes, marks, _ev = _py_reading(tab, g)
 
@@ -430,7 +490,8 @@ def mirror_workpaper(
         plan = validate(raw, tab, {x.id for x in exhibits}, error=err)
         report = ApplyReport()
         if tab.drawing_part:
-            report = apply_tab(work, tab, plan, {x.id: x for x in exhibits}, str(support_dir), data_row_cell_box=cell_box)
+            report = apply_tab(work, tab, plan, {x.id: x for x in exhibits}, str(support_dir),
+                               data_row_cell_box=cell_box, relocate=relocate)
         sheet_path = os.path.join(work, "xl", "worksheets", f"sheet{tab.sheet_num}.xml")
         if plan.cells:
             set_cells(sheet_path, {ref: (None if e["action"] == "clear" else e.get("value"))
@@ -452,10 +513,15 @@ def mirror_workpaper(
                                  "cy": f"{x.source_file} p.{x.page + 1}" if x else ""})
         checks.append((tab.name, report.text_changes, "\n".join(_facts_lines(f, facts, spec))))
         edited_tabs.add(tab.name)
+        return plan, report
 
     # --- 3/4. selection tabs ---
+    groups_done: list[tuple[str, list[str], list, dict]] = []   # (selection, tabs, declared, placed labels)
+    tick_lines: dict[str, list[str]] = {}
     for i, f in enumerate(facts):
         group = layout[i] if i < len(layout) else []
+        declared: list[tuple[str, dict]] = []
+        placed_labels: dict[str, list[tuple[str, str]]] = {}
         for j, (cy_name, py_name) in enumerate(group):
             tab = by_name[cy_name]
             rows = structure.rows.get(py_name)
@@ -465,7 +531,9 @@ def mirror_workpaper(
             others = [n for n, _p in group if n != cy_name]
             purpose = (f"documents CY selection {f.sample_id}"
                        + (f" (tab {j + 1} of {len(group)} for this selection; the others: {others})" if len(group) > 1 else ""))
-            edit(tab, purpose, f, f.exhibits, data_row, header_row, header)
+            plan, report = edit(tab, purpose, f, f.exhibits, data_row, header_row, header)
+            _collect_tickmarks(tab, plan, report, f.exhibits, declared, placed_labels, tick_lines)
+        groups_done.append((f.sample_id, [n for n, _p in group], declared, placed_labels))
 
     # --- 4. tabs for the whole control (lead sheets, conclusions) ---
     all_exhibits = {x.source_file + str(x.page): x for f in facts for x in f.exhibits}
@@ -506,10 +574,21 @@ def mirror_workpaper(
     locations = _cy_text_locations(work, edited_tabs)
     flags.extend(verify.leftover_scan(py_fact_list, locations, cy_fact_text, common))
     candidates = verify.name_hits(py_name_candidates, locations, cy_fact_text)
+    # Tickmarks: cited in text <-> placed on evidence, across each selection's tabs.
+    py_labels = verify.py_cited_labels([t for t in build_inventory(str(output_path) + ".pyread").tabs]) \
+        if os.path.isdir(str(output_path) + ".pyread") else set()
+    for sel, tabs_, declared, placed_labels in groups_done:
+        labels = {re.sub(r"\s+", " ", x.strip()) for x in py_labels} | \
+                 {re.sub(r"\s+", " ", t["label"].strip()) for _t, t in declared}
+        texts = [(tab, where, text, kind_is_label(text, labels)) for tab, where, text, _k in
+                 _cy_text_locations(work, set(tabs_))]
+        flags.extend(verify.tickmark_checks(sel, py_labels, declared, placed_labels, texts))
+
     for tab_name, changes, facts_text in checks:
         if run_model_check:
             flags.extend(verify.model_check(client, model, tab_name, changes, facts_text, ledger=ledger,
-                                            name_candidates=candidates.get(tab_name)))
+                                            name_candidates=candidates.get(tab_name),
+                                            tickmarks=tick_lines.get(tab_name)))
         elif candidates.get(tab_name):
             flags.extend(verify.CheckFlag("low", tab_name, "-", f"possible PY name {n!r} in CY text -- check",
                                           "leftovers") for n in candidates[tab_name])

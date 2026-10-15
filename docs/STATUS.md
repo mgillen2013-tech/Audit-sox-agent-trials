@@ -98,6 +98,9 @@ added -- spend should go where it buys accuracy.
 - Next: work from the real output's **Mirror Check** and **Support Check**
   tabs. Each flag that recurs is a class of problem -- fix it in the base
   (see "How bugs are fixed"), never for the one control.
+- Tickmark alignment added: a mark cited in text must be on the CY
+  evidence (and on the value the text means); see docs/mirror_engine.md.
+  Proven on the scripted stand-in only -- check it on the next real run.
 - Not yet seen: a PY with its lead sheet in cells, or tickmarks typed into
   cells (Wingdings ticks). Ask for one.
 - Visual check in Excel is the user's -- this container cannot open xlsx.
