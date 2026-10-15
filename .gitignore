@@ -20,3 +20,6 @@ __pycache__/
 # ...with the deliberate exception of the PowerPoint template the original
 # report generator ships with, which contains no client data.
 !template.pptx
+
+# The launcher marks a folder as set up after its first run.
+.installed

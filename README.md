@@ -12,6 +12,13 @@ tied to a legend.
 
 ## Running it
 
+On Windows: double-click **`Start CY Testing Agent.bat`** in the unzipped
+folder. The first time, it installs what the app needs (a few minutes);
+after that it just starts the app in your browser. It runs on your
+computer only. Close the black window to stop it.
+
+Or by hand:
+
 ```
 pip install -r requirements.txt
 python -m streamlit run cy_testing_app.py --server.address localhost
