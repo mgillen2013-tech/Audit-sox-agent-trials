@@ -15,12 +15,15 @@ if not exist "cy_testing_app.py" goto :not_unzipped
 where python >nul 2>nul
 if errorlevel 1 goto :no_python
 
-rem First run in a newly unzipped folder: install what the app needs.
-if exist ".installed" goto :start
-echo Installing what the app needs - first run only, this can take a few minutes...
+rem Install what the app needs: on the first run in a folder, and again
+rem whenever an update adds something (".installed" keeps a copy of the
+rem list that was last installed).
+fc /b requirements.txt ".installed" >nul 2>nul
+if not errorlevel 1 goto :start
+echo Installing what the app needs - this can take a few minutes...
 python -m pip install -r requirements.txt
 if errorlevel 1 goto :install_failed
-echo done> ".installed"
+copy /y requirements.txt ".installed" >nul
 
 :start
 echo Starting the CY Testing Agent - your browser will open in a moment.

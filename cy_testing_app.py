@@ -52,6 +52,7 @@ from anthropic import AnthropicFoundry
 from agent.costs import TokenLedger, prices_for
 from agent.intake import build_manifest_from_any_columns, read_excel_rows, split_test_steps
 from agent.loop import DEFAULT_MODEL, MAX_TOOL_ITERATIONS, MAX_TOTAL_TOKENS
+from agent.extraction.email_convert import expand_emails
 from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
 from agent.build_cy_workpaper import build_cy_workpaper, check_py_template
@@ -346,7 +347,9 @@ if py_testing_file is not None:
             "Fix: upload the original prior-year workpaper (.xlsx) instead."
         )
 cy_support_files = st.file_uploader(
-    "CY support evidence (one or more)", type=["pdf", "xlsx", "xls", "xlsm"], accept_multiple_files=True
+    "CY support evidence (one or more)", type=["pdf", "xlsx", "xls", "xlsm", "msg", "eml"],
+    accept_multiple_files=True,
+    help="Emails (.msg from Outlook, or .eml) are read with their attachments.",
 )
 ocr_scanned_pages = st.checkbox(
     "Read scanned/image-only pages with vision OCR",
@@ -669,6 +672,11 @@ if run_clicked:
             (tmp_dir / py_testing_file.name).write_bytes(py_testing_file.getvalue())
             for f in cy_support_files:
                 (tmp_dir / f.name).write_bytes(f.getvalue())
+            # Each email becomes a PDF plus its readable attachments, so
+            # every later step reads it like any other support file.
+            support_paths, email_notes = expand_emails([tmp_dir / f.name for f in cy_support_files])
+            for note in email_notes:
+                st.warning(note)
             pop_sample_path = tmp_dir / pop_sample_file.name
             pop_sample_path.write_bytes(pop_sample_file.getvalue())
 
@@ -705,7 +713,7 @@ if run_clicked:
                 "control_objective_ref": control_objective_ref,
                 "control_objective_text": control_objective_text,
                 "py_testing_file": py_testing_file.name,
-                "cy_support_files": [f.name for f in cy_support_files] + [pop_sample_file.name],
+                "cy_support_files": [p.name for p in support_paths] + [pop_sample_file.name],
                 "test_steps": [{"test_step_id": s["test_step_id"], "test_step_text": s["test_step_text"]} for s in test_steps],
             }
             client = AnthropicFoundry(api_key=api_key, resource=resource)

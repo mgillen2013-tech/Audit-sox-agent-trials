@@ -80,6 +80,17 @@ Format per finding: **what we saw** -> **what it means in general** ->
   rows, filling its last row first, never on another element), at least two
   across (`continue_grid` in `agent/mirror/apply.py`).
 
+- A fillable PDF form could not be read -> a form keeps its answers in
+  fields, not in the page text, and pages render with those fields blank
+  unless forms are switched on -> field values are read with their printed
+  labels (dynamic XFA forms from their data packet), and every page render
+  goes through one form-aware renderer (`agent/ooxml/imaging.py`).
+- Approvals arrive as emails -> support is not only PDFs and workbooks ->
+  each .msg/.eml is turned into a PDF at upload (headers + body) and its
+  readable attachments become support files of their own
+  (`agent/extraction/email_convert.py`); unreadable attachments are named
+  in a note so the reviewer knows evidence was not seen.
+
 ## Across all four
 
 - The first versions decided structure from tab names and shape text; each

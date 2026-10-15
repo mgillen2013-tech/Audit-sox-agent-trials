@@ -64,13 +64,19 @@ def render_pdf_page(pdf_path: str, page: int = 0, dpi: int = RENDER_DPI) -> Imag
     convention matters because EvidenceImage.pdf_page values written for
     the old code must keep meaning the same page.
     """
-    import pdfplumber
+    import pypdfium2 as pdfium
 
-    with pdfplumber.open(pdf_path) as pdf:
-        # .original, not .annotated: pdfplumber's annotated render draws
-        # its own debug rectangles over detected words, which would be
-        # baked into the evidence image pasted in the workpaper.
-        return pdf.pages[page].to_image(resolution=dpi).original.convert("RGB")
+    # pdfium directly (pdfplumber's renderer is a thin wrapper over it) so
+    # FORMS can be switched on: without init_forms() a fillable PDF renders
+    # with every field blank -- the vendor, amount and approval tick on a
+    # check request simply missing from the exhibit. Every page render in
+    # the project goes through here for that reason.
+    doc = pdfium.PdfDocument(str(pdf_path))
+    try:
+        doc.init_forms()
+        return doc[page].render(scale=dpi / 72, may_draw_forms=True).to_pil().convert("RGB")
+    finally:
+        doc.close()
 
 
 def autocrop(im: Image.Image, pad: int = 10, bg: tuple[int, int, int] = (255, 255, 255)) -> Image.Image:

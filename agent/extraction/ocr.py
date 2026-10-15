@@ -83,11 +83,10 @@ def _downscale(pil: Any) -> bytes:
 
 
 def _render_pdf_page_png(pdf_path: Path, page_num: int) -> bytes:
-    import pdfplumber
+    from agent.ooxml.imaging import render_pdf_page
 
-    with pdfplumber.open(pdf_path) as pdf:
-        page = pdf.pages[page_num - 1]
-        return _downscale(page.to_image(resolution=_OCR_DPI).annotated)
+    # The shared renderer, so filled-in form fields are visible to OCR too.
+    return _downscale(render_pdf_page(str(pdf_path), page=page_num - 1, dpi=_OCR_DPI))
 
 
 def _render_excel_image_png(xlsx_path: Path, sheet_name: str, image_idx: int) -> bytes:

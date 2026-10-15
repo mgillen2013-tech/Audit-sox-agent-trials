@@ -287,3 +287,88 @@ def test_extract_many_renumbers_ids_without_collision(sample_xlsx: Path, native_
     # Original file/location/content is preserved -- only evidence_id changed.
     assert merged[0].source_file == "po_sample.xlsx"
     assert merged[len(solo_excel)].source_file == "gl_export.pdf"
+
+
+# --------------------------------------------------------------------------
+# Fillable (form) PDFs
+# --------------------------------------------------------------------------
+
+
+def _form_pdf(path: Path, *, with_heading: bool = True) -> Path:
+    c = canvas.Canvas(str(path))
+    if with_heading:
+        c.drawString(50, 800, "Check Request")
+    c.drawString(50, 770, "Vendor:")
+    c.acroForm.textfield(name="Text1", x=120, y=760, width=200, height=20, value="Acme Supply Co")
+    c.drawString(50, 730, "Amount:")
+    c.acroForm.textfield(name="Text2", x=120, y=720, width=200, height=20, value="14,945.60")
+    c.drawString(50, 690, "Approved:")
+    c.acroForm.checkbox(name="Check1", x=120, y=685, checked=True)
+    c.acroForm.textfield(name="Blank", x=120, y=650, width=200, height=20, value="")
+    c.save()
+    return path
+
+
+def test_filled_in_form_values_are_read_with_their_printed_labels(tmp_path: Path):
+    # A fillable form keeps its answers in fields, not the page text: the
+    # agent used to see the labels and none of the values.
+    text = extract_pdf(_form_pdf(tmp_path / "form.pdf"))[0].extracted_text
+    assert "Vendor: Acme Supply Co" in text
+    assert "Amount: 14,945.60" in text
+    assert "Approved: checked" in text
+    assert "Blank" not in text  # empty fields add nothing
+
+
+def test_a_form_page_with_little_printed_text_is_not_mistaken_for_a_scan(tmp_path: Path):
+    items = extract_pdf(_form_pdf(tmp_path / "form.pdf", with_heading=False))
+    assert items[0].source_type == "pdf_text"
+    assert "Acme Supply Co" in items[0].extracted_text
+
+
+def test_form_pages_render_with_their_values_showing(tmp_path: Path):
+    # The exhibit image is rendered with forms on; without it every field
+    # came out blank in the workpaper.
+    import pdfplumber
+    from PIL import ImageChops
+
+    from agent.ooxml.imaging import render_pdf_page
+
+    path = _form_pdf(tmp_path / "form.pdf")
+    ours = render_pdf_page(str(path), 0, dpi=72)
+    with pdfplumber.open(path) as pdf:
+        without_forms = pdf.pages[0].to_image(resolution=72).original.convert("RGB")
+    field_area = (120, 792 - 780, 320, 792 - 720)  # where the vendor/amount fields sit
+    assert ImageChops.difference(ours.crop(field_area), without_forms.crop(field_area)).getbbox()
+
+
+def _xfa_pdf(path: Path, datasets_xml: bytes) -> Path:
+    """A minimal dynamic (XFA) form: one blank page, answers in the data packet."""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        b"<< /Fields [] /XFA [(datasets) 5 0 R] >>",
+        b"<< /Length %d >>\nstream\n" % len(datasets_xml) + datasets_xml + b"\nendstream",
+    ]
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for i, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    path.write_bytes(bytes(out))
+    return path
+
+
+def test_dynamic_xfa_form_answers_are_read_from_the_form_data(tmp_path: Path):
+    xml = (b'<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data>'
+           b"<form1><VendorName>Acme Supply Co</VendorName><Amount>14945.60</Amount>"
+           b"<ApprovedBy>M. Chen</ApprovedBy><Empty/></form1></xfa:data></xfa:datasets>")
+    items = extract_pdf(_xfa_pdf(tmp_path / "xfa.pdf", xml))
+    data = next(i for i in items if "(form data)" in i.location)
+    assert "VendorName: Acme Supply Co" in data.extracted_text
+    assert "ApprovedBy: M. Chen" in data.extracted_text
+    assert "Empty" not in data.extracted_text

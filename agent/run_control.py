@@ -277,6 +277,13 @@ def main() -> None:
     spec_path = Path(sys.argv[1])
     base_dir = spec_path.parent
     spec = json.loads(spec_path.read_text())
+    # Emails -> PDF + attachments, exactly as the app does on upload.
+    from agent.extraction.email_convert import expand_emails
+
+    support, notes = expand_emails([base_dir / f for f in spec["cy_support_files"]])
+    spec["cy_support_files"] = [str(p.relative_to(base_dir)) for p in support]
+    for note in notes:
+        print(f"Note: {note}")
 
     from anthropic import AnthropicFoundry  # imported here so tests don't need Foundry creds to import this module
 

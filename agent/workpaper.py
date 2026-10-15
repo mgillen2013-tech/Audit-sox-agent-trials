@@ -238,11 +238,13 @@ def _render_pdf_exhibit(
     """
     import pdfplumber
 
+    from agent.ooxml.imaging import render_pdf_page
     from agent.wordboxes import find_text_boxes, ocr_line_boxes
 
+    # The shared renderer, so filled-in form fields show on the exhibit.
+    page_image = render_pdf_page(str(pdf_path), page=page_num - 1, dpi=_PDF_RENDER_DPI)
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[page_num - 1]
-        pim = page.to_image(resolution=_PDF_RENDER_DPI)
         scale = _PDF_RENDER_DPI / 72.0
         # OCR of this page, read at most ONCE and reused by every mark on
         # it. OCR (~1.3s) dwarfs rendering (~0.06s), so doing it per mark
@@ -261,7 +263,7 @@ def _render_pdf_exhibit(
                 # at nothing. Pixel boxes convert back to PDF points so
                 # everything is positioned through the same path below.
                 if ocr_lines is None:
-                    ocr_lines = ocr_line_boxes(pim.original.convert("RGB"))
+                    ocr_lines = ocr_line_boxes(page_image)
                 rects = [
                     (x0 / scale, y0 / scale, x1 / scale, y1 / scale)
                     for x0, y0, x1, y1 in find_text_boxes(ocr_lines, quote)
@@ -269,7 +271,7 @@ def _render_pdf_exhibit(
 
             located.append((letter, [_pad_rect(r, page.width, page.height) for r in rects]))
 
-        pil = pim.original.convert("RGB")
+        pil = page_image
 
     ratio = 1.0
     if pil.width > _MAX_EXHIBIT_WIDTH_PX:
