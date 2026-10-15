@@ -3,6 +3,23 @@ rem Double-click to start the CY Testing Agent. Runs on this computer only
 rem (localhost) -- nobody else can reach it. Close this window to stop it.
 cd /d "%~dp0"
 
+rem It must sit in the unzipped project folder. Opened from inside the ZIP
+rem (Windows lets you browse into one), it is copied alone to a temp folder
+rem and cannot find the app.
+if not exist "cy_testing_app.py" (
+    echo This launcher cannot find the app next to it.
+    echo.
+    echo It must be run from the UNZIPPED project folder:
+    echo   1. Right-click the downloaded ZIP and choose "Extract All...", then Extract.
+    echo   2. Open the extracted folder - it should contain cy_testing_app.py,
+    echo      requirements.txt and an "agent" folder.
+    echo   3. Double-click "Start CY Testing Agent.bat" in that folder.
+    echo.
+    echo This window is running from: %CD%
+    pause
+    exit /b 1
+)
+
 where python >nul 2>nul
 if errorlevel 1 (
     echo Python was not found. Install Python 3.11+ from python.org and tick
