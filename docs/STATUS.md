@@ -47,6 +47,12 @@ of bug, and is fixed at the class:
   we have never seen? If it names a specific tab, word, control or layout,
   it is the wrong fix.
 
+## Findings from examples
+
+Kept separately in `docs/example_findings.md` -- what each real example
+taught us, as general lessons, never as code aimed at that example. Add to
+it after every run on a new example.
+
 ## How it works now
 
 `agent/mirror/` (design: `docs/mirror_engine.md`):
