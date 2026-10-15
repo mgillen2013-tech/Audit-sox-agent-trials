@@ -58,7 +58,7 @@ it after every run on a new example.
 `agent/mirror/` (design: `docs/mirror_engine.md`):
 structure call (model reads the PY's organisation) -> tabs laid out the
 PY's way, one group of tabs per selection -> per-tab edit call (model
-decides every element; code applies) -> Mirror Check + Support Check tabs
+decides every element; code applies) -> mirror check + support check, shown in the app (not in the workbook)
 (leftover scan over every cell and shape, support comparison, final model
 pass). Fallbacks: layout builder (`agent/ooxml/`), then standalone layout.
 
@@ -114,8 +114,8 @@ added -- spend should go where it buys accuracy.
   earlier builders. This is now the base to build on, not replace.
 - Before that it was trialled with a scripted stand-in on four real PYs
   (CI.9, MAR.17, RR.134, AP.156 -- kept out of the repo).
-- Next: work from the real output's **Mirror Check** and **Support Check**
-  tabs. Each flag that recurs is a class of problem -- fix it in the base
+- Next: work from a real run's **mirror check** and **support check**
+  (shown in the app after the run; no longer tabs in the workbook). Each flag that recurs is a class of problem -- fix it in the base
   (see "How bugs are fixed"), never for the one control.
 - Tickmark alignment added: a mark cited in text must be on the CY
   evidence (and on the value the text means); see docs/mirror_engine.md.

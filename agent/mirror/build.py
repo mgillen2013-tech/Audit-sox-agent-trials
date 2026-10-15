@@ -32,7 +32,7 @@ from agent.ooxml import imaging
 from agent.ooxml import ooxml_utils as ox
 from agent.ooxml.layout import Slot, _Grid, _row_heights
 from agent.ooxml.sample_grid import _match, plan_grid
-from agent.ooxml.summary_sheet import DRAFT_BANNER, GENERATED_HEADINGS, add_summary_sheet, add_table_sheet
+from agent.ooxml.summary_sheet import DRAFT_BANNER, GENERATED_HEADINGS, add_summary_sheet
 
 MIRROR_CHECK_COLUMNS = [("A", "Severity", 10), ("B", "Tab", 16), ("C", "Item", 18),
                         ("D", "Issue", 90), ("E", "Found by", 14)]
@@ -609,18 +609,11 @@ def mirror_workpaper(
 
     if summary_rows_fn is not None:
         add_summary_sheet(work, summary_rows_fn(tab_names), sst)
+    # The checks are returned to the caller (the app shows them on screen),
+    # not written into the workbook: the reviewer asked for the workpaper to
+    # carry only the workpaper. A previous run's check tabs, if this PY is
+    # one, are still recognised and removed (_generated_tabs).
     flags = verify.sort_flags(flags)
-    rows = [[f.severity.upper(), f.tab, f.item, f.issue, f.found_by] for f in flags] or \
-           [["OK", "-", "-", "No differences from the prior-year layout and wording were found.", "all checks"]]
-    pos = 1 if summary_rows_fn is not None else 0
-    add_table_sheet(work, "Mirror Check", MIRROR_CHECK_COLUMNS, rows, sst, position=pos,
-                    red_rows={i for i, f in enumerate(flags) if f.severity == "high"},
-                    amber_rows={i for i, f in enumerate(flags) if f.severity == "medium"})
-    srows = [[s["match"].upper(), s["tab"], s["py_document"], s.get("cy") or "-", s.get("comment", "")]
-             for s in support_rows] or [["-", "-", "No PY documents were identified on the selection tabs.", "-", ""]]
-    add_table_sheet(work, "Support Check", SUPPORT_CHECK_COLUMNS, srows, sst, position=pos + 1,
-                    red_rows={i for i, s in enumerate(support_rows) if s["match"] == "missing"},
-                    amber_rows={i for i, s in enumerate(support_rows) if s["match"] == "partial"})
     sst.write()
 
     for num in ox.resolve_sheets(work).values():

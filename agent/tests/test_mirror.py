@@ -294,7 +294,7 @@ def test_the_inventory_reads_the_py_grammar(tmp_path: Path):
 def test_the_cy_file_is_the_py_with_only_the_facts_changed(tmp_path: Path):
     py, out, stub = _run(tmp_path)
     wb = openpyxl.load_workbook(out.path)
-    assert wb.sheetnames == ["Mirror Check", "Support Check", "IA Lead", "1"]
+    assert wb.sheetnames == ["IA Lead", "1"]
     sel = wb["1"]
     # Data row: each CY value under its heading; nothing of last year's left.
     assert [c.value for c in sel[1]][:5] == ["Doc Type", "Doc#", "Invoice Date", "Amount", "Customer Name"]
@@ -345,12 +345,12 @@ def test_the_cy_file_is_the_py_with_only_the_facts_changed(tmp_path: Path):
 def test_one_tab_per_selection_never_per_test_step(tmp_path: Path):
     # Three test steps, one selection: ONE tab. A real output made three.
     _py, out, _s = _run(tmp_path, steps=("TS-1", "TS-2", "TS-3"))
-    assert openpyxl.load_workbook(out.path).sheetnames == ["Mirror Check", "Support Check", "IA Lead", "1"]
+    assert openpyxl.load_workbook(out.path).sheetnames == ["IA Lead", "1"]
 
 
 def test_more_selections_than_py_tabs_copy_the_whole_py_tab(tmp_path: Path):
     _py, out, _s = _run(tmp_path, samples=("1", "2"))
-    assert openpyxl.load_workbook(out.path).sheetnames == ["Mirror Check", "Support Check", "IA Lead", "1", "2"]
+    assert openpyxl.load_workbook(out.path).sheetnames == ["IA Lead", "1", "2"]
     work = tmp_path / "w2"
     ox.extract_template(str(out.path), str(work))
     tabs = {t.name: t for t in build_inventory(str(work)).tabs}
@@ -386,8 +386,6 @@ def test_py_facts_left_in_cy_text_are_flagged(tmp_path: Path):
     # final model pass judges -- the stand-in passes everything, so it shows
     # here only as the amount.
     assert "17025.4" in issues
-    sheet = openpyxl.load_workbook(out.path)["Mirror Check"]
-    assert any("17025.4" in str(c.value) for row in sheet.iter_rows() for c in row)
 
 
 def test_a_listing_matching_no_py_heading_leaves_the_py_headings_alone(tmp_path: Path):
@@ -460,8 +458,15 @@ def test_an_unusable_structure_reading_falls_back_and_says_so(tmp_path: Path):
 def test_the_support_check_lists_each_py_document_against_cy(tmp_path: Path):
     _py, out, _s = _run(tmp_path)
     assert {s["py_document"] for s in out.support} == {"invoice", "approval"}
-    sheet = openpyxl.load_workbook(out.path)["Support Check"]
-    assert [c.value for c in sheet[1]][:4] == ["Match", "Tab", "PY document", "CY counterpart"]
+
+
+def test_the_checks_are_reported_but_not_written_into_the_workpaper(tmp_path: Path):
+    # The reviewer asked for the workpaper to carry only the workpaper: the
+    # checks come back to the app, and no check tab is added to the file.
+    _py, out, _s = _run(tmp_path, listing={"Foo": "1", "Bar": "2"})
+    assert out.flags and out.support
+    names = openpyxl.load_workbook(out.path).sheetnames
+    assert "Mirror Check" not in names and "Support Check" not in names
 
 
 def test_dates_are_found_in_any_format():

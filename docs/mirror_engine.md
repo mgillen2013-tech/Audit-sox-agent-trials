@@ -66,7 +66,8 @@ boxes without labels, a lead sheet in cells).
    shapes are moved; arrows re-drawn; cells take the kind of value the PY
    cell held. Each CY selection gets the same group of tabs a PY selection
    had. An uploaded CY population is written under the PY's headings.
-5. **verify.py** -- the **Mirror Check** and **Support Check** tabs:
+5. **verify.py** -- the **mirror check** and **support check** (shown in the app
+   after a run; not written into the workbook, at the reviewer's request):
    - structure: every PY text element accounted for; lead-ins the PY set
      apart by FORMAT (bold "Test Step 1:") kept
    - leftovers, the safety net: every number and date (any format) from the

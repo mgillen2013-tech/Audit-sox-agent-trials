@@ -83,7 +83,8 @@ was used and why (`WorkpaperOutcome.mirrored_py`, `fallback_reason`):
    - `inventory.py`: lists every element as it physically is.
    - `rewrite.py`: the model decides each element and compares support.
    - `apply.py`: carries out those decisions.
-   - `verify.py`: writes the Mirror Check and Support Check tabs.
+   - `verify.py`: the mirror check and support check, shown in the app
+     (not written into the workbook).
 
    It needs a client, so it runs only when one is passed.
 2. **`agent/ooxml/` + `render_bridge.py`:** the older layout builder, which

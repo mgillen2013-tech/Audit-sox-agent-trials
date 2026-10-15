@@ -813,16 +813,15 @@ if _out:
             ),
         )
         # The mirror check: everything in the CY file that differs from the
-        # PY beyond the facts. Also written to the "Mirror Check" tab.
+        # PY beyond the facts. Shown here only -- not written into the workbook.
         _flags = _out.get("mirror_flags") or []
         if _out.get("wp_mirrored") and "mirror_flags" in _out:
             _high = [f for f in _flags if f["severity"] == "high"]
             if _high:
                 st.error(f"**Mirror check: {len(_high)} item(s) need attention before review** "
-                         f"({len(_flags)} flag(s) in total -- also on the workbook's Mirror Check tab).")
+                         f"({len(_flags)} flag(s) in total).")
             elif _flags:
-                st.warning(f"Mirror check: {len(_flags)} item(s) to look at (none high). "
-                           "Also on the workbook's Mirror Check tab.")
+                st.warning(f"Mirror check: {len(_flags)} item(s) to look at (none high).")
             else:
                 st.success("Mirror check: no differences from the prior-year layout and wording beyond the facts.")
             if _flags:
@@ -832,7 +831,7 @@ if _out:
                     hide_index=True, use_container_width=True,
                 )
         # Does the CY support mirror the PY support? Each PY document against
-        # its CY counterpart. Also on the workbook's Support Check tab.
+        # its CY counterpart. Shown here only -- not written into the workbook.
         _support = _out.get("support_check") or []
         if _support:
             _missing = [s for s in _support if s.get("match") == "missing"]
