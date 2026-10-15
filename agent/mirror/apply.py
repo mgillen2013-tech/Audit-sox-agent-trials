@@ -419,12 +419,10 @@ def apply_tab(
         report.shown.append((exhibit.source_file, exhibit.page))
         new_box[pic.id] = box
 
-    # --- CY exhibits with no PY slot: below everything, the PY's slot size ---
+    # --- CY exhibits with no PY slot: continue the PY's own picture grid ---
     if plan.extra_exhibits:
-        cell_w = sorted(p.box.cx for p in pictures)[len(pictures) // 2] if pictures else int(5.5 * 914_400)
-        cell_h = sorted(p.box.cy for p in pictures)[len(pictures) // 2] if pictures else int(7 * 914_400)
-        across = max(1, len({p.box.x // 914_400 for p in pictures})) if pictures else 2
-        top = max([i.box.bottom for i in tab.items] + [500_000]) + GAP
+        others = [i.box for i in tab.items if i.kind not in ("picture", "frame")]
+        cells = continue_grid([p.box for p in pictures], others, len(plan.extra_exhibits))
         frame_xml = anchor_of(frames[0]) if frames else ""
         pic_xml = anchor_of(pictures[0]) if pictures else ""
         for n, x_id in enumerate(plan.extra_exhibits):
@@ -434,9 +432,9 @@ def apply_tab(
             except Exception as exc:  # noqa: BLE001
                 report.unplaced.append(f"{exhibit.source_file} p.{exhibit.page + 1} could not be read: {exc}")
                 continue
-            row, col = divmod(n, across)
-            w, h = _fit(image.width, image.height, cell_w, cell_h)
-            box = Slot(col * (cell_w + GAP), top + row * (cell_h + GAP), w, h)
+            cell = cells[n]
+            w, h = _fit(image.width, image.height, cell.cx, cell.cy)
+            box = Slot(cell.x, cell.y, w, h)
             rid = _new_media(image)
             if pic_xml:
                 anchor = re.sub(r'r:embed="[^"]*"', f'r:embed="{rid}"', pic_xml, count=1)
@@ -628,6 +626,79 @@ def _label_spot(py_label: Slot, py_box: Slot, new_box: Slot) -> Slot:
     if candidate.overlaps(new_box):
         candidate = Slot(new_box.right + 45_720, new_box.y + (new_box.cy - py_label.cy) // 2, py_label.cx, py_label.cy)
     return candidate
+
+
+def continue_grid(pictures: list[Slot], obstacles: list[Slot], count: int) -> list[Slot]:
+    """Where `count` more exhibits go when the CY has more than the PY had
+    picture slots: in the PY's own grid, never in a column of their own.
+
+    The grid is read from the PY pictures: their typical size, the x
+    positions of their widest row, and their rows. Extra exhibits first
+    fill the free positions of the PY's last row, then start new rows
+    below at the same x positions. A PY that showed one picture per row
+    still gets them side by side -- the next position is one slot to the
+    right -- because stacking every extra page in a single column is the
+    layout no PY uses (it once ran a sample tab 29 inches deep). Nothing is
+    put on top of another element of the tab.
+    """
+    if count <= 0:
+        return []
+    inch = 914_400
+    if pictures:
+        cell_w = sorted(p.cx for p in pictures)[len(pictures) // 2]
+        cell_h = sorted(p.cy for p in pictures)[len(pictures) // 2]
+    else:
+        cell_w, cell_h = int(5.5 * inch), 7 * inch
+
+    # Rows: pictures whose tops are within an inch of each other.
+    bands: list[list[Slot]] = []
+    for s in sorted(pictures, key=lambda s: (s.y, s.x)):
+        if bands and s.y - bands[-1][0].y <= inch:
+            bands[-1].append(s)
+        else:
+            bands.append([s])
+    widest = max(bands, key=len) if bands else []
+    columns = sorted(s.x for s in widest)
+    if len(columns) < 2:
+        start = columns[0] if columns else 0
+        columns = [start, start + cell_w + GAP]
+
+    taken: list[Slot] = list(pictures)
+    cells: list[Slot] = []
+
+    def clear(box: Slot) -> Slot:
+        moved = True
+        while moved:
+            moved = False
+            for other in (*obstacles, *taken):
+                if box.overlaps(other):
+                    box = Slot(box.x, other.bottom + GAP, box.cx, box.cy)
+                    moved = True
+        return box
+
+    # The free positions of the PY's last row, left to right.
+    if bands:
+        last = bands[-1]
+        top = min(s.y for s in last)
+        for x in columns:
+            if len(cells) == count:
+                break
+            if any(s.x < x + cell_w and x < s.right for s in last):
+                continue
+            box = clear(Slot(x, top, cell_w, cell_h))
+            cells.append(box)
+            taken.append(box)
+
+    # Then new rows, each starting below everything already in the grid.
+    while len(cells) < count:
+        top = max([b.bottom for b in taken] + [500_000]) + GAP
+        for x in columns:
+            if len(cells) == count:
+                break
+            box = clear(Slot(x, top, cell_w, cell_h))
+            cells.append(box)
+            taken.append(box)
+    return cells
 
 
 def _overlap(a: Slot, b: Slot) -> float:

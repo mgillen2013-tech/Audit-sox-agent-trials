@@ -72,6 +72,13 @@ Format per finding: **what we saw** -> **what it means in general** ->
   is allowed to -> evidence is added only to tabs where the PY had
   evidence, each CY document is shown once across the workbook, and
   anything on more than one tab is flagged on the Mirror Check.
+- Extra CY support pages (more than the PY had pictures) came out in one
+  long column under the PY's pictures, while the PY had its evidence side
+  by side -> the same bug had been fixed in the older layout builder but
+  came back through the mirror engine's own overflow code -> extra pages
+  now continue the PY's picture grid (its column positions, slot size and
+  rows, filling its last row first, never on another element), at least two
+  across (`continue_grid` in `agent/mirror/apply.py`).
 
 ## Across all four
 

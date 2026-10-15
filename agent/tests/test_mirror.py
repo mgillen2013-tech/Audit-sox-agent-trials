@@ -60,7 +60,7 @@ def _page(path: Path, lines: list[str]) -> Path:
     return path
 
 
-def make_py(tmp: Path) -> Path:
+def make_py(tmp: Path, picture_cells=("A4", "H4")) -> Path:
     """A PY shaped like CI.9: lead tab + tab '1'."""
     wb = openpyxl.Workbook()
     lead = wb.active
@@ -74,8 +74,8 @@ def make_py(tmp: Path) -> Path:
         sel.column_dimensions[c].width = 18
     py_invoice = _page(tmp / "py_invoice.png", ["INVOICE", "Invoice 9578365", "Total 17,025.40"])
     py_approval = _page(tmp / "py_approval.png", ["APPROVAL", "Approved by Ryan Capito", "on 11/04/2025"])
-    sel.add_image(XLImage(str(py_invoice)), "A4")
-    sel.add_image(XLImage(str(py_approval)), "H4")
+    sel.add_image(XLImage(str(py_invoice)), picture_cells[0])
+    sel.add_image(XLImage(str(py_approval)), picture_cells[1])
     path = tmp / "PY.xlsx"
     wb.save(path)
 
@@ -249,8 +249,9 @@ class Stub:
                 "support": support, "tickmarks": tickmarks, "notes": []}
 
 
-def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listing=None, extra_support=()):
-    py = make_py(tmp)
+def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listing=None, extra_support=(),
+         picture_cells=("A4", "H4")):
+    py = make_py(tmp, picture_cells)
     _page(tmp / "cy_invoice.png", ["INVOICE", "Invoice 9850995", "Total 14,945.60"])
     _page(tmp / "cy_approval.png", ["APPROVAL", "Approved by Jane Doe", "on 06/20/2026"])
     results = {s: {"conclusion": _conclusion(s, list(samples)), "audit_log": []} for s in steps}
@@ -577,3 +578,64 @@ def test_each_document_is_shown_once_across_selection_tabs(tmp_path: Path):
     assert one + two == 5, (one, two)
     assert any("already shown on another tab" in n for n in out.notes)
     assert not any(f.found_by == "placement" and "shown on" in f.issue and "IA Lead" in f.tab for f in out.flags)
+
+
+# --- extra CY exhibits follow the PY's grid, never one long column --------
+
+_IN = 914_400
+
+
+def _slot(x, y, w=5, h=6):
+    """A box in inches: left, top, width, height."""
+    from agent.ooxml.layout import Slot
+    return Slot(int(x * _IN), int(y * _IN), int(w * _IN), int(h * _IN))
+
+
+def test_extras_beside_a_single_py_picture_go_side_by_side():
+    # A PY that showed one picture: extra pages used to stack in one column
+    # under it. They go across, starting beside it.
+    from agent.mirror.apply import continue_grid
+
+    cells = continue_grid([_slot(6, 1)], [], 3)
+    assert cells[0].y == _slot(6, 1).y and cells[0].x > _slot(6, 1).x  # beside the PY picture
+    assert len({c.x for c in cells}) == 2  # two columns, not one
+
+
+def test_extras_reuse_the_pys_column_positions():
+    from agent.mirror.apply import continue_grid
+
+    py = [_slot(6, 1), _slot(11.5, 1.3)]  # a row of two, tops not exactly level
+    cells = continue_grid(py, [], 2)
+    assert [c.x for c in cells] == [py[0].x, py[1].x]
+    assert all(c.y > max(p.bottom for p in py) for c in cells)
+
+
+def test_extras_fill_the_free_places_in_the_pys_last_row_first():
+    from agent.mirror.apply import continue_grid
+
+    py = [_slot(0, 1), _slot(5.5, 1), _slot(11, 1), _slot(0, 8)]
+    cells = continue_grid(py, [], 3)
+    assert [(c.x, c.y) for c in cells[:2]] == [(py[1].x, py[3].y), (py[2].x, py[3].y)]
+    assert cells[2].x == py[0].x and cells[2].y > py[3].bottom
+
+
+def test_extras_never_sit_on_another_element():
+    from agent.mirror.apply import continue_grid
+
+    py = [_slot(0, 1), _slot(5.5, 1)]
+    legend = _slot(0, 7.2, 12, 2)  # e.g. a tickmark legend under the pictures
+    cells = continue_grid(py, [legend], 4)
+    assert not any(c.overlaps(legend) or any(c.overlaps(o) for o in cells if o is not c) for c in cells)
+
+
+def test_extra_support_pages_are_laid_out_across_on_a_real_tab(tmp_path: Path):
+    # End to end: a PY with one picture per row, and a model that adds
+    # every extra page to the selection tab. A real run laid those pages out
+    # in a single column; they must come out side by side.
+    _py, out, _s = _run(tmp_path, stub=Stub(paste_everything=True), picture_cells=("A4", "A40"),
+                        extra_support=("cy_remittance.png", "cy_po.png", "cy_receipt.png"))
+    work = tmp_path / "grid_check"
+    ox.extract_template(str(out.path), str(work))
+    tab = next(t for t in build_inventory(str(work)).tabs if t.name == "1")
+    xs = [p.box.x for p in tab.by_kind("picture") if p.box.y > min(q.box.bottom for q in tab.by_kind("picture"))]
+    assert len(set(xs)) >= 2, xs
