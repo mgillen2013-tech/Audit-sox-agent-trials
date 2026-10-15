@@ -278,7 +278,8 @@ def parse_tagged(paragraph: str, valid: set[str], default: str) -> list[tuple[st
 ACTIONS = ("keep", "replace", "remove", "place", "connect")
 
 
-def validate(raw: dict, tab: TabInventory, exhibit_ids: set[str], *, error: str = "") -> TabPlan:
+def validate(raw: dict, tab: TabInventory, exhibit_ids: set[str], *, error: str = "",
+             shown_elsewhere: set[str] = frozenset()) -> TabPlan:
     plan = TabPlan()
     if error:
         plan.notes.append(f"the edit call for this tab failed ({error}); the PY tab was left unchanged")
@@ -324,7 +325,19 @@ def validate(raw: dict, tab: TabInventory, exhibit_ids: set[str], *, error: str 
     for missing in sorted(pic_ids - set(plan.pictures)):
         plan.unaddressed.append(missing)  # a PY picture the model did not decide on: kept, flagged
     used = {p["exhibit"] for p in plan.pictures.values() if p["exhibit"]}
-    plan.extra_exhibits = [x for x in raw.get("extra_exhibits", []) or [] if x in exhibit_ids and x not in used]
+    extras = [x for x in raw.get("extra_exhibits", []) or [] if x in exhibit_ids and x not in used]
+    # Evidence goes only where the PY had evidence: a tab whose PY version
+    # held no pictures (a lead sheet, a conclusion tab) never gains them.
+    # And a document is shown once in the workbook: an extra already shown
+    # on another tab is not pasted again. A real run duplicated the whole
+    # support pack onto the lead sheet.
+    if extras and not pic_ids:
+        plan.notes.append(f"{len(extras)} extra exhibit(s) not added: the PY had no evidence on this tab")
+        extras = []
+    dup = [x for x in extras if x in shown_elsewhere]
+    if dup:
+        plan.notes.append(f"{len(dup)} extra exhibit(s) not added: already shown on another tab")
+    plan.extra_exhibits = [x for x in extras if x not in shown_elsewhere]
 
     for entry in raw.get("cells", []) or []:
         if isinstance(entry, dict) and re.fullmatch(r"[A-Z]+\d+", str(entry.get("ref", ""))):

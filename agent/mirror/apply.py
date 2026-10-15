@@ -35,6 +35,8 @@ class ApplyReport:
     status: dict[str, str] = field(default_factory=dict)
     # For placed elements: what they were placed on ({"exhibit", "anchor"} / {"heading"} / {"beside"})
     placed_on: dict[str, dict] = field(default_factory=dict)
+    # CY documents shown on this tab, as (source file, page)
+    shown: list[tuple[str, int]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +416,7 @@ def apply_tab(
         if frame:
             final[frame.id] = _absolute(anchor_of(frame), box)
         placed[exhibit.id] = PlacedExhibit(exhibit, box, image)
+        report.shown.append((exhibit.source_file, exhibit.page))
         new_box[pic.id] = box
 
     # --- CY exhibits with no PY slot: below everything, the PY's slot size ---
@@ -445,6 +448,7 @@ def apply_tab(
                 fr = re.sub(r'(<(?:\w+:)?cNvPr\b[^>]*\bid=")\d+(")', rf"\g<1>{91000 + n}\2", frame_xml, count=1)
                 appended.append(_absolute(fr, box))
             placed[exhibit.id] = PlacedExhibit(exhibit, box, image)
+            report.shown.append((exhibit.source_file, exhibit.page))
 
     # --- elements: exactly what the model decided ---
     body: dict[str, str] = {}

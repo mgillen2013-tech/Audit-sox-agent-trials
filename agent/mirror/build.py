@@ -455,6 +455,7 @@ def mirror_workpaper(
 
     edited_tabs: set[str] = set()
     checks: list[tuple[str, list, str]] = []   # (tab, text changes, facts) for the final model pass
+    shown: dict[tuple[str, int], list[str]] = {}  # CY document -> tabs it is shown on
 
     def relocate(exhibit: Exhibit, wanted: str, lines: list[str]) -> str | None:
         """A second look (short answer, cheap): which exact text on this
@@ -487,7 +488,9 @@ def mirror_workpaper(
         prompt = tab_prompt(tab, purpose=purpose, facts_lines=_facts_lines(f, facts, spec), exhibits=exhibits,
                             marks=marks, picture_notes=pic_notes, grid=g, skip_rows=skip)
         raw, err = call_model(client, model, prompt, ledger=ledger, label=f"tab {tab.name}")
-        plan = validate(raw, tab, {x.id for x in exhibits}, error=err)
+        plan = validate(raw, tab, {x.id for x in exhibits}, error=err,
+                        shown_elsewhere={x.id for x in exhibits
+                                         if any(t != tab.name for t in shown.get((x.source_file, x.page), []))})
         report = ApplyReport()
         if tab.drawing_part:
             report = apply_tab(work, tab, plan, {x.id: x for x in exhibits}, str(support_dir),
@@ -512,6 +515,8 @@ def mirror_workpaper(
             support_rows.append({**s, "tab": tab.name,
                                  "cy": f"{x.source_file} p.{x.page + 1}" if x else ""})
         checks.append((tab.name, report.text_changes, "\n".join(_facts_lines(f, facts, spec))))
+        for doc in report.shown:
+            shown.setdefault(doc, []).append(tab.name)
         edited_tabs.add(tab.name)
         return plan, report
 
@@ -574,6 +579,15 @@ def mirror_workpaper(
     locations = _cy_text_locations(work, edited_tabs)
     flags.extend(verify.leftover_scan(py_fact_list, locations, cy_fact_text, common))
     candidates = verify.name_hits(py_name_candidates, locations, cy_fact_text)
+    # Each CY document shown once: anything on more than one tab is flagged
+    # (a PY slot can still be given a document shown elsewhere, if the PY
+    # really did repeat it -- the reviewer confirms).
+    for (src, page), tabs_ in sorted(shown.items()):
+        if len(set(tabs_)) > 1:
+            flags.append(verify.CheckFlag("medium", ",".join(sorted(set(tabs_))), "-",
+                                          f"{src} p.{page + 1} is shown on {len(set(tabs_))} tabs -- confirm it "
+                                          "belongs on each", "placement"))
+
     # Tickmarks: cited in text <-> placed on evidence, across each selection's tabs.
     py_labels = verify.py_cited_labels([t for t in build_inventory(str(output_path) + ".pyread").tabs]) \
         if os.path.isdir(str(output_path) + ".pyread") else set()

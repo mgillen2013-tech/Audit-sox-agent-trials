@@ -168,12 +168,14 @@ class Stub:
     wording, exhibits by role, TM1 (and its box) onto the CY total, and
     compares support."""
 
-    def __init__(self, reply=None, structure=None, anchor="14,945.60", relocate_answer=""):
+    def __init__(self, reply=None, structure=None, anchor="14,945.60", relocate_answer="",
+                 paste_everything=False):
         self.prompts: list[str] = []
         self.reply = reply
         self.structure = structure
         self.anchor = anchor
         self.relocate_answer = relocate_answer
+        self.paste_everything = paste_everything
         self.messages = self
 
     def create(self, **kw):
@@ -188,7 +190,12 @@ class Stub:
         elif self.reply is not None:
             text = self.reply
         else:
-            text = json.dumps(self._edit(user, self.anchor))
+            plan = self._edit(user, self.anchor)
+            # A model that pastes every exhibit as an "extra" on every tab --
+            # what a real run did on the lead sheet.
+            if self.paste_everything:
+                plan["extra_exhibits"] = re.findall(r"^- (X\d+): ", user, re.M)
+            text = json.dumps(plan)
 
         class _B:
             type = "text"
@@ -241,7 +248,7 @@ class Stub:
                 "support": support, "tickmarks": tickmarks, "notes": []}
 
 
-def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listing=None):
+def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listing=None, extra_support=()):
     py = make_py(tmp)
     _page(tmp / "cy_invoice.png", ["INVOICE", "Invoice 9850995", "Total 14,945.60"])
     _page(tmp / "cy_approval.png", ["APPROVAL", "Approved by Jane Doe", "on 06/20/2026"])
@@ -250,7 +257,10 @@ def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listin
                          "Amount": "14945.60", "Customer Name": "Berkowski and Associates Inc"}
     manifests = {"TS-1": SamplePopulationManifest(test_step_id="TS-1", sample_size=len(samples), samples=[
         SampleItem(sample_id=s, test_step_id="TS-1", identifying_details="x", key_fields=dict(fields)) for s in samples])}
-    spec = {"control_id": "CI.9", "test_steps": [{"test_step_id": s, "test_step_text": s} for s in steps]}
+    for name in extra_support:
+        _page(tmp / name, ["REMITTANCE", "Payment 14,945.60"])
+    spec = {"control_id": "CI.9", "test_steps": [{"test_step_id": s, "test_step_text": s} for s in steps],
+            "cy_support_files": ["cy_invoice.png", "cy_approval.png", *extra_support]}
     stub = stub or Stub()
     out = mirror_workpaper(spec, results, py, tmp / "CY.xlsx", tmp, manifests, stub, "m",
                            summary_rows_fn=None)
@@ -532,3 +542,37 @@ def test_citations_are_matched_as_whole_tokens():
     assert not _cites("See TM 22.", "TM 2") and not _cites("ATM2X", "TM2")
     # Marks keep their capitals; ordinary words do not cite them.
     assert not _cites("a credit memo was issued", "A") and _cites("A - invoice agrees", "A")
+
+
+
+# --------------------------------------------------------------------------
+# Support is not duplicated
+# --------------------------------------------------------------------------
+
+
+def _pictures_on(path: Path, tab: str, tmp: Path) -> int:
+    work = tmp / f"pics_{tab}"
+    ox.extract_template(str(path), str(work))
+    t = next(t for t in build_inventory(str(work)).tabs if t.name == tab)
+    return len(t.by_kind("picture"))
+
+
+def test_support_is_never_pasted_onto_a_tab_where_the_py_had_no_evidence(tmp_path: Path):
+    # A real run duplicated the whole support pack onto the lead sheet.
+    _py, out, _s = _run(tmp_path, stub=Stub(paste_everything=True))
+    assert _pictures_on(out.path, "IA Lead", tmp_path) == 0
+    assert any("PY had no evidence on this tab" in n for n in out.notes)
+
+
+def test_each_document_is_shown_once_across_selection_tabs(tmp_path: Path):
+    # Two selections, and a model that pastes every exhibit everywhere: each
+    # extra page is shown on one tab only.
+    # A third, uncited support page is offered to both selections.
+    _py, out, _s = _run(tmp_path, samples=("1", "2"), stub=Stub(paste_everything=True),
+                        extra_support=("cy_remittance.png",))
+    one, two = _pictures_on(out.path, "1", tmp_path), _pictures_on(out.path, "2", tmp_path)
+    # The PY's two slots are filled on both tabs (that mirrors the PY); the
+    # extra page is shown once, not on both.
+    assert one + two == 5, (one, two)
+    assert any("already shown on another tab" in n for n in out.notes)
+    assert not any(f.found_by == "placement" and "shown on" in f.issue and "IA Lead" in f.tab for f in out.flags)

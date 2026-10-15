@@ -65,6 +65,14 @@ Format per finding: **what we saw** -> **what it means in general** ->
   matches, the PY's headings must not be overwritten -> the row is left and a
   high flag raised instead.
 
+## From real runs of the mirror engine
+
+- The whole support pack was pasted onto the lead sheet as well as the
+  selection tab -> a model offered every exhibit will use them anywhere it
+  is allowed to -> evidence is added only to tabs where the PY had
+  evidence, each CY document is shown once across the workbook, and
+  anything on more than one tab is flagged on the Mirror Check.
+
 ## Across all four
 
 - The first versions decided structure from tab names and shape text; each
