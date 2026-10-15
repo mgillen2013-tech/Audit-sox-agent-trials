@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Read `docs/STATUS.md` first.** It holds the agreed direction, the current
 state, what is not yet proven, and the method for fixing bugs. This file
 covers commands and architecture only.
-
+# Project goalWe are building a SOX Testing Preparer Agent]: .It must work for ANY valid input. The examples we use are only for testing. # Who I amI'm not a programmer. Explain changes in plain language and keep code simple. # Core rules- NEVER hardcode names, values, file paths, or logic taken from an example.- Everything specific to one dataset belongs in a config file or input, not in the code.- Before writing code, state in one sentence what general behavior it adds.- If a change only makes the current example work, stop and ask me. # Examples- Current test example: [e.g. "Control 156"]. It is a test case, not the product.- Keep examples in a separate `examples/` or `tests/` folder.- Before saying something is done, run it on at least two different examples. # Before finishing any task1. Check: would this still work if the example changed completely?2. List any assumptions you made.3. Remind me of the project goal in one line.
 ## Commands
 
 ```
@@ -101,3 +101,5 @@ cost-weighted tokens, not dollars.
   - Inserting a tab must shift `localSheetId`/`activeTab`
     (`shift_tab_positions`).
   - Only one tab may be `tabSelected`.
+ 
+  - 
