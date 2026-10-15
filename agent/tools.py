@@ -68,6 +68,11 @@ class ToolContext:
     # so ToolContext is the single source of truth for per-run state.
     model: str = ""
     required_sample_ids: list[str] = field(default_factory=list)
+    # Last year's workpaper text, and this year's text that is not evidence
+    # (test step, objective, sample listing). Used only to catch a fact from
+    # LAST year being reported as observed THIS year.
+    py_text: str = ""
+    cy_reference_text: str = ""
     last_sample_coverage: "SampleCoverage | None" = None
     tool_call_count: int = 0
 

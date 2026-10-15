@@ -1168,3 +1168,73 @@ def test_judgment_demo_runs_through_the_real_loop():
         assert "Basis:" in text and "PY comparison:    Not relied on." in text
         first_turn = _message_text(client.calls[0]["messages"][0]["content"])
         assert "benchmark" in first_turn
+
+
+# --------------------------------------------------------------------------
+# Last year's facts are never reported as this year's
+# --------------------------------------------------------------------------
+
+
+def _py_request(request_: TestStepRequest) -> TestStepRequest:
+    request_.py_support_excerpts = [
+        EvidenceItem(
+            evidence_id="py_001", source_file="PY.xlsx", source_type="excel_cell", location="Sheet1!A1",
+            extracted_text="Invoice 9578365 dated 11/04/2025 for $17,025.40, approved by Ryan Capito.",
+            extraction_confidence=1.0, preview_ref="PY.xlsx",
+        )
+    ]
+    return request_
+
+
+def test_a_value_found_only_in_the_py_is_sent_back(evidence_items, sample_manifest, request_):
+    # A real run tested last year's support: it reported last year's items
+    # as observed while citing this year's evidence ids.
+    leaked = _submit_conclusion_input(attribute_results=[{
+        "attribute": "Approval", "sample_id": "S01", "result": "satisfied",
+        "value_observed": "Invoice 9578365 approved by Ryan Capito on 11/04/2025 for $17,025.40",
+        "evidence_ids": ["ev_001"],
+    }])
+    fixed = _submit_conclusion_input(attribute_results=[{
+        "attribute": "Recalculation", "sample_id": "S01", "result": "satisfied",
+        "value_observed": "Ending balance $482,110 ties to GL export", "evidence_ids": ["ev_001"],
+    }])
+    client = FakeClient(responses=[
+        response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+        response([tool_use("t2", "submit_conclusion", leaked)]),
+        response([tool_use("t3", "submit_conclusion", fixed)]),
+    ])
+    conclusion, log = run_test_step(_py_request(request_), evidence_items, sample_manifest, client)
+    error = log[1].output["error"]
+    assert log[1].is_error and "LAST YEAR" in error
+    for value in ("9578365", "2025-11-04", "17025.4", "Ryan Capito"):
+        assert value in error, value
+    assert conclusion.attribute_results[0].value_observed.startswith("Ending balance")
+
+
+def test_values_in_both_years_and_py_comparison_notes_are_allowed(evidence_items, sample_manifest, request_):
+    request_ = _py_request(request_)
+    # The same figure in both years is this year's too; and last year's facts
+    # are exactly what py_comparison is for.
+    request_.py_support_excerpts[0].extracted_text += " Balance $482,110."
+    ok = _submit_conclusion_input(
+        conclusion_basis="PY comparison",
+        py_comparison="PY approval was by Ryan Capito on 11/04/2025; CY evidence is the same kind of recalculation.",
+        attribute_results=[{"attribute": "Recalculation", "sample_id": "S01", "result": "satisfied",
+                            "value_observed": "Ending balance $482,110 ties to GL", "evidence_ids": ["ev_001"]}],
+    )
+    client = FakeClient(responses=[
+        response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+        response([tool_use("t2", "submit_conclusion", ok)]),
+    ])
+    conclusion, log = run_test_step(request_, evidence_items, sample_manifest, client)
+    assert not any(e.is_error for e in log)
+    assert "Ryan Capito" in conclusion.py_comparison
+
+
+def test_prompt_says_the_py_items_are_last_years():
+    from agent.loop import SYSTEM_PROMPT, user_turn_sections
+
+    assert "THIS YEAR's selections against THIS YEAR's support only" in SYSTEM_PROMPT
+    req = TestStepRequest(test_step_id="1", control_id="C", control_objective_ref="C",
+                          control_objective_text="o", test_step_text="t")
+    assert "LAST YEAR's workpaper" in user_turn_sections(req)["PY support excerpts"]

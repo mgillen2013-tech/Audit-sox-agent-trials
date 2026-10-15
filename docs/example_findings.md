@@ -91,6 +91,15 @@ Format per finding: **what we saw** -> **what it means in general** ->
   (`agent/extraction/email_convert.py`); unreadable attachments are named
   in a note so the reviewer knows evidence was not seen.
 
+- A run tested last year's support: the conclusion reported last year's
+  items as observed -> the only guard checked that cited evidence_ids were
+  this year's, never the VALUES reported, and the PY-benchmark prompt drew
+  the agent's attention to last year's evidence -> at submit, any date,
+  number or name reported as observed that is in the PY workpaper but in
+  none of this year's evidence, listing or test step is sent back
+  (`_last_year_facts_reported` in `agent/loop.py`); py_comparison is the
+  only field where last year's facts may appear.
+
 ## Across all four
 
 - The first versions decided structure from tab names and shape text; each

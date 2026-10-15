@@ -35,6 +35,7 @@ from agent.schemas import (
 )
 from agent.tools import (
     ToolContext,
+    _searchable_text,
     flag_exception,
     locate_value,
     request_additional_support,
@@ -128,6 +129,12 @@ nothing you produce is final until a human approves it.
 Non-negotiables:
 - Cite only evidence returned by search_cy_support. Never invent an
   evidence_id, a quote, or a source location.
+- You test THIS YEAR's selections against THIS YEAR's support only. The PY
+  workpaper shown to you is LAST YEAR's testing of LAST YEAR's items: its
+  invoices, dates, amounts, names and documents are not this year's and
+  must never be reported as observed, in any field except py_comparison.
+  The backend rejects a conclusion that reports a value found only in the
+  PY workpaper.
 - Every turn must end in a tool call. Gather evidence with search_cy_support
   before concluding anything. When you have enough to conclude -- including
   concluding you don't -- call submit_conclusion. That is the only way this
@@ -330,8 +337,9 @@ it; this inventory is a map, not retrieved evidence.
         "CY evidence inventory": inventory_block,
         "PY conclusion": py_conclusion_line,
         "PY support excerpts": (
-            "PY support excerpts (the benchmark for what sufficient evidence looked like\n"
-            "last year -- compare the CY evidence to it, but never cite it as CY evidence):\n"
+            "LAST YEAR's workpaper (PY) -- last year's items and last year's support. It is the\n"
+            "benchmark for what sufficient evidence looked like; none of its items, dates,\n"
+            "amounts or names are this year's, and none may be reported as observed:\n"
             f"{py_excerpts}\n"
             "\n"
         ),
@@ -639,6 +647,42 @@ def _usage_tokens(usage: Any) -> int:
     )
 
 
+def _last_year_facts_reported(conclusion: SubmitConclusionInput, ctx: ToolContext) -> list[str]:
+    """Dates, numbers and names the conclusion reports as OBSERVED that come
+    from last year's workpaper and appear nowhere in this year's evidence,
+    sample listing or test step.
+
+    The citation check only proves the cited evidence_ids are this year's;
+    nothing checked the VALUES. A real run reported last year's items as
+    if they had been tested this year. py_comparison is exempt -- it is
+    where last year's facts legitimately belong.
+    """
+    if not ctx.py_text.strip():
+        return []
+    from agent.mirror.verify import _dates, _names, _numbers
+
+    cy = "\n".join([_searchable_text(i) for i in ctx.evidence_items] + [ctx.cy_reference_text])
+    cy_dates, cy_numbers, cy_lower = _dates(cy), _numbers(cy), cy.lower()
+    py = ctx.py_text
+    py_dates, py_numbers, py_lower = _dates(py), _numbers(py), py.lower()
+
+    observed = (
+        [a.value_observed for a in conclusion.attribute_results]
+        + [r.note for r in conclusion.sample_results]
+        + [c.quote_or_summary for c in conclusion.evidence_citations]
+        + [conclusion.narrative]
+    )
+    found: set[str] = set()
+    for text in observed:
+        found |= {d for d in _dates(text) if d in py_dates and d not in cy_dates}
+        found |= {n for n in _numbers(text) if n in py_numbers and n not in cy_numbers}
+        found |= {
+            name for name in _names(text)
+            if " " in name and name.lower() in py_lower and name.lower() not in cy_lower
+        }
+    return sorted(found)
+
+
 def _coverage_of(
     conclusion: SubmitConclusionInput, required_sample_ids: list[str]
 ) -> "SampleCoverage | None":
@@ -738,6 +782,17 @@ def _execute_tool(
         # ones the submitted conclusion actually addresses, so the honest
         # check is free, needs no turn, and tests what was CONCLUDED rather
         # than what was claimed.
+        if gate_error is None:
+            leaked = _last_year_facts_reported(parsed, ctx)
+            if leaked:
+                gate_error = (
+                    f"these values come from LAST YEAR's workpaper and appear nowhere in this year's "
+                    f"evidence, sample listing or test step: {leaked}. You reported them as observed this "
+                    "year. Test only this year's selections against this year's support: report what the "
+                    "CY evidence shows, or conclude insufficient_evidence and request what is missing. "
+                    "Last year's facts belong only in py_comparison."
+                )
+
         coverage = _coverage_of(parsed, ctx.required_sample_ids)
         ctx.last_sample_coverage = coverage
         if (
@@ -832,6 +887,12 @@ def run_test_step(
         evidence_items=evidence_items,
         model=model,
         required_sample_ids=[s.sample_id for s in sample_manifest.samples] if sample_manifest else [],
+        py_text="\n".join([request.py_conclusion_text] + [_searchable_text(i) for i in request.py_support_excerpts]),
+        cy_reference_text="\n".join(
+            [request.control_id, request.control_objective_text, request.test_step_text]
+            + [f"{s.sample_id} {s.identifying_details} " + " ".join(f"{k} {v}" for k, v in (s.key_fields or {}).items())
+               for s in (sample_manifest.samples if sample_manifest else [])]
+        ),
     )
 
     audit_log: list[AuditLogEntry] = []
