@@ -122,6 +122,7 @@ def _conclusion(**overrides) -> ConclusionOutput:
         additional_support_requests=[],
         confidence="high",
         confidence_rationale="Native text.",
+        conclusion_basis="CY evidence direct",
         sample_coverage=None,
         model_metadata=ModelMetadata(
             model="claude-opus-5", prompt_version="v1", timestamp="2026-09-03T00:00:00Z", tool_call_count=3
@@ -569,3 +570,19 @@ def test_formatted_text_in_the_template_survives_the_rebuild(tmp_path):
     sst.write()
     assert rich in (work / "xl" / "sharedStrings.xml").read_text()
     assert os.path.exists(work / "xl" / "sharedStrings.xml")
+
+
+def test_summary_shows_how_each_conclusion_was_reached():
+    # A reviewer must see which conclusions rest on inference or on a PY
+    # comparison, with the reasoning, without opening the raw output.
+    from agent.render_bridge import summary_rows
+
+    conclusion = _conclusion(
+        conclusion_basis="PY comparison",
+        py_comparison="Same system approval report as PY, same fields shown.",
+        judgment_notes="Approval date taken from the workflow timestamp.",
+    )
+    rows = summary_rows([("1. Verify approval.", conclusion)])
+    assert "Basis: PY comparison" in rows[0].narrative
+    assert "Same system approval report" in rows[0].narrative
+    assert "workflow timestamp" in rows[0].narrative

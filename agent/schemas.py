@@ -257,6 +257,61 @@ class _ConclusionCore(BaseModel):
     additional_support_requests: list[str]
     confidence: Literal["high", "medium", "low"]
     confidence_rationale: str
+    # HOW the conclusion was reached, so a reviewer can see at a glance which
+    # conclusions rest on a direct reading of CY evidence, which on a
+    # reasonable inference, and which on CY evidence matching what passed in
+    # the PY. Each non-direct basis must carry its own explanation (see the
+    # validators below) -- a judgment call with no stated reason cannot be
+    # reviewed.
+    conclusion_basis: Literal["CY evidence direct", "CY evidence inferred", "PY comparison"] = Field(
+        description=(
+            "'CY evidence direct': CY evidence shows each attribute outright. "
+            "'CY evidence inferred': at least one attribute rests on a "
+            "reasonable inference from CY evidence (explain it in "
+            "judgment_notes). 'PY comparison': CY evidence is substantially the "
+            "same in type, source and detail as the PY evidence that supported "
+            "the PY conclusion, and you reached the same conclusion on that "
+            "basis (explain it in py_comparison)."
+        )
+    )
+    py_comparison: str = Field(
+        default="",
+        description=(
+            "One or two sentences: the PY evidence behind the PY conclusion, how "
+            "the CY evidence compares (type, source, detail), and whether you "
+            "relied on it. If you did NOT rely on the PY, say why (redesigned "
+            "control, changed system or owner, changed population, PY was an "
+            "exception, no PY provided). Required when conclusion_basis is "
+            "'PY comparison'."
+        ),
+    )
+    judgment_notes: str = Field(
+        default="",
+        description=(
+            "Each inference you drew and why a reasonable auditor would accept "
+            "it, in a sentence or two. Required when conclusion_basis is "
+            "'CY evidence inferred'. Leave empty when nothing was inferred."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _basis_is_explained(self) -> "_ConclusionCore":
+        """A judgment a reviewer cannot see is a judgment they cannot review.
+        An inferred conclusion must say what was inferred, and one that leans
+        on the PY must say what was compared.
+        """
+        if self.conclusion_basis == "CY evidence inferred" and not self.judgment_notes.strip():
+            raise ValueError(
+                "conclusion_basis is 'CY evidence inferred' but judgment_notes is empty. "
+                "State each inference and why a reasonable auditor would accept it."
+            )
+        if self.conclusion_basis == "PY comparison" and not self.py_comparison.strip():
+            raise ValueError(
+                "conclusion_basis is 'PY comparison' but py_comparison is empty. State "
+                "which PY evidence supported the PY conclusion and how the CY evidence "
+                "compares in type, source and detail."
+            )
+        return self
 
     @model_validator(mode="after")
     def _citations_required_unless_insufficient(self) -> "_ConclusionCore":
@@ -307,6 +362,19 @@ class _ConclusionCore(BaseModel):
                 "step-wide attribute."
             )
         return self
+
+def basis_lines(conclusion: "_ConclusionCore") -> list[str]:
+    """How a conclusion was reached, as short lines for a reviewer: the
+    basis, the PY comparison and any judgment notes. One formatter so the
+    app, the Summary tab and the standalone workpaper say it the same way.
+    """
+    lines = [f"Basis: {conclusion.conclusion_basis}"]
+    if conclusion.py_comparison.strip():
+        lines.append(f"PY comparison: {conclusion.py_comparison.strip()}")
+    if conclusion.judgment_notes.strip():
+        lines.append(f"Judgment: {conclusion.judgment_notes.strip()}")
+    return lines
+
 
 class SubmitConclusionInput(_ConclusionCore):
     """The submit_conclusion tool's input_schema -- what Claude actually sends."""

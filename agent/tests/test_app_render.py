@@ -151,6 +151,7 @@ def _real_conclusion():
         additional_support_requests=["Selection 1 approval and payment support"],
         confidence="high",
         confidence_rationale="Both packages reviewed.",
+        conclusion_basis="CY evidence direct",
         sample_coverage=SampleCoverage(
             total_required=2, total_found=2, missing=[], coverage_pct=100.0, complete=True
         ),

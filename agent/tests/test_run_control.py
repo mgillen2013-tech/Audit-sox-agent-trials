@@ -83,6 +83,7 @@ def _submit_conclusion_input(**overrides) -> dict:
         additional_support_requests=[],
         confidence="high",
         confidence_rationale="Single clear source, full sample coverage.",
+        conclusion_basis="CY evidence direct",
     )
     base.update(overrides)
     return base

@@ -46,7 +46,7 @@ from agent.ooxml.models import (
     WorkpaperRequest,
 )
 from agent.narrative_styles import NarrativeStyle, build_narrative
-from agent.schemas import ConclusionOutput, SamplePopulationManifest
+from agent.schemas import ConclusionOutput, SamplePopulationManifest, basis_lines
 
 # Same patterns as agent/wordboxes.py, and for the same reasons -- see the
 # module docstring. Kept as separate constants rather than imported so the
@@ -638,7 +638,11 @@ def summary_rows(
                     # explains the step; repeating it beside every sample
                     # is the noise this column was created to remove from
                     # the narrative boxes.
-                    narrative=_terse(conclusion.narrative, 400) if first_row_of_step else "",
+                    narrative=(
+                        "\n".join([_terse(conclusion.narrative, 400)]
+                                  + [_terse(x, 400) for x in basis_lines(conclusion)])
+                        if first_row_of_step else ""
+                    ),
                     review=(reviews or {}).get(sample_id, ""),
                 )
             )

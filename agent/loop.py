@@ -47,7 +47,7 @@ from agent.schemas import validate_citations_against_transcript
 # the run at the first API call, so "a sensible general default" is worth
 # less here than "the one that works".
 DEFAULT_MODEL = "claude-opus-5"
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 MAX_TOOL_ITERATIONS = 15
 
 # Hard spending cap, in COST-WEIGHTED token units (fresh-input-token
@@ -128,14 +128,6 @@ nothing you produce is final until a human approves it.
 Non-negotiables:
 - Cite only evidence returned by search_cy_support. Never invent an
   evidence_id, a quote, or a source location.
-- "insufficient_evidence" is exactly as valid a conclusion as "satisfied" --
-  there is no penalty for concluding you don't have enough to go on, and no
-  extra justification is required for it beyond any other conclusion.
-- Prior-year (PY) testing shown to you is precedent for FORMAT and APPROACH
-  only -- what the test step looked like, what procedures were performed,
-  what "satisfied" looked like structurally. PY having passed says nothing
-  about whether this year's evidence supports the same conclusion. Evaluate
-  current-year (CY) evidence independently every time.
 - Every turn must end in a tool call. Gather evidence with search_cy_support
   before concluding anything. When you have enough to conclude -- including
   concluding you don't -- call submit_conclusion. That is the only way this
@@ -146,6 +138,53 @@ Non-negotiables:
   complete -- there is no field for it and no credit for attempting it.
   If something about the population looks wrong while you are testing,
   raise it with flag_exception like any other finding.
+
+How to reach a conclusion -- professional judgment, not literalism:
+- Stay skeptical, but conclude on the TOTALITY of the evidence the way an
+  experienced auditor would. Evidence rarely states every attribute in so
+  many words. An attribute can be supported by reasonable inference from
+  what IS there -- for example an email chain showing who approved and
+  when, a system timestamp or workflow status showing a step happened, a
+  sign-off or initials on the document, or one document corroborating
+  another.
+- For each attribute, decide which of three cases you are in:
+  (a) The CY evidence supports it directly.
+  (b) The CY evidence is incomplete, but a reasonable auditor would accept
+      it on inference. Treat this as supported, and state the inference and
+      why it is reasonable in judgment_notes.
+  (c) The evidence is missing, or it contradicts the attribute. Only this
+      is a failure: not_satisfied when the evidence contradicts it,
+      insufficient_evidence (with request_additional_support) when it is
+      missing.
+  Do not put an attribute in (c) merely because the evidence is less
+  explicit than you would like.
+- Skepticism is not reduced. Red flags (an approver who is also the
+  requester, approval dated after payment, altered or inconsistent
+  documents, values that do not agree), contradictions between documents,
+  and sampled items with no support at all are still raised with
+  flag_exception, every time. An inference never explains away a red flag
+  or a contradiction -- if the evidence points both ways, it is (c).
+
+Using the prior year (PY) as a benchmark, for each test step:
+- Identify the PY evidence that supported the PY conclusion (from the PY
+  support excerpts and PY conclusion), and compare the CY evidence to it:
+  the type of document, its source (system, report, person), and its level
+  of detail.
+- If the CY evidence is substantially the same and supports the step, reach
+  the same conclusion the PY did and cite the comparison: set
+  conclusion_basis to "PY comparison" and describe it in py_comparison. The
+  CY evidence must still be retrieved and cited -- the PY tells you what
+  sufficient evidence looked like, it is never evidence for this year.
+- Do NOT rely on the PY, and test on CY evidence alone, when any of these
+  is true: the control or process was redesigned; a system, report or
+  control owner changed; the population changed in nature; the PY result
+  for this step was itself an exception or not satisfied; or no usable PY
+  evidence was provided. Say in py_comparison which of these applied.
+- Whatever the basis, record it in conclusion_basis ("CY evidence direct",
+  "CY evidence inferred" or "PY comparison") and keep py_comparison to one
+  or two sentences. Fill py_comparison even when you did not rely on the
+  PY, saying why. If a PY comparison also involved an inference, use
+  "PY comparison" and state the inference in judgment_notes as well.
 
 {COMPANY_CONTEXT}"""
 
@@ -291,8 +330,8 @@ it; this inventory is a map, not retrieved evidence.
         "CY evidence inventory": inventory_block,
         "PY conclusion": py_conclusion_line,
         "PY support excerpts": (
-            "PY support excerpts (format/approach precedent only -- not evidence for this\n"
-            "year's conclusion):\n"
+            "PY support excerpts (the benchmark for what sufficient evidence looked like\n"
+            "last year -- compare the CY evidence to it, but never cite it as CY evidence):\n"
             f"{py_excerpts}\n"
             "\n"
         ),
@@ -425,15 +464,18 @@ TOOLS = [
         "flag_exception",
         "Record a control exception found in the evidence, independent of "
         "your narrative. Use this whenever evidence shows the control did not "
-        "operate as designed for a specific item.",
+        "operate as designed for a specific item, and for every red flag, "
+        "contradiction between documents, or sampled item with no support -- "
+        "professional judgment about incomplete evidence never replaces this.",
         FlagExceptionInput,
     ),
     _tool_def(
         "request_additional_support",
         "Request more support from the control owner when evidence is "
-        "missing, illegible, ambiguous, or the sample isn't fully covered. "
-        "This is a first-class action -- use it freely; it costs nothing to "
-        "call and is exactly as valid an outcome as concluding satisfied.",
+        "missing, illegible, or contradictory, or the sample isn't fully "
+        "covered -- case (c). Do not use it for evidence a reasonable auditor "
+        "would accept on inference (case (b)); conclude on that and explain "
+        "the inference in judgment_notes instead.",
         RequestAdditionalSupportInput,
     ),
     _tool_def(
@@ -469,7 +511,10 @@ TOOLS = [
         "out. The attributes, values, dates, names and amounts do NOT belong "
         "there -- attribute_results already carries each of them beside the "
         "tickmark that points at it on the evidence. Ask yourself how few "
-        "words can carry the key attributes, not how many you can fit.",
+        "words can carry the key attributes, not how many you can fit. "
+        "Set conclusion_basis to how you reached the conclusion, fill "
+        "py_comparison with the PY benchmark comparison (or why you did not "
+        "rely on the PY), and put every inference in judgment_notes.",
         SubmitConclusionInput,
     ),
 ]

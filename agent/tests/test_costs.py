@@ -191,6 +191,7 @@ def _conclusion_input() -> dict:
         "additional_support_requests": [],
         "confidence": "high",
         "confidence_rationale": "Native text.",
+        "conclusion_basis": "CY evidence direct",
     }
 
 

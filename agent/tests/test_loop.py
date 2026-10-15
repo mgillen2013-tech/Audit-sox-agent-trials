@@ -453,6 +453,7 @@ def _submit_conclusion_input(**overrides) -> dict:
         additional_support_requests=[],
         confidence="high",
         confidence_rationale="Native Excel source, full sample coverage.",
+        conclusion_basis="CY evidence direct",
     )
     base.update(overrides)
     return base
@@ -821,6 +822,7 @@ def test_none_cache_usage_fields_do_not_crash_token_tracking(
                     "additional_support_requests": [],
                     "confidence": "low",
                     "confidence_rationale": "Nothing relevant was found.",
+                    "conclusion_basis": "CY evidence direct",
                 })],
                 usage=none_usage,
             )
@@ -866,6 +868,7 @@ def test_on_turn_callback_fires_every_turn(evidence_items, sample_manifest, requ
                 "additional_support_requests": [],
                 "confidence": "low",
                 "confidence_rationale": "Nothing relevant was found.",
+                "conclusion_basis": "CY evidence direct",
             })]),
         ]
     )
@@ -929,6 +932,7 @@ def test_token_budget_does_not_abort_the_turn_that_actually_concludes(
                             "additional_support_requests": [],
                             "confidence": "low",
                             "confidence_rationale": "Nothing relevant was found.",
+                            "conclusion_basis": "CY evidence direct",
                         },
                     )
                 ],
@@ -1076,3 +1080,91 @@ def test_coverage_counts_an_item_addressed_by_an_attribute_alone(evidence_items,
     conclusion, audit_log = run_test_step(request_, evidence_items, manifest, client)
     assert conclusion.conclusion == "satisfied"
     assert conclusion.sample_coverage.complete is True
+
+
+# --------------------------------------------------------------------------
+# Professional judgment and the PY benchmark
+# --------------------------------------------------------------------------
+
+
+def test_prompt_separates_inference_from_failure_and_keeps_skepticism():
+    from agent.loop import SYSTEM_PROMPT
+
+    # The three cases, with only (c) a failure.
+    assert "reasonable auditor would accept" in SYSTEM_PROMPT
+    assert "Only this\n      is a failure" in SYSTEM_PROMPT
+    # Skepticism is not traded away for the looser bar.
+    assert "flag_exception" in SYSTEM_PROMPT
+    assert "never explains away a red flag" in SYSTEM_PROMPT
+
+
+def test_prompt_uses_py_as_benchmark_with_exclusions():
+    from agent.loop import SYSTEM_PROMPT
+
+    assert "precedent for FORMAT and APPROACH" not in SYSTEM_PROMPT
+    for condition in ("redesigned", "owner changed", "population changed", "exception"):
+        assert condition in SYSTEM_PROMPT
+    # The PY is a benchmark, never evidence.
+    assert "never evidence for this year" in SYSTEM_PROMPT
+
+
+def test_submit_tool_requires_a_conclusion_basis():
+    from agent.loop import TOOLS
+
+    schema = next(t for t in TOOLS if t["name"] == "submit_conclusion")["input_schema"]
+    assert "conclusion_basis" in schema["required"]
+    assert set(schema["properties"]["conclusion_basis"]["enum"]) == {
+        "CY evidence direct", "CY evidence inferred", "PY comparison",
+    }
+
+
+def test_unexplained_py_comparison_is_sent_back_then_accepted(evidence_items, sample_manifest, request_):
+    # A conclusion that leans on the PY without saying what was compared is
+    # returned to the model as an error it can fix, not silently accepted.
+    client = FakeClient(
+        responses=[
+            response([tool_use("t1", "search_cy_support", {"query": "accrual", "top_k": 5})]),
+            response([tool_use("t2", "submit_conclusion", _submit_conclusion_input(conclusion_basis="PY comparison"))]),
+            response([tool_use("t3", "submit_conclusion", _submit_conclusion_input(
+                conclusion_basis="PY comparison",
+                py_comparison="Same recalculation workbook and GL export as PY.",
+            ))]),
+        ]
+    )
+    conclusion, audit_log = run_test_step(request_, evidence_items, sample_manifest, client)
+    assert audit_log[1].is_error and "py_comparison" in audit_log[1].output["error"]
+    assert conclusion.conclusion_basis == "PY comparison"
+    assert conclusion.model_metadata.prompt_version == "v2"
+
+
+def test_judgment_demo_runs_through_the_real_loop():
+    # The demo is what a person runs to see the judgment rules on a live
+    # model; it must at least run end to end and print every new field.
+    from agent.judgment_demo import demo_controls, report
+
+    for control in demo_controls():
+        client = FakeClient(
+            responses=[
+                response([tool_use("t1", "search_cy_support", {"query": "approval", "top_k": 5})]),
+                response([tool_use("t2", "submit_conclusion", {
+                    "test_step_id": control.request.test_step_id,
+                    "control_objective_ref": control.request.control_objective_ref,
+                    "conclusion": "insufficient_evidence",
+                    "narrative": "n",
+                    "evidence_citations": [],
+                    "procedures_performed": ["p"],
+                    "sample_results": [{"sample_id": "1", "conclusion": "insufficient_evidence"}],
+                    "exceptions": [],
+                    "additional_support_requests": [],
+                    "confidence": "low",
+                    "confidence_rationale": "r",
+                    "conclusion_basis": "CY evidence direct",
+                    "py_comparison": "Not relied on.",
+                })]),
+            ]
+        )
+        conclusion, audit_log = run_test_step(control.request, control.cy_evidence, control.manifest, client)
+        text = report(control, conclusion, audit_log)
+        assert "Basis:" in text and "PY comparison:    Not relied on." in text
+        first_turn = _message_text(client.calls[0]["messages"][0]["content"])
+        assert "benchmark" in first_turn

@@ -360,6 +360,13 @@ def _render_conclusion(conclusion: ConclusionOutput) -> None:
     banner = {"satisfied": st.success, "not_satisfied": st.error, "insufficient_evidence": st.warning}
     banner[conclusion.conclusion](f"**{conclusion.conclusion.upper()}** — confidence: {conclusion.confidence}")
     st.write(conclusion.narrative)
+    # How the conclusion was reached -- direct, inferred, or by PY
+    # comparison -- with the reasoning a reviewer needs to accept or reject it.
+    st.markdown(f"**Basis:** {conclusion.conclusion_basis}")
+    if conclusion.py_comparison.strip():
+        st.markdown(f"**PY comparison:** {conclusion.py_comparison}")
+    if conclusion.judgment_notes.strip():
+        st.markdown(f"**Judgment notes:** {conclusion.judgment_notes}")
 
     if conclusion.evidence_citations:
         st.markdown("**Evidence cited:**")

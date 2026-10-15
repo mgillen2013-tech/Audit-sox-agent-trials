@@ -1266,6 +1266,11 @@ def _write_step_sheet(
     )
     put("Confidence", conclusion.confidence)
     put("Confidence rationale", conclusion.confidence_rationale)
+    put("Conclusion basis", conclusion.conclusion_basis)
+    if conclusion.py_comparison.strip():
+        put("PY comparison", conclusion.py_comparison)
+    if conclusion.judgment_notes.strip():
+        put("Judgment notes", conclusion.judgment_notes)
     if conclusion.sample_coverage:
         sc = conclusion.sample_coverage
         put(

@@ -62,6 +62,19 @@ decides every element; code applies) -> Mirror Check + Support Check tabs
 (leftover scan over every cell and shape, support comparison, final model
 pass). Fallbacks: layout builder (`agent/ooxml/`), then standalone layout.
 
+How the testing agent concludes (`agent/loop.py`, prompt v2): professional
+judgment on the totality of evidence, not literal proof. Each attribute is
+(a) supported directly, (b) supported by a reasonable inference the agent
+must state, or (c) missing or contradicted -- only (c) fails. Red flags,
+contradictions and uncovered samples are still flagged every time. The PY is
+a benchmark per test step: if the CY evidence is substantially the same as
+what supported the PY conclusion, the same conclusion follows and the
+comparison is cited; not if the control, system, owner or population changed
+or the PY step was an exception. Every conclusion records
+`conclusion_basis` (CY evidence direct / CY evidence inferred / PY
+comparison), `py_comparison` and `judgment_notes`; the Summary tab, the app
+and the standalone workpaper show them.
+
 ## Model calls: we have room to use more
 
 Run costs have been kept low (Sonnet deployment, prompt caching, and the
@@ -110,6 +123,10 @@ added -- spend should go where it buys accuracy.
 - Not yet seen: a PY with its lead sheet in cells, or tickmarks typed into
   cells (Wingdings ticks). Ask for one.
 - Visual check in Excel is the user's -- this container cannot open xlsx.
+- Judgment rules (prompt v2) are unit-tested only. Next: run
+  `python -m agent.judgment_demo` (two invented controls: CY matches PY /
+  CY does not) on a real model, then a real control, and check the basis
+  and notes read like an auditor's.
 
 ## Practicalities
 

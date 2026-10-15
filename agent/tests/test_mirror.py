@@ -157,6 +157,7 @@ def _conclusion(step: str, sample_ids: list[str], result="satisfied") -> Conclus
                             "value_observed": "Jane Doe 06/20/2026; total 14,945.60",
                             "evidence_ids": [f"e0{s}", f"e1{s}"]} for s in sample_ids],
         exceptions=[], additional_support_requests=[], confidence="high", confidence_rationale="c",
+        conclusion_basis="CY evidence direct",
         sample_coverage=None,
         model_metadata=ModelMetadata(model="m", prompt_version="v1", timestamp="t", tool_call_count=1),
     )

@@ -41,6 +41,7 @@ def _base_conclusion(**overrides) -> dict:
         additional_support_requests=[],
         confidence="high",
         confidence_rationale="Native-text source, full coverage.",
+        conclusion_basis="CY evidence direct",
         sample_coverage=SampleCoverage(
             total_required=25, total_found=25, missing=[], coverage_pct=100.0, complete=True
         ),
@@ -170,6 +171,7 @@ def _core(**overrides) -> dict:
         additional_support_requests=[],
         confidence="high",
         confidence_rationale="r",
+        conclusion_basis="CY evidence direct",
     )
     base.update(overrides)
     return base
@@ -240,3 +242,53 @@ def test_step_wide_attribute_needs_no_sample():
         )
     )
     assert c.attribute_results[0].sample_id is None
+
+
+# --------------------------------------------------------------------------
+# Conclusion basis -- how the conclusion was reached must be explained
+# --------------------------------------------------------------------------
+
+
+def test_conclusion_basis_is_required():
+    # A conclusion that does not say HOW it was reached cannot be reviewed
+    # for whether the judgment was sound.
+    core = _core()
+    del core["conclusion_basis"]
+    with pytest.raises(ValidationError, match="conclusion_basis"):
+        SubmitConclusionInput(**core)
+
+
+def test_inferred_conclusion_must_state_the_inference():
+    with pytest.raises(ValidationError, match="judgment_notes"):
+        SubmitConclusionInput(**_core(conclusion_basis="CY evidence inferred", judgment_notes="  "))
+    ok = SubmitConclusionInput(
+        **_core(
+            conclusion_basis="CY evidence inferred",
+            judgment_notes="Approval inferred from the approver's reply in the email chain.",
+        )
+    )
+    assert ok.judgment_notes
+
+
+def test_py_comparison_conclusion_must_state_the_comparison():
+    with pytest.raises(ValidationError, match="py_comparison"):
+        SubmitConclusionInput(**_core(conclusion_basis="PY comparison"))
+    ok = SubmitConclusionInput(
+        **_core(conclusion_basis="PY comparison", py_comparison="Same system report as PY, same detail.")
+    )
+    assert ok.py_comparison
+
+
+def test_basis_lines_show_only_what_was_given():
+    from agent.schemas import basis_lines
+
+    direct = SubmitConclusionInput(**_core())
+    assert basis_lines(direct) == ["Basis: CY evidence direct"]
+    compared = SubmitConclusionInput(
+        **_core(conclusion_basis="PY comparison", py_comparison="Same report.", judgment_notes="Inferred date.")
+    )
+    assert basis_lines(compared) == [
+        "Basis: PY comparison",
+        "PY comparison: Same report.",
+        "Judgment: Inferred date.",
+    ]

@@ -50,6 +50,7 @@ def results() -> dict:
         additional_support_requests=["Q4 support for the November accrual"],
         confidence="high",
         confidence_rationale="Single clear source, full sample coverage.",
+        conclusion_basis="CY evidence direct",
         sample_coverage=SampleCoverage(
             total_required=1, total_found=1, missing=[], coverage_pct=100.0, complete=True
         ),

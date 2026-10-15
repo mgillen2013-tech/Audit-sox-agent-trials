@@ -97,6 +97,7 @@ def _results(**overrides) -> dict:
         additional_support_requests=[],
         confidence="high",
         confidence_rationale="Clear.",
+        conclusion_basis="CY evidence direct",
         sample_coverage=None,
         model_metadata=ModelMetadata(
             model="claude-opus-5", prompt_version="v1", timestamp="2026-09-03T00:00:00Z", tool_call_count=3
