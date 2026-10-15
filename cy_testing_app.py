@@ -50,7 +50,7 @@ import streamlit as st
 from anthropic import AnthropicFoundry
 
 from agent.costs import TokenLedger, prices_for
-from agent.intake import build_manifest_from_any_columns, read_excel_rows
+from agent.intake import build_manifest_from_any_columns, read_excel_rows, split_test_steps
 from agent.loop import DEFAULT_MODEL, MAX_TOOL_ITERATIONS, MAX_TOTAL_TOKENS
 from agent.run_control import iter_control_results
 from agent.schemas import ConclusionOutput
@@ -263,39 +263,44 @@ if sheet_names and st.checkbox(
 
 # ── 3. Test steps ────────────────────────────────────────────────────────────
 st.header("3. Test steps")
-num_steps = st.number_input("How many test steps does this control have?", min_value=1, max_value=10, value=1, step=1)
+steps_text = st.text_area(
+    "Paste the test steps",
+    key="test_steps_text",
+    height=180,
+    placeholder='1. Verify the invoice was approved by an appropriate approver.\n'
+                '2. Agree the invoice amount to E1.',
+    help="Paste them as numbered: each number in sequence (1., 2., 3. or 1), 2), 3)) "
+         "starts a new test step. They can be on separate lines or one line.",
+)
+parsed_steps = split_test_steps(steps_text)
+if parsed_steps:
+    st.caption(f"Found {len(parsed_steps)} test step(s) -- check they split where you expect:")
+    for n, body in parsed_steps:
+        st.markdown(f"**{n}.** {body}")
 
-test_steps = []
-for i in range(int(num_steps)):
-    with st.expander(f"Test step {i + 1}", expanded=(i == 0)):
-        # The id is derived from position, not typed. It was a required
-        # field whose value the user never chose anything meaningful for --
-        # everything downstream only needs it to be unique and stable
-        # within the run, and "TS-1" is what everyone typed anyway.
-        tsid = f"TS-{i + 1}"
-        tstext = st.text_area(
-            "Test step text",
-            key=f"tstext_{i}",
-            placeholder="What this step requires you to test.",
+# Most controls draw every step's selections from one tab, so that is one
+# pick; a control whose steps use different tabs can say so.
+sample_tab_for: dict[int, str | None] = {}
+if not sheet_names:
+    st.info("Upload the sample listing above to pick the tab with the sample selections.")
+elif parsed_steps:
+    shared_tab = st.selectbox("Which tab holds the sample selections?", sheet_names, key="sampletab_all")
+    per_step = len(parsed_steps) > 1 and len(sheet_names) > 1 and st.checkbox(
+        "The test steps use different tabs", key="sampletab_per_step"
+    )
+    for n, _body in parsed_steps:
+        sample_tab_for[n] = (
+            st.selectbox(f"Tab for test step {n}", sheet_names,
+                         index=sheet_names.index(shared_tab), key=f"sampletab_{n}")
+            if per_step else shared_tab
         )
 
-        sample_tab = None
-        if sheet_names:
-            sample_tab = st.selectbox(
-                "Which tab holds this step's sample selections?",
-                sheet_names,
-                key=f"sampletab_{i}",
-            )
-        else:
-            st.info("Upload the sample listing above to pick this step's tab.")
-
-        test_steps.append(
-            {
-                "test_step_id": tsid,
-                "test_step_text": tstext,
-                "sample_tab": sample_tab,
-            }
-        )
+# The id is derived from the step's own number, not typed: everything
+# downstream only needs it unique and stable within the run.
+test_steps = [
+    {"test_step_id": f"TS-{n}", "test_step_text": body, "sample_tab": sample_tab_for.get(n)}
+    for n, body in parsed_steps
+]
 
 # ── 4. Files ──────────────────────────────────────────────────────────────
 st.header("4. Upload PY testing + CY support")
@@ -635,6 +640,8 @@ if run_clicked:
         errors.append("Fill in all of the control details.")
     if pop_sample_file is None:
         errors.append("Upload the sample listing.")
+    if not test_steps:
+        errors.append("Paste the test steps (numbered 1., 2., ...).")
     for s in test_steps:
         if not s["test_step_text"]:
             errors.append(f"Fill in the test step text for test step {s['test_step_id']}.")

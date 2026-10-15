@@ -32,6 +32,7 @@ the way a manually-typed count could.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -287,3 +288,43 @@ def build_manifest_from_any_columns(
         selection_method=selection_method,
         samples=samples,
     )
+
+
+# --------------------------------------------------------------------------
+# Test steps pasted as one numbered block
+# --------------------------------------------------------------------------
+
+# A step number, optionally written "Step 2" / "Test step 2": 1-2 digits
+# then "." or ")" (or ":" / "-"), at the start of
+# the text or after whitespace, followed by a space. "1.5" or "$1.00" never
+# match -- no space after the dot.
+_STEP_MARKER = re.compile(r"(?:^|(?<=\s))(?:(?:test\s+)?step\s*)?(\d{1,2})\s*[.):-]\s+", re.IGNORECASE)
+
+
+def split_test_steps(text: str) -> list[tuple[int, str]]:
+    """Numbered test steps pasted as one block -> [(number, text), ...].
+
+    Works whether each step is on its own line or all on one line
+    ('1. Do this 2. Do that'). Only numbers that come IN SEQUENCE start a
+    new step -- 1, then 2, then 3 -- so a number inside a step ("approved
+    within 5. business days", "the 2) items") does not split it unless it
+    is exactly the next step number. Text with no "1." at all is one step.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    starts: list[tuple[int, int, int]] = []  # (number, marker start, text start)
+    expected = 1
+    for m in _STEP_MARKER.finditer(text):
+        if int(m.group(1)) == expected:
+            starts.append((expected, m.start(), m.end()))
+            expected += 1
+    if not starts:
+        return [(1, " ".join(text.split()))]
+    steps = []
+    for i, (n, _s, body_start) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(text)
+        body = " ".join(text[body_start:end].split()).strip().strip('"“”').strip()
+        steps.append((n, body))
+    # Anything before "1." (a heading like "Test steps:") is not a step.
+    return [(n, b) for n, b in steps if b]

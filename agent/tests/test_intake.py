@@ -265,3 +265,35 @@ def test_read_excel_rows_targets_a_specific_tab(tmp_path: Path):
     # Default (no sheet_name) still reads the active sheet, unchanged
     # behavior for a single-tab file.
     assert read_excel_rows(path) == pop_rows
+
+
+# --------------------------------------------------------------------------
+# Test steps pasted as one numbered block
+# --------------------------------------------------------------------------
+
+
+def test_numbered_steps_split_on_separate_lines_or_one_line():
+    from agent.intake import split_test_steps
+
+    expected = [(1, "Verify approval."), (2, "Agree the amount to E1.")]
+    assert split_test_steps("1. Verify approval.\n2. Agree the amount to E1.") == expected
+    assert split_test_steps("1. Verify approval. 2. Agree the amount to E1.") == expected
+    assert split_test_steps('1) "Verify approval." 2) "Agree the amount to E1."') == expected
+    assert split_test_steps("Test steps:\nStep 1: Verify approval.\nStep 2: Agree the amount to E1.") == expected
+
+
+def test_numbers_inside_a_step_do_not_split_it():
+    from agent.intake import split_test_steps
+
+    steps = split_test_steps(
+        "1. Verify approval within 5. business days and $1.50 tolerance\n2. Inspect the 3 invoices"
+    )
+    assert [n for n, _ in steps] == [1, 2]
+    assert "5. business days and $1.50" in steps[0][1]
+
+
+def test_unnumbered_text_is_one_step_and_blank_is_none():
+    from agent.intake import split_test_steps
+
+    assert split_test_steps("Verify the 2 invoices were approved.") == [(1, "Verify the 2 invoices were approved.")]
+    assert split_test_steps("   ") == []

@@ -358,3 +358,15 @@ def test_a_run_cut_off_part_way_can_still_be_built_into_a_workpaper(tmp_path):
     assert "partial_run" not in at.session_state
     assert not run_dir.exists()  # staged evidence removed once used
     assert any(b.label.startswith("⬇️ Download") for b in at.get("download_button"))
+
+
+def test_pasted_numbered_steps_are_previewed_as_separate_steps():
+    at = _app().run()
+    at.text_area(key="test_steps_text").set_value(
+        '1. "Verify the invoice was approved." 2. "Agree the amount to E1."'
+    ).run()
+    assert not at.exception
+    shown = " ".join(m.value for m in at.markdown)
+    assert "**1.** Verify the invoice was approved." in shown
+    assert "**2.** Agree the amount to E1." in shown
+    assert any("Found 2 test step(s)" in c.value for c in at.caption)
