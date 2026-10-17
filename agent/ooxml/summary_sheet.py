@@ -101,7 +101,7 @@ class SummaryRow:
         lowered = self.result.strip().lower()
         if lowered.startswith("satisf"):
             return "green"
-        if any(w in lowered for w in ("exception", "not satisfied", "fail")):
+        if any(w in lowered for w in ("exception", "not satisfied", "fail", "not updated")):
             return "red"
         return "amber"
 

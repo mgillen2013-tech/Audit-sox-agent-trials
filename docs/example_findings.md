@@ -100,6 +100,17 @@ Format per finding: **what we saw** -> **what it means in general** ->
   (`_last_year_facts_reported` in `agent/loop.py`); py_comparison is the
   only field where last year's facts may appear.
 
+- A PY with five selection tabs came out with CY support on three; the
+  other two were last year's testing, unchanged -> "keep the PY content"
+  was the fallback for a failed or partial edit call and for any tab the
+  structure reading missed, which keeps the file valid but lets last
+  year's work pass for this year's, and after the check tabs were removed
+  nothing in the workbook said so -> a failed edit is retried once with
+  more room; any tab still showing last year's content (failed edit, PY
+  picture not replaced, PY tab with support that no edit touched) is
+  coloured red, listed first on the Summary as NOT UPDATED, and named in a
+  red message in the app.
+
 ## Across all four
 
 - The first versions decided structure from tab names and shape text; each

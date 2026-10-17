@@ -904,6 +904,26 @@ _AFTER_HEADER_FOOTER = (
 )
 
 
+def set_tab_color(sheet_xml_path: str, argb: str) -> None:
+    """Colour the tab's name tab at the bottom of Excel. Nothing on the
+    sheet itself moves -- it only changes how the tab looks in the tab bar.
+    <tabColor> is the first child of <sheetPr>, which is the first child
+    of <worksheet>."""
+    with open(sheet_xml_path, encoding="utf-8") as fh:
+        xml = fh.read()
+    color = f'<tabColor rgb="{argb}"/>'
+    if re.search(r"<tabColor\b[^>]*/>", xml):
+        xml = re.sub(r"<tabColor\b[^>]*/>", color, xml, count=1)
+    elif re.search(r"<sheetPr\b[^>]*/>", xml):
+        xml = re.sub(r"<sheetPr\b([^>]*)/>", rf"<sheetPr\1>{color}</sheetPr>", xml, count=1)
+    elif re.search(r"<sheetPr\b[^>]*>", xml):
+        xml = re.sub(r"(<sheetPr\b[^>]*>)", rf"\1{color}", xml, count=1)
+    else:
+        xml = re.sub(r"(<worksheet\b[^>]*>)", rf"\1<sheetPr>{color}</sheetPr>", xml, count=1)
+    with open(sheet_xml_path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+
+
 def stamp_print_header(sheet_xml_path: str, text: str) -> bool:
     """Put `text` in red, bold, centred, in the tab's printed page header.
 

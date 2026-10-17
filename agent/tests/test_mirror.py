@@ -250,8 +250,8 @@ class Stub:
 
 
 def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listing=None, extra_support=(),
-         picture_cells=("A4", "H4")):
-    py = make_py(tmp, picture_cells)
+         picture_cells=("A4", "H4"), summary=False, py=None):
+    py = py or make_py(tmp, picture_cells)
     _page(tmp / "cy_invoice.png", ["INVOICE", "Invoice 9850995", "Total 14,945.60"])
     _page(tmp / "cy_approval.png", ["APPROVAL", "Approved by Jane Doe", "on 06/20/2026"])
     results = {s: {"conclusion": _conclusion(s, list(samples)), "audit_log": []} for s in steps}
@@ -265,7 +265,7 @@ def _run(tmp: Path, *, samples=("1",), steps=("TS-1", "TS-2"), stub=None, listin
             "cy_support_files": ["cy_invoice.png", "cy_approval.png", *extra_support]}
     stub = stub or Stub()
     out = mirror_workpaper(spec, results, py, tmp / "CY.xlsx", tmp, manifests, stub, "m",
-                           summary_rows_fn=None)
+                           summary_rows_fn=(lambda names: []) if summary else None)
     return py, out, stub
 
 
@@ -644,3 +644,92 @@ def test_extra_support_pages_are_laid_out_across_on_a_real_tab(tmp_path: Path):
     tab = next(t for t in build_inventory(str(work)).tabs if t.name == "1")
     xs = [p.box.x for p in tab.by_kind("picture") if p.box.y > min(q.box.bottom for q in tab.by_kind("picture"))]
     assert len(set(xs)) >= 2, xs
+
+
+# --- last year's content never passes for this year's ---------------------
+
+
+class FailingEdits(Stub):
+    """The edit call for one tab fails `times` times (bad JSON); every
+    other call answers normally."""
+
+    def __init__(self, tab: str, times: int, **kw):
+        super().__init__(**kw)
+        self.tab, self.times, self.edit_calls = tab, times, 0
+
+    def create(self, **kw):
+        user = kw["messages"][0]["content"]
+        if user.startswith(f"PY TAB {self.tab!r}"):
+            self.edit_calls += 1
+            if self.times > 0:
+                self.times -= 1
+
+                class _B:
+                    type, text = "text", "sorry, no JSON here"
+
+                class _R:
+                    content, usage = [_B()], None
+
+                return _R()
+        return super().create(**kw)
+
+
+def _tab_colours(path: Path) -> dict[str, str | None]:
+    wb = openpyxl.load_workbook(path)
+    return {ws.title: (ws.sheet_properties.tabColor.rgb if ws.sheet_properties.tabColor else None)
+            for ws in wb.worksheets}
+
+
+def test_a_failed_tab_edit_is_retried_once(tmp_path: Path):
+    stub = FailingEdits("1", times=1)
+    _py, out, _s = _run(tmp_path, stub=stub)
+    assert stub.edit_calls == 2
+    assert _tab_colours(out.path)["1"] is None
+    assert not any("NOT UPDATED" in f.issue for f in out.flags)
+    assert any("succeeded on retry" in n for n in out.notes)
+
+
+def test_a_tab_whose_edit_fails_is_red_and_listed_first_on_the_summary(tmp_path: Path):
+    # A real run left two of five selection tabs as last year's testing,
+    # with nothing in the workbook saying so.
+    _py, out, _s = _run(tmp_path, stub=FailingEdits("1", times=2), summary=True)
+    assert _tab_colours(out.path)["1"] == "FFFF0000"
+    assert any(f.severity == "high" and f.tab == "1" and "NOT UPDATED" in f.issue for f in out.flags)
+    summary = openpyxl.load_workbook(out.path)["Summary"]
+    first = [c.value for c in summary[3]]
+    assert first[0] == "NOT UPDATED: tab 1" and first[3] == "Not updated"
+    assert "edit failed" in first[2]
+
+
+def test_a_py_tab_with_support_that_no_edit_touched_is_red(tmp_path: Path):
+    # The PY's organisation was read without one of its selection tabs: it
+    # is never edited, and still shows last year's support.
+    py = make_py(tmp_path)
+    work = tmp_path / "py_two"
+    ox.extract_template(str(py), str(work))
+    ox.clone_sheet(str(work), ox.resolve_sheets(str(work))["1"], "2", keep_drawing=True)
+    py2 = tmp_path / "PY2.xlsx"
+    ox.repackage(str(work), str(py2))
+    structure = {"tabs": [{"name": "IA Lead", "kind": "edit"}, {"name": "1", "kind": "selection"},
+                          {"name": "2", "kind": "py_evidence"}],
+                 "py_selections": [{"py_id": "1", "tabs": ["1"]}],
+                 "selection_rows": [{"tab": "1", "header_row": 1, "data_rows": [2]}],
+                 "selection_table": None, "population": None, "cy_tab_names": [["1"]], "notes": []}
+    _py, out, _s = _run(tmp_path, stub=Stub(structure=structure), py=py2)
+    colours = _tab_colours(out.path)
+    assert colours["2"] == "FFFF0000" and colours["1"] is None
+    assert any(f.tab == "2" and "still shows last year's support" in f.issue for f in out.flags)
+
+
+def test_set_tab_color_handles_every_sheetpr_shape(tmp_path: Path):
+    shapes = ['<worksheet xmlns="x"><sheetData/></worksheet>',
+              '<worksheet xmlns="x"><sheetPr/><sheetData/></worksheet>',
+              '<worksheet xmlns="x"><sheetPr codeName="S1"><pageSetUpPr fitToPage="1"/></sheetPr><sheetData/></worksheet>',
+              '<worksheet xmlns="x"><sheetPr><tabColor rgb="FF00FF00"/></sheetPr><sheetData/></worksheet>']
+    for i, xml in enumerate(shapes):
+        path = tmp_path / f"s{i}.xml"
+        path.write_text(xml)
+        ox.set_tab_color(str(path), "FFFF0000")
+        out = path.read_text()
+        assert out.count("<tabColor") == 1 and 'rgb="FFFF0000"' in out
+        assert out.index("<sheetPr") < out.index("<tabColor") < out.index("<sheetData")

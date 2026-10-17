@@ -26,13 +26,15 @@ from agent.mirror.apply import (
 )
 from agent.mirror.facts import selection_facts
 from agent.mirror.inventory import Inventory, TabInventory, build_inventory
-from agent.mirror.rewrite import RELOCATE_SYSTEM, Exhibit, SelectionFacts, call_model, tab_prompt, validate
+from agent.mirror.rewrite import (
+    RELOCATE_SYSTEM, RETRY_MAX_TOKENS, Exhibit, SelectionFacts, call_model, tab_prompt, validate,
+)
 from agent.mirror.structure import Structure, read_structure
 from agent.ooxml import imaging
 from agent.ooxml import ooxml_utils as ox
 from agent.ooxml.layout import Slot, _Grid, _row_heights
 from agent.ooxml.sample_grid import _match, plan_grid
-from agent.ooxml.summary_sheet import DRAFT_BANNER, GENERATED_HEADINGS, add_summary_sheet
+from agent.ooxml.summary_sheet import DRAFT_BANNER, GENERATED_HEADINGS, SummaryRow, add_summary_sheet
 
 MIRROR_CHECK_COLUMNS = [("A", "Severity", 10), ("B", "Tab", 16), ("C", "Item", 18),
                         ("D", "Issue", 90), ("E", "Found by", 14)]
@@ -454,6 +456,11 @@ def mirror_workpaper(
     tab_names = {f.sample_id: layout[i][0][0] for i, f in enumerate(facts) if layout[i]}
 
     edited_tabs: set[str] = set()
+    # Tabs that still show LAST year's testing or support: an edit that
+    # failed, a PY picture nobody replaced, a tab with PY evidence that was
+    # never edited. Each is turned red and listed at the top of the Summary
+    # -- last year's work must never pass for this year's.
+    stale: dict[str, list[str]] = {}
     checks: list[tuple[str, list, str]] = []   # (tab, text changes, facts) for the final model pass
     shown: dict[tuple[str, int], list[str]] = {}  # CY document -> tabs it is shown on
 
@@ -488,6 +495,17 @@ def mirror_workpaper(
         prompt = tab_prompt(tab, purpose=purpose, facts_lines=_facts_lines(f, facts, spec), exhibits=exhibits,
                             marks=marks, picture_notes=pic_notes, grid=g, skip_rows=skip)
         raw, err = call_model(client, model, prompt, ledger=ledger, label=f"tab {tab.name}")
+        if err:
+            first = err
+            raw, err = call_model(client, model, prompt, ledger=ledger, label=f"tab {tab.name} (retry)",
+                                  max_tokens=RETRY_MAX_TOKENS)
+            if err:
+                err = f"{first}; retried: {err}"
+            else:
+                notes.append(f"[{tab.name}] the edit call failed once ({first}) and succeeded on retry")
+        if err:
+            stale.setdefault(tab.name, []).append(
+                "its edit failed, so it still shows last year's testing and support")
         plan = validate(raw, tab, {x.id for x in exhibits}, error=err,
                         shown_elsewhere={x.id for x in exhibits
                                          if any(t != tab.name for t in shown.get((x.source_file, x.page), []))})
@@ -502,6 +520,10 @@ def mirror_workpaper(
         if any(c.formula for c in tab.cells.values()):
             recalc_on_open(work, sheet_path)
         notes.extend(f"[{tab.name}] {n}" for n in plan.notes + report.notes)
+        kept_pictures = [i for i in tab.by_kind("picture") if i.id in plan.unaddressed]
+        if kept_pictures and not err:
+            stale.setdefault(tab.name, []).append(
+                f"{len(kept_pictures)} of last year's support picture(s) were not replaced")
         for eid in plan.unaddressed:
             item = next((i for i in tab.items if i.id == eid), None)
             if item is not None:
@@ -607,8 +629,29 @@ def mirror_workpaper(
             flags.extend(verify.CheckFlag("low", tab_name, "-", f"possible PY name {n!r} in CY text -- check",
                                           "leftovers") for n in candidates[tab_name])
 
+    # Any tab still carrying last year's pictures that no edit touched (the
+    # PY's organisation was read without it, or it was taken for last
+    # year's evidence): it shows last year's support either way.
+    final_inv = build_inventory(work)
+    for t in final_inv.tabs:
+        if t.name not in edited_tabs and t.by_kind("picture"):
+            stale.setdefault(t.name, []).append("it was not updated and still shows last year's support")
+    sheets_now = ox.resolve_sheets(work)
+    for name, reasons in stale.items():
+        if name in sheets_now:
+            ox.set_tab_color(os.path.join(work, "xl", "worksheets", f"sheet{sheets_now[name]}.xml"), "FFFF0000")
+        flags.append(verify.CheckFlag("high", name, "-", "NOT UPDATED: " + "; ".join(reasons)
+                                      + " -- replace it with this year's before review", "last year's content"))
+
     if summary_rows_fn is not None:
-        add_summary_sheet(work, summary_rows_fn(tab_names), sst)
+        warnings = [
+            SummaryRow(test_step=f"NOT UPDATED: tab {name}", evidenced=reasons, result="Not updated",
+                       evidence_label=name, link_to=f"'{name}'!A1",
+                       narrative="This tab still shows LAST year's testing or support. Replace it with "
+                                 "this year's before the workpaper is reviewed.")
+            for name, reasons in stale.items()
+        ]
+        add_summary_sheet(work, warnings + summary_rows_fn(tab_names), sst)
     # The checks are returned to the caller (the app shows them on screen),
     # not written into the workbook: the reviewer asked for the workpaper to
     # carry only the workpaper. A previous run's check tabs, if this PY is

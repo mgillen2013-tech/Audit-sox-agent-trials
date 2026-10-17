@@ -815,6 +815,15 @@ if _out:
         # The mirror check: everything in the CY file that differs from the
         # PY beyond the facts. Shown here only -- not written into the workbook.
         _flags = _out.get("mirror_flags") or []
+        # Last year's testing left in place is the most dangerous outcome,
+        # so it is called out on its own, above everything else.
+        _stale = [f for f in _flags if str(f.get("issue", "")).startswith("NOT UPDATED")]
+        if _stale:
+            st.error(
+                f"**{len(_stale)} tab(s) still show LAST year's testing or support:** "
+                f"{', '.join(sorted({f['tab'] for f in _stale}))}. They are coloured red in the workbook "
+                "and listed at the top of its Summary. Rerun, or replace them by hand, before review."
+            )
         if _out.get("wp_mirrored") and "mirror_flags" in _out:
             _high = [f for f in _flags if f["severity"] == "high"]
             if _high:

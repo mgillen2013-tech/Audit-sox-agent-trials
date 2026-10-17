@@ -26,6 +26,9 @@ from agent.mirror.inventory import DrawingItem, TabInventory
 from agent.ooxml.layout import Slot
 
 _MAX_TOKENS = 16_000
+# A failed or cut-off edit call is tried once more with this much room: a
+# tab left unedited still shows LAST year's testing, so it is worth a retry.
+RETRY_MAX_TOKENS = 32_000
 
 SYSTEM = """\
 You update one tab of last year's (PY) SOX testing workpaper for this year
@@ -248,6 +251,8 @@ def call_model(client: Any, model: str, user: str, *, ledger: Any = None, label:
             except Exception:  # noqa: BLE001 -- observation only
                 pass
         raw = "".join(b.text for b in response.content if getattr(b, "type", "") == "text").strip()
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            return {}, "the answer was cut off for length"
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end == -1:
             return {}, "the model did not return JSON"
