@@ -733,3 +733,65 @@ def test_set_tab_color_handles_every_sheetpr_shape(tmp_path: Path):
         out = path.read_text()
         assert out.count("<tabColor") == 1 and 'rgb="FFFF0000"' in out
         assert out.index("<sheetPr") < out.index("<tabColor") < out.index("<sheetData")
+
+
+# --- Excel support reaches the workpaper as pictures -----------------------
+
+
+def _support_workbook(path: Path, *, with_picture: bool = False) -> Path:
+    wb = openpyxl.Workbook()
+    inv = wb.active
+    inv.title = "Invoice"
+    for row in (["Field", "Value"], ["INVOICE", "Invoice 9850995"], ["Total", 14945.60]):
+        inv.append(row)
+    inv["A1"].font = openpyxl.styles.Font(bold=True)
+    appr = wb.create_sheet("Approval")
+    for row in (["Field", "Value"], ["APPROVAL", "Approved by Jane Doe"], ["Date", "06/20/2026"]):
+        appr.append(row)
+    if with_picture:
+        _page(path.parent / "pasted.png", ["SCREENSHOT", "Workflow approved"])
+        appr.add_image(XLImage(str(path.parent / "pasted.png")), "E2")
+    wb.save(path)
+    return path
+
+
+def test_cited_cells_and_pasted_screenshots_become_pictures(tmp_path: Path):
+    from agent.mirror.excel_exhibits import make_exhibits
+
+    book = _support_workbook(tmp_path / "support.xlsm", with_picture=True)  # macro-enabled name
+    made = make_exhibits(book, ["Invoice!B2", "support.xlsm!Invoice!B3", "Approval!image1"], tmp_path)
+    names = [m[0] for m in made]
+    assert "_exhibits/support - Approval - picture 1.png" in names
+    table = next(m for m in made if "Invoice" in m[0])
+    assert table[0] == "_exhibits/support - Invoice rows 1-3.png"   # header row included
+    assert "Invoice 9850995" in table[1] and "14,945.60" in table[1]
+    assert set(table[2]) == {"Invoice!B2", "support.xlsm!Invoice!B3"}
+    for name in names:
+        assert Image.open(tmp_path / name).size[0] > 50
+
+
+def test_macro_enabled_workbooks_are_read(tmp_path: Path):
+    from agent.extraction import extract_excel
+    from agent.tools import _searchable_text
+
+    text = " ".join(_searchable_text(i) for i in extract_excel(_support_workbook(tmp_path / "s.xlsm")))
+    assert "Invoice 9850995" in text
+
+
+def test_excel_support_replaces_the_py_pictures(tmp_path: Path):
+    # A real run left last year's pictures on the tabs whose support was an
+    # Excel file: Excel evidence was never offered to the workpaper at all.
+    _support_workbook(tmp_path / "support.xlsx")
+    c = _conclusion("TS-1", ["1"])
+    c.evidence_citations[0].source_file, c.evidence_citations[0].location = "support.xlsx", "Invoice!A1:B3"
+    c.evidence_citations[1].source_file, c.evidence_citations[1].location = "support.xlsx", "Approval!A1:B3"
+    py = make_py(tmp_path)
+    manifests = {"TS-1": SamplePopulationManifest(test_step_id="TS-1", sample_size=1, samples=[
+        SampleItem(sample_id="1", test_step_id="TS-1", identifying_details="x", key_fields={"Doc#": "9850995"})])}
+    spec = {"control_id": "C", "test_steps": [{"test_step_id": "TS-1", "test_step_text": "t"}],
+            "cy_support_files": ["support.xlsx"]}
+    out = mirror_workpaper(spec, {"TS-1": {"conclusion": c, "audit_log": []}}, py, tmp_path / "CY.xlsx",
+                           tmp_path, manifests, Stub(), "m", summary_rows_fn=None)
+    shown = {s["cy"] for s in out.support}
+    assert shown == {"_exhibits/support - Invoice rows 1-3.png p.1", "_exhibits/support - Approval rows 1-3.png p.1"}
+    assert not any("NOT UPDATED" in f.issue for f in out.flags)

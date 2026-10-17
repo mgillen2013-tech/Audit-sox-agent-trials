@@ -347,9 +347,10 @@ if py_testing_file is not None:
             "Fix: upload the original prior-year workpaper (.xlsx) instead."
         )
 cy_support_files = st.file_uploader(
-    "CY support evidence (one or more)", type=["pdf", "xlsx", "xls", "xlsm", "msg", "eml"],
+    "CY support evidence (one or more)", type=["pdf", "xlsx", "xlsm", "msg", "eml"],
     accept_multiple_files=True,
-    help="Emails (.msg from Outlook, or .eml) are read with their attachments.",
+    help="Emails (.msg from Outlook, or .eml) are read with their attachments. "
+         "An old-format .xls workbook cannot be read: open it in Excel and save it as .xlsx first.",
 )
 ocr_scanned_pages = st.checkbox(
     "Read scanned/image-only pages with vision OCR",

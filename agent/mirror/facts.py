@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agent.mirror.excel_exhibits import EXCEL_SUFFIXES, make_exhibits
 from agent.mirror.rewrite import Exhibit, SelectionFacts
 from agent.schemas import ConclusionOutput, SamplePopulationManifest
 
@@ -77,16 +78,41 @@ def selection_facts(
             cited = {e for a in attrs for e in a.evidence_ids}
             citations = [e for e in c.evidence_citations
                          if e.sample_id in (sid, None) or e.evidence_id in cited or single]
+            key_of: dict[str, tuple[str, int]] = {}   # evidence_id -> exhibit key
+            excel: dict[str, list] = {}
             for e in citations:
+                if e.source_file.lower().endswith(EXCEL_SUFFIXES):
+                    excel.setdefault(e.source_file, []).append(e)
+                    continue
                 if not e.source_file.lower().endswith(_IMAGE_EXT):
                     continue
                 key = (e.source_file, _page(e.location))
+                key_of[e.evidence_id] = key
                 if key not in exhibits:
                     exhibits[key] = Exhibit(
                         id=f"X{len(exhibits) + 1}", source_file=e.source_file, page=key[1],
                         description=e.quote_or_summary[:240],
                         text=_page_text(support_dir / e.source_file, key[1])[:1500],
                     )
+            # Evidence read from a workbook becomes a picture too -- before
+            # this, Excel support never reached the workpaper and the PY's
+            # pictures were left in its place.
+            for name, cites in excel.items():
+                try:
+                    made = make_exhibits(support_dir / name, [c.location for c in cites], support_dir)
+                except Exception:  # noqa: BLE001 -- an unreadable workbook just has no picture
+                    continue
+                for picture, text, locs in made:
+                    key = (picture, 0)
+                    shown = [cite for cite in cites if cite.location in locs]
+                    if key not in exhibits:
+                        exhibits[key] = Exhibit(
+                            id=f"X{len(exhibits) + 1}", source_file=picture, page=0,
+                            description=("; ".join(cite.quote_or_summary for cite in shown) or name)[:240],
+                            text=text[:1500],
+                        )
+                    for cite in shown:
+                        key_of[cite.evidence_id] = key
             steps.append({
                 "test_step": step_id,
                 "test_step_text": step_text.get(step_id, ""),
@@ -94,9 +120,8 @@ def selection_facts(
                 "result_note": verdict.note if verdict else "",
                 "attributes": [
                     {"attribute": a.attribute, "result": a.result, "observed": a.value_observed,
-                     "exhibits": sorted({exhibits[(e.source_file, _page(e.location))].id
-                                         for e in citations if e.evidence_id in a.evidence_ids
-                                         and (e.source_file, _page(e.location)) in exhibits})}
+                     "exhibits": sorted({exhibits[key_of[eid]].id for eid in a.evidence_ids
+                                         if eid in key_of and key_of[eid] in exhibits})}
                     for a in attrs
                 ],
                 "exceptions": [x for x in c.exceptions if single or sid in x or f"row_{sid}" in x],

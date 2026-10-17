@@ -111,6 +111,13 @@ Format per finding: **what we saw** -> **what it means in general** ->
   coloured red, listed first on the Summary as NOT UPDATED, and named in a
   red message in the app.
 
+- Tabs whose CY support was an Excel workbook kept last year's pictures
+  -> the agent read Excel support, but only PDFs and images were offered
+  to the workpaper as pictures -> cited cells are drawn as a table picture
+  (header row, bold and fills kept) and pasted screenshots are taken out
+  as they are (`agent/mirror/excel_exhibits.py`); macro-enabled .xlsm reads
+  like .xlsx, and old .xls is refused at upload with "save as .xlsx".
+
 ## Across all four
 
 - The first versions decided structure from tab names and shape text; each
